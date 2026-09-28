@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+<title>Guarded Browser</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header id="topbar">
+  <div id="tabstrip"><div id="tabs" data-testid="tabs"></div><button id="newtab" title="New tab" data-testid="new-tab">+</button></div>
+  <div id="toolbar">
+    <button id="back" title="Back">&#8592;</button>
+    <button id="forward" title="Forward">&#8594;</button>
+    <button id="reload" title="Reload">&#8635;</button>
+    <input id="address" data-testid="address" spellcheck="false" placeholder="Enter a URL">
+    <span id="guard-badge" class="badge warn hidden" data-testid="guard-badge"></span>
+  </div>
+</header>
+<aside id="panel">
+  <div id="panel-head">
+    <strong>Agent</strong>
+    <span id="chip-guard" class="chip" data-testid="guard-status"></span>
+    <span id="chip-egress" class="chip" data-testid="egress-mode"></span>
+    <button id="open-settings" class="link" data-testid="open-settings">Settings</button>
+  </div>
+  <div id="banner-policy" class="banner danger hidden" data-testid="policy-disabled">POLICY ENGINE DISABLED (test mode). Only the egress layer protects this session.</div>
+  <div id="banner-fallback" class="banner warn hidden" data-testid="fallback-banner"></div>
+  <textarea id="task" rows="3" data-testid="task-input" placeholder="What should the agent do on this page?"></textarea>
+  <div class="row">
+    <button id="run" class="primary" data-testid="task-run">Run task</button>
+    <button id="stop" class="danger" data-testid="task-stop" disabled>Stop</button>
+    <span id="status" data-testid="task-status">idle</span>
+  </div>
+  <div id="answer" class="answer hidden" data-testid="task-answer"></div>
+  <div id="blocked" class="hidden" data-testid="blocked-hosts"></div>
+  <h3>Timeline</h3>
+  <ol id="timeline" data-testid="timeline"></ol>
+
+  <div id="confirm" class="overlay hidden" data-testid="confirm-modal" role="dialog" aria-modal="true">
+    <div class="card">
+      <h2>Confirm agent action</h2>
+      <div class="kv"><span>Action</span><code id="c-action"></code></div>
+      <div class="kv"><span>Target</span><code id="c-target"></code></div>
+      <div class="kv"><span>Destination</span><code id="c-dest" data-testid="confirm-destination"></code></div>
+      <div id="c-values"></div>
+      <ul id="c-reasons"></ul>
+      <div class="kv"><span>Judge</span><span id="c-judge"></span></div>
+      <div class="row">
+        <button id="c-approve" class="primary" data-testid="confirm-approve">Approve</button>
+        <button id="c-deny" data-testid="confirm-deny">Deny</button>
+        <button id="c-stop" class="danger" data-testid="confirm-stop">Stop task</button>
+        <span id="c-timer" class="muted"></span>
+      </div>
+      <p class="muted small">This dialog is drawn by the browser, never by the page. No answer means deny.</p>
+    </div>
+  </div>
+
+  <div id="settings" class="overlay hidden" data-testid="settings-panel">
+    <div class="card scroll">
+      <h2>Settings</h2>
+      <p class="muted small">API keys are never stored: give the <em>name</em> of an environment variable.</p>
+      <div id="settings-form"></div>
+      <div class="row">
+        <button id="s-save" class="primary" data-testid="settings-save">Save</button>
+        <button id="s-close">Close</button>
+        <span id="s-msg" class="muted"></span>
+      </div>
+    </div>
+  </div>
+</aside>
+<script src="renderer.js"></script>
+</body>
+</html>

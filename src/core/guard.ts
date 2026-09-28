@@ -3,9 +3,14 @@
 
 import { WITHHELD, type Guard, type GuardVerdict } from './types';
 
-export const CHUNK_CHARS = 1000;
+/**
+ * Chunk size in characters. Small chunks stop an injection from being diluted by surrounding
+ * benign text (measured on the fixtures: 1000-char chunks missed 2/10 injections, 200 missed 0/10).
+ */
+export const CHUNK_CHARS = 200;
 
-/** Split text into chunks of at most CHUNK_CHARS, preferring line / sentence boundaries. */
+/** Split text into chunks of at most CHUNK_CHARS, preferring line / sentence boundaries.
+ *  Whitespace is collapsed: the model scores the same text very differently with raw newlines. */
 export function chunkText(text: string, max = CHUNK_CHARS): string[] {
   const pieces = text.split(/(?<=[.!?\n])\s+/).flatMap((p) => {
     const out: string[] = [];
@@ -22,7 +27,7 @@ export function chunkText(text: string, max = CHUNK_CHARS): string[] {
     cur = cur ? `${cur} ${p}` : p;
   }
   if (cur.trim()) chunks.push(cur);
-  return chunks;
+  return chunks.map((c) => c.replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 
 type Classifier = (texts: string[], opts?: Record<string, unknown>) => Promise<Array<{ label: string; score: number }>>;
