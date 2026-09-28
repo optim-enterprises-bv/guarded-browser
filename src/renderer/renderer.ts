@@ -191,6 +191,8 @@ function showConfirm() {
   const box = $('confirm');
   if (!c) {
     box.classList.add('hidden');
+    box.removeAttribute('data-kind');
+    window.clearInterval(timerHandle);
     shownId = '';
     return;
   }
