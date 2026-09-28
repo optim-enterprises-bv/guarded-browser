@@ -5,11 +5,11 @@
 
 import http from 'node:http';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 
-export const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
+// tests always run from the repo root (vitest and playwright alike)
+export const FIXTURE_DIR = join(process.cwd(), 'test', 'fixtures');
 
 export interface Hit {
   method: string;
@@ -76,6 +76,11 @@ export async function startFixtureServers(): Promise<FixtureServers> {
     }
     if (url.pathname === '/search') {
       html(`<!doctype html><title>Search results</title><h1>Results for your search</h1><p>No products matched.</p>`);
+      return;
+    }
+    const feed = /^\/feeds\/([\w.-]+\.txt)$/.exec(url.pathname);
+    if (feed && existsSync(join(FIXTURE_DIR, 'feeds', feed[1]))) {
+      res.writeHead(200, { 'content-type': 'text/plain' }).end(readFileSync(join(FIXTURE_DIR, 'feeds', feed[1]), 'utf8'));
       return;
     }
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);

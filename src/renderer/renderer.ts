@@ -137,6 +137,7 @@ $('run').onclick = async () => {
   const text = $<HTMLTextAreaElement>('task').value.trim();
   if (!text) return;
   $('answer').classList.add('hidden');
+  $('status').removeAttribute('data-status');
   $('timeline').replaceChildren();
   try {
     await gb.invoke('agent:start', text);

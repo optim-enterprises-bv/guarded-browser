@@ -63,7 +63,8 @@ for (const el of document.querySelectorAll(SEL)) {
   if (tag === 'a' && el.href) e.href = el.href;
   if (form) {
     e.inForm = true;
-    e.formAction = (el.formAction && isSubmit ? el.formAction : form.action) || location.href;
+    // el.formAction falls back to the document URL when the attribute is absent, so check the attribute
+    e.formAction = (isSubmit && el.hasAttribute('formaction') ? el.formAction : form.action) || location.href;
     e.formMethod = (form.method || 'get').toLowerCase();
     e.formHasPassword = !!form.querySelector('input[type=password]');
   }
