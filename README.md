@@ -644,7 +644,7 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/profiles.spec.ts` (two-window isolation, delete, migration, IPC spoofing) | 7 | pass |
 | e2e | `test/e2e/profiles-hardening.spec.ts` (proxy robustness, cross-profile proxy, open/delete race, sweeps, app-wide guard settings) | 5 | pass |
 | e2e | `test/e2e/library.spec.ts` (history, bookmarks, import/export, suggestions, agent / page / profile isolation, crash clear) | 11 | pass |
-| **total** | | **238** (151 unit + 87 e2e) | **all pass** |
+| **total** | | **245** (156 unit + 89 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 
