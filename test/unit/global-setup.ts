@@ -11,7 +11,7 @@ export function setup() {
 
 export function teardown() {
   for (const name of readdirSync(tmpdir())) {
-    if (!/^gb-(agent|audit|rep|hard|smoke|prof)-/.test(name)) continue;
+    if (!/^gb-(agent|audit|rep|hard|smoke|prof|hist)-/.test(name)) continue;
     const p = join(tmpdir(), name);
     try {
       if (statSync(p).birthtimeMs >= started - 1000) rmSync(p, { recursive: true, force: true });
