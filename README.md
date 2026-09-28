@@ -199,7 +199,7 @@ task. No answer within `confirmTimeoutMs` (default 120 s) = deny; requests still
 ends are denied.
 
 ### 7. Audit log
-`<userData>/audit/session-<timestamp>.jsonl`, appended only, file mode 0600 (directory 0700); task
+`<userData>/profiles/<profile-id>/audit/session-<timestamp>.jsonl` (per profile), appended only, file mode 0600 (directory 0700); task
 secrets of kind card / secret are replaced by `[redacted]`, password-field values are masked.
 Emails and phone numbers are logged. Events: `task-start/end`,
 `planner-action`, `snapshot` (hash), `guard` (scores), `reader` (query, schema, validated output,
@@ -285,7 +285,7 @@ webRequest layer, before anything else:
 The full Hagezi TIF (2.3M domains) is available (`wildcard/tif-onlydomains.txt`) but would roughly
 double memory; the medium list is the default. The old `domains/tif.txt` path no longer exists.
 Matching: exact host plus every parent domain, lowercase, trailing dot and port stripped, IDNA →
-punycode. `<userData>/reputation/local-blocklist.txt` and `local-allowlist.txt` are user-editable;
+punycode. `<userData>/profiles/<profile-id>/reputation/local-blocklist.txt` and `local-allowlist.txt` (per profile) are user-editable;
 **the allowlist wins**. Google Safe Browsing v4 is an optional provider (settings
 `reputation.safeBrowsing`, key only from the env var named there; **disabled by default**; it sends
 top-level URLs to Google when enabled).
@@ -297,6 +297,43 @@ user overrides are ignored in agent mode, so **the agent can never get past a li
 requests to listed hosts are dropped silently. Every hit is audited with the feed name.
 
 ## Browser features
+
+### Profiles (Vivaldi / Chromium model)
+One app process; each **profile** is its own Chromium session plus its own app state, and opens in
+its **own window** (the window title and the toolbar's profile button show its name and colour).
+The profile button (or **Profiles → Manage profiles…** in the menu bar) lets you create, rename,
+recolour, **open in a new window** and delete profiles.
+
+| per profile | shared by all profiles |
+|---|---|
+| Chromium session partition `persist:profile-<uuid>` (cookies, localStorage / IndexedDB, cache, service workers, permissions, history, downloads) | the guard model (holds no user data; its enable / threshold settings come from the first profile) |
+| `userData/profiles/<uuid>/`: settings incl. model endpoints and cloud fallback, themes + schedule, egress denylist, reputation local block / allow lists, audit logs (0700 / 0600), downloads staging | the downloaded reputation **feed cache** and the feed list (public data; `userData/shared.json`) |
+| agent runtime: task, taint registry, one-shot approvals, post-task guards, pre-flight allowlist, confirmation queue | the Electron process itself |
+| egress proxy: **one proxy instance per profile** on its own port, with its own task-mode allowlist | |
+
+* **Registry**: `userData/profiles.json`, validated with zod, written atomically (temp file +
+  rename, mode 0600). Partition names of deleted profiles are kept in `retiredPartitions` and never
+  reused.
+* **First run / migration**: a `Default` profile is created. An install from before profiles is
+  migrated into it without data loss: `settings.json`, `audit/`, `downloads-pending/` and the local
+  block / allow lists move into `profiles/<uuid>/`, and the existing `persist:guarded` partition
+  becomes the default profile's partition (so cookies and site data stay). The feed cache stays
+  shared. The migration is idempotent (a crash half-way resumes with the same profile id).
+* **Delete** asks for confirmation in the requesting window (locked dialog) and is refused for the
+  last profile. It closes the profile's window, runs `session.clearStorageData()` +
+  `clearCache()`, removes the partition directory (again after a short delay, in case Chromium
+  flushes a file) and the app-state directory. Tests check both directories are gone and that a new
+  profile with the same name starts with an empty session.
+* **IPC**: every handler resolves the profile from the **sender's window** (a tab's sync channel from
+  the tab's owner); ids sent by a renderer are never used to select a profile. A test sends A's
+  profile id and A's pending confirmation id from B's window and gets only B's data / no effect on A.
+* **Isolation of the agent**: an agent task in profile A does not gate B's POSTs, B's requests are
+  not matched against A's taint registry, A's task allowlist does not restrict B, and A's
+  confirmations only appear in A's window (tested with two windows).
+* **Limits**: this is the same model as Chromium / Vivaldi profiles: separate sessions and app state
+  inside **one process**. A bug in Electron / Chromium or in this app's main process could still let
+  one profile affect another; stronger isolation would need one OS process per profile (not
+  implemented).
 
 ### Split view (tab tiling)
 Tile 2-4 tabs **side by side**, **stacked** or as a **grid** (3 tabs: two on top, one below; 4: 2x2).
@@ -453,7 +490,8 @@ model one that slipped through.)
 
 ## Models and configuration
 
-`<userData>/settings.json` (also editable in **Settings** in the agent panel). `userData` is
+`<userData>/profiles/<profile-id>/settings.json`, one per profile (also editable in **Settings** in
+that profile's window; the reputation feed list is shared in `<userData>/shared.json`). `userData` is
 Electron's per-app directory (`~/.config/guarded-browser` on Linux; override with
 `GUARDED_USER_DATA`).
 
@@ -491,7 +529,8 @@ Electron's per-app directory (`~/.config/guarded-browser` on Linux; override wit
 ```
 src/core/       agent loop, planner, reader + handles, judge, policy, taint, sanitize, guard, egress
                 proxy, reputation, llm client, config, audit (no Electron imports; unit-testable)
-src/main/       Electron main: window, tabs (WebContentsView) + split view (tile-layout.ts), isolated-world page scripts,
+src/main/       Electron main: profiles (profiles.ts registry, runtime.ts = one profile's window / session /
+                state, main.ts = shared parts + IPC by sender), tabs + split view, isolated-world page scripts,
                 confirmation broker, egress/reputation wiring, UI preload bridge, tab preload
                 (WebRTC removal), feed-parsing worker
 src/renderer/   browser chrome + agent panel (plain DOM), split-view pane chrome, themes (appearance.ts)
@@ -520,6 +559,7 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
 | unit | `test/unit/tile-layout.test.ts` (split-view geometry, incl. tiny windows 0-1440 px) | 27 | pass |
+| unit | `test/unit/profiles.test.ts` (registry, migration, validation) | 5 | pass |
 | unit | `test/unit/theme.test.ts` (colour parsing, schema, readability, contrast, agent-yellow distance, schedule) | 14 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
 | e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-4, ported, plus controls) | 30 | pass |
@@ -529,7 +569,8 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/splitview.spec.ts` (tiling + agent confined to its pane + small windows) | 5 | pass |
 | e2e | `test/e2e/themes.spec.ts` (themes + locked security styling) | 5 | pass |
 | e2e | `test/e2e/regressions-r5.spec.ts` (review round 5: split view + themes) | 6 | pass |
-| **total** | | **198** (132 unit + 66 e2e) | **all pass** |
+| e2e | `test/e2e/profiles.spec.ts` (two-window isolation, delete, migration, IPC spoofing) | 7 | pass |
+| **total** | | **210** (137 unit + 73 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 
