@@ -670,6 +670,7 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
 | unit | `test/unit/tile-layout.test.ts` (split-view geometry, incl. tiny windows 0-1440 px) | 27 | pass |
+| unit | `test/unit/model-store.test.ts` (pinned guard model: copy / download / checksum refusal) | 4 | pass |
 | unit | `test/unit/profiles.test.ts` (registry, migration, validation, sweeps, quarantine) | 8 | pass |
 | unit | `test/unit/bookmarks-history.test.ts` (stores, Netscape parser incl. malicious input and timing, search, flood limit) | 13 | pass |
 | unit | `test/unit/theme.test.ts` (colour parsing, schema, readability, contrast, agent-yellow distance, schedule) | 14 | pass |
@@ -681,10 +682,11 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/splitview.spec.ts` (tiling + agent confined to its pane + small windows) | 5 | pass |
 | e2e | `test/e2e/themes.spec.ts` (themes + locked security styling) | 5 | pass |
 | e2e | `test/e2e/regressions-r5.spec.ts` (review round 5: split view + themes) | 6 | pass |
+| e2e | `test/e2e/packaged.spec.ts` (packaged app ignores test hooks; skipped without `npm run dist`) | 1 | pass |
 | e2e | `test/e2e/profiles.spec.ts` (two-window isolation, delete, migration, IPC spoofing) | 7 | pass |
 | e2e | `test/e2e/profiles-hardening.spec.ts` (proxy robustness, cross-profile proxy, open/delete race, sweeps, app-wide guard settings) | 5 | pass |
 | e2e | `test/e2e/library.spec.ts` (history, bookmarks, import/export, suggestions, agent / page / profile isolation, crash clear) | 11 | pass |
-| **total** | | **245** (156 unit + 89 e2e) | **all pass** |
+| **total** | | **250** (160 unit + 90 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 
@@ -728,6 +730,11 @@ What the attack tests assert (planner, reader and judge scripted to be compromis
 Benign controls (shop price lookup, article summary: **0 confirmations**; contact form: exactly
 **1** confirmation, the always-confirmed submit, whose approval also covers the network-level
 submission check) complete in both unit and e2e runs.
+
+Package check (`npm run verify:package`, RPM extracted, not installed, started normally under
+xvfb): Default profile created, local page loaded through the profile proxy, guard model verified
+and loaded from the package's onnxruntime, **Chromium sandbox active** (child processes in nested PID
+namespaces with seccomp-bpf filters, no `--no-sandbox` anywhere), clean exit on SIGTERM.
 
 The reviewer's exploit specs (which assert the bypass *succeeds*) now fail against this build:
 round 1 A-E 5/5, round 2 F, G, G2, H and C2, C3 6/6, round 3 I, J, K 3/3, round 4 K2 1/1 (i2, i3, i5 were already blocked; i4 is now one confirmation).
