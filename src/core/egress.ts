@@ -108,6 +108,33 @@ export function fieldsMatch(expected: FormField[], actual: Array<[string, string
   return rest.length === 1 && rest[0] === `${sub.name}\u0000${norm(sub.value)}`;
 }
 
+/**
+ * Does this host reach the local machine? Loopback and unspecified addresses in every spelling:
+ * 127/8, 0.0.0.0, ::1, ::, IPv4-mapped IPv6 (::ffff:127.0.0.1 / ::ffff:7f00:1), localhost and
+ * *.localhost with or without a trailing dot.
+ */
+export function isLoopbackOrUnspecified(hostIn: string): boolean {
+  let h = hostIn.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h === '0') return true;
+  if (net.isIPv6(h)) {
+    try {
+      h = new URL(`http://[${h}]/`).hostname.replace(/^\[|\]$/g, ''); // canonical form
+    } catch {
+      return false;
+    }
+    if (h === '::1' || h === '::') return true;
+    const mapped = /^::ffff:(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(h);
+    if (!mapped) return false;
+    if (mapped[1]) h = mapped[1];
+    else {
+      const [a, b] = [parseInt(mapped[2], 16), parseInt(mapped[3], 16)];
+      h = `${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`;
+    }
+  }
+  if (net.isIPv4(h)) return h.startsWith('127.') || h === '0.0.0.0';
+  return false;
+}
+
 export type EgressMode = 'manual' | 'agent';
 
 export interface EgressAuditEntry {
@@ -244,10 +271,9 @@ export class EgressController {
 
   private refusedLoopback(key: string): boolean {
     const i = key.lastIndexOf(':');
-    const host = key.slice(0, i).replace(/^\[|\]$/g, '');
     const port = Number(key.slice(i + 1));
     if (!this.refusedPorts.has(port)) return false;
-    return host === 'localhost' || host.endsWith('.localhost') || host === '::1' || /^127\./.test(host) || host === '0.0.0.0' || host === '0';
+    return isLoopbackOrUnspecified(key.slice(0, i));
   }
 
   /** Host-level decision used by the proxy. */

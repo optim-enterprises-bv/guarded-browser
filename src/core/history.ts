@@ -3,11 +3,14 @@
 // stored length-capped and rendered as text only.
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { rename, rm, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
 
 export const MAX_VISITS = 20_000;
 export const MAX_TITLE = 200;
 export const MAX_URL = 2048;
+/** per origin: at most this many recorded visits per minute; extra ones are coalesced */
+export const MAX_VISITS_PER_ORIGIN_PER_MIN = 30;
 
 export type VisitSource = 'user' | 'page' | 'agent';
 
@@ -67,6 +70,11 @@ export class HistoryStore {
         const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
         if (r.success) this.data = r.data;
         else this.loadError = r.error.issues[0]?.message ?? 'invalid';
+        // "clear on exit" must hold after a crash too: clear at load if the last exit did not
+        if (this.data.clearOnExit && this.data.visits.length) {
+          this.data.visits = [];
+          this.flush();
+        }
       } catch (e) {
         this.loadError = (e as Error).message;
       }
@@ -82,9 +90,24 @@ export class HistoryStore {
     this.flush();
   }
 
-  /** Record one top-level visit. Returns false when the URL is not recordable. */
+  private recent = new Map<string, number[]>();
+
+  /**
+   * Record one top-level visit. Returns false when the URL is not recordable. A page navigating
+   * itself in a loop cannot flood history and evict real entries: beyond
+   * MAX_VISITS_PER_ORIGIN_PER_MIN visits per origin and minute, visits are coalesced (not stored).
+   */
   record(url: string, title: string, source: VisitSource, t = Date.now()): boolean {
     if (!recordable(url)) return false;
+    const origin = new URL(url).origin;
+    const times = (this.recent.get(origin) ?? []).filter((x) => t - x < 60_000);
+    if (times.length >= MAX_VISITS_PER_ORIGIN_PER_MIN) {
+      this.recent.set(origin, times);
+      return false;
+    }
+    times.push(t);
+    this.recent.set(origin, times);
+    if (this.recent.size > 1000) this.recent.delete(this.recent.keys().next().value!);
     this.data.visits.push({ url, title: cleanTitle(title), t, source });
     if (this.data.visits.length > MAX_VISITS) this.data.visits.splice(0, this.data.visits.length - MAX_VISITS);
     this.save();
@@ -170,16 +193,36 @@ export class HistoryStore {
     this.flush();
   }
 
+  private writing: Promise<void> = Promise.resolve();
+  /** bumped by every write; an older asynchronous write never replaces a newer file */
+  private gen = 0;
+
+  /** Debounced, asynchronous atomic write: recording never blocks the main thread on disk I/O. */
   private save() {
-    this.timer ??= setTimeout(() => this.flush(), 1000);
+    this.timer ??= setTimeout(() => {
+      this.timer = null;
+      const json = JSON.stringify(this.data);
+      const mine = ++this.gen;
+      const tmp = `${this.file}.tmp-${process.pid}-a${mine}`;
+      this.writing = this.writing
+        .then(() => writeFile(tmp, json, { mode: 0o600 }))
+        .then(() => (mine === this.gen ? rename(tmp, this.file) : rm(tmp, { force: true })))
+        .catch(() => undefined);
+    }, 2000);
   }
 
-  /** Atomic write (temp file + rename, 0600). */
+  /** Synchronous atomic write (temp file + rename, 0600): used for deletes and at exit. */
   flush() {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    this.gen++;
     const tmp = `${this.file}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
     renameSync(tmp, this.file);
+  }
+
+  /** Wait for pending asynchronous writes (tests / shutdown). */
+  async settled() {
+    await this.writing;
   }
 }

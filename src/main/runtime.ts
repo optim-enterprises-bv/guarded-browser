@@ -23,7 +23,9 @@ import { ISOLATED_WORLD } from './page-scripts';
 import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type Theme } from '../core/theme';
 import type { Profile } from './profiles';
 import { HistoryStore, recordable } from '../core/history';
-import { BAR_ID, BookmarkStore, OTHER_ID } from '../core/bookmarks';
+import { BAR_ID, BookmarkStore, OTHER_ID, type ParsedImport } from '../core/bookmarks';
+import { Worker } from 'node:worker_threads';
+import { lookup } from 'node:dns/promises';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Handler = (e: any, ...args: any[]) => unknown;
@@ -805,6 +807,26 @@ function registerIpc() {
       return { ok: false, error: (e as Error).message.slice(0, 200) };
     }
   };
+  /** Parse in a worker with a time budget; only the (re-validated) result touches the store. */
+  const importInWorker = (html: string, folder: string) =>
+    new Promise<{ ok: boolean; error?: string; result?: unknown }>((resolve) => {
+      if (html.length > 5 * 1024 * 1024) return resolve({ ok: false, error: 'bookmark file larger than 5 MB' });
+      const w = new Worker(join(__dirname, 'import-worker.js'), { workerData: { html } });
+      const timer = setTimeout(() => {
+        void w.terminate();
+        resolve({ ok: false, error: 'import took too long and was stopped' });
+      }, 5000);
+      w.once('message', (m: { ok: boolean; parsed?: ParsedImport; error?: string }) => {
+        clearTimeout(timer);
+        void w.terminate();
+        if (!m.ok || !m.parsed) return resolve({ ok: false, error: m.error ?? 'import failed' });
+        resolve(wrap(() => bookmarks.importParsed(m.parsed!, folder)));
+      });
+      w.once('error', (e) => {
+        clearTimeout(timer);
+        resolve({ ok: false, error: (e as Error).message.slice(0, 200) });
+      });
+    });
   const RANGES = new Set(['hour', 'day', 'week', 'all']);
   const SOURCES = new Set(['user', 'page', 'agent']);
   on('history:list', (_e, q: unknown, source: unknown) => ({
@@ -819,8 +841,10 @@ function registerIpc() {
   });
   on('history:open', (_e, url: unknown, newTab: unknown) => openUrl(String(url), newTab === true));
   on('bookmarks:tree', () => ({ roots: bookmarks.tree(), showBar: bookmarks.showBar }));
-  on('bookmarks:add', (_e, parent: unknown, title: unknown, url: unknown, nickname: unknown) =>
-    wrap(() => bookmarks.addBookmark(String(parent ?? BAR_ID), String(title ?? ''), String(url ?? ''), nickname ? String(nickname) : undefined)),
+  on('bookmarks:add', async (_e, parent: unknown, title: unknown, url: unknown, nickname: unknown) =>
+    (await nicknameResolves(nickname))
+      ? { ok: false, error: `"${String(nickname)}" resolves as a host name on this network; choose another nickname` }
+      : wrap(() => bookmarks.addBookmark(String(parent ?? BAR_ID), String(title ?? ''), String(url ?? ''), nickname ? String(nickname) : undefined)),
   );
   on('bookmarks:add-current', () => {
     const t = tabs.active();
@@ -830,8 +854,19 @@ function registerIpc() {
     return wrap(() => bookmarks.addBookmark(BAR_ID, t?.wc.getTitle() ?? url, url));
   });
   on('bookmarks:add-folder', (_e, parent: unknown, title: unknown) => wrap(() => bookmarks.addFolder(String(parent ?? OTHER_ID), String(title ?? ''))));
-  on('bookmarks:update', (_e, id: unknown, patch: unknown) => {
+  /** a nickname must not be a word that resolves as a host on this network (e.g. an intranet name) */
+  const nicknameResolves = async (nick: unknown): Promise<boolean> => {
+    if (typeof nick !== 'string' || !nick) return false;
+    try {
+      await Promise.race([lookup(nick), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 500))]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  on('bookmarks:update', async (_e, id: unknown, patch: unknown) => {
     const p = (patch ?? {}) as Record<string, unknown>;
+    if (await nicknameResolves(p.nickname)) return { ok: false, error: `"${String(p.nickname)}" resolves as a host name on this network; choose another nickname` };
     return wrap(() =>
       bookmarks.update(String(id), {
         ...(p.title !== undefined ? { title: String(p.title) } : {}),
@@ -849,16 +884,15 @@ function registerIpc() {
     const b = bookmarks.all().find((x) => x.id === String(id));
     return b ? openUrl(b.url, newTab === true) : { ok: false, error: 'no such bookmark' };
   });
-  on('bookmarks:import', (_e, html: unknown, folder: unknown) => {
+  on('bookmarks:import', async (_e, html: unknown, folder: unknown) => {
     if (typeof html !== 'string') return { ok: false, error: 'expected text' };
-    return wrap(() => bookmarks.importNetscape(html, folder ? String(folder) : 'Imported'));
+    return importInWorker(html, folder ? String(folder) : 'Imported');
   });
   on('bookmarks:import-file', async () => {
     const r = await dialog.showOpenDialog(win, { title: 'Import bookmarks (HTML)', filters: [{ name: 'Bookmarks HTML', extensions: ['html', 'htm'] }], properties: ['openFile'] });
     if (r.canceled || !r.filePaths[0]) return { ok: false, error: 'cancelled' };
     if (statSync(r.filePaths[0]).size > 5 * 1024 * 1024) return { ok: false, error: 'file larger than 5 MB' };
-    const html = readFileSync(r.filePaths[0], 'utf8');
-    return wrap(() => bookmarks.importNetscape(html, 'Imported'));
+    return importInWorker(readFileSync(r.filePaths[0], 'utf8'), 'Imported');
   });
   on('bookmarks:export', () => bookmarks.exportNetscape());
   on('bookmarks:export-file', async () => {

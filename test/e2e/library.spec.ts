@@ -113,7 +113,7 @@ test('import / export round trip; malicious entries are dropped; titles stay tex
   const evil = html.replace('</DL><p>\n</DL><p>', `<DT><A HREF="javascript:alert(document.cookie)">steal</A>\n<DT><A HREF="data:text/html,<script>alert(1)</script>">d</A>\n<DT><A HREF="https://ok.example/"><img src=x onerror=alert(1)>ok<script>alert(2)</script></A>\n</DL><p>\n</DL><p>`);
   await a.ui.fill('[data-testid=bookmarks-io]', evil);
   await a.ui.click('[data-testid=bookmarks-import]');
-  await expect(a.ui.locator('[data-testid=bookmarks-msg]')).toHaveText('imported 2, skipped 2');
+  await expect(a.ui.locator('[data-testid=bookmarks-msg]')).toHaveText('imported 2, skipped 2; 1 nickname(s) not imported, set them by hand');
   const all = JSON.stringify(await inv(a.ui, 'bookmarks:tree'));
   expect(all).not.toMatch(/javascript:|data:text|onerror|<script/);
   const titles = await a.ui.locator('[data-testid=bookmark-row] .t').allTextContents();
@@ -122,7 +122,7 @@ test('import / export round trip; malicious entries are dropped; titles stay tex
   const round = await inv(a.ui, 'bookmarks:search', 'shop');
   expect(round.map((b: { url: string; nickname?: string }) => [b.url, b.nickname ?? null])).toEqual([
     [`${site}/shop?a=1&b=2`, 'shop'],
-    [`${site}/shop?a=1&b=2`, null], // the imported copy (nicknames stay unique)
+    [`${site}/shop?a=1&b=2`, null], // the imported copy: nicknames are never imported
   ]);
 });
 
@@ -180,7 +180,11 @@ test('address bar: nickname jumps to the bookmark; suggestions list bookmarks an
   await expect(a.ui.locator('[data-testid=suggestion][data-kind=history]')).toContainText('visited-page');
   await a.ui.fill('[data-testid=address]', '');
   await a.ui.keyboard.type('docs');
-  await expect(a.ui.locator('[data-testid=suggestion]').first()).toHaveAttribute('data-kind', 'nickname');
+  const nick = a.ui.locator('[data-testid=suggestion]').first();
+  await expect(nick).toHaveAttribute('data-kind', 'nickname');
+  // the destination is visible and highlighted before Enter
+  await expect(nick).toHaveClass(/sel/);
+  await expect(nick).toContainText(`${site}/docs`);
   await a.ui.keyboard.press('Enter');
   await expect(a.ui.locator('[data-testid=tab]').first()).toContainText('Title of /docs');
   await expect(a.ui.locator('[data-testid=suggestions]')).toBeHidden();
@@ -284,4 +288,42 @@ test('Ctrl+H and Ctrl+D also work while a web page has keyboard focus', async ()
   await press('D');
   await expect(a.ui.locator('[data-testid=bookmarks-panel]')).toBeVisible();
   await expect.poll(async () => JSON.stringify(await inv(a!.ui, 'bookmarks:tree'))).toContain('/focus-me');
+});
+
+test('review: nicknames cannot take over local host names; a 5 MB import runs off the main thread', async () => {
+  a = await launch({ llmUrl: mock.url });
+  for (const bad of ['localhost', 'wpad', 'intranet']) {
+    const r = await inv(a.ui, 'bookmarks:add', 'bar', 'x', `${site}/x`, bad);
+    expect(r.ok, bad).toBe(false);
+    expect(r.error).toMatch(/reserved|resolves as a host/);
+  }
+  const pad = 'x'.repeat(100);
+  const body = Array.from({ length: 30_000 }, (_, i) => `<DT><A HREF="https://e${i}.example/" SHORTCUTURL="n${i}">${pad}</A>`).join('\n');
+  const html = `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${body}\n</DL>`.slice(0, 5 * 1024 * 1024 - 10);
+  const t0 = Date.now();
+  const importing = inv(a.ui, 'bookmarks:import', html);
+  // the main process keeps answering while the worker parses
+  const tPing = Date.now();
+  await inv(a.ui, 'state:get');
+  expect(Date.now() - tPing).toBeLessThan(1000);
+  const r = await importing;
+  expect(r.ok).toBe(true);
+  expect(r.result.imported).toBe(10_000 - 1); // the "Imported" folder itself takes one slot
+  expect(r.result.nicknamesDropped).toBe(10_000);
+  expect(Date.now() - t0).toBeLessThan(5000);
+  expect(JSON.stringify(await inv(a.ui, 'bookmarks:search', 'e42.example'))).not.toContain('nickname');
+});
+
+test('review: "clear history on exit" also holds after a crash', async () => {
+  a = await launch({ llmUrl: mock.url, startUrl: `${site}/before-crash`, keepUserData: true });
+  await expect(a.ui.locator('[data-testid=tab]').first()).toContainText('Title of /before-crash');
+  await inv(a.ui, 'history:clear-on-exit', true);
+  await go(a.ui, `${site}/also-before-crash`);
+  await a.ui.waitForTimeout(2500); // let the debounced write land
+  const ud = a.userData;
+  a.app.process().kill('SIGKILL'); // no clean exit: dispose() never runs
+  await new Promise((r) => setTimeout(r, 500));
+  a = undefined;
+  a = await launch({ llmUrl: mock.url, userData: ud });
+  expect((await inv(a.ui, 'history:list', '', '')).groups).toEqual([]);
 });

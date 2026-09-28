@@ -331,7 +331,8 @@ recolour, **open in a new window** and delete profiles.
   not matched against A's taint registry, A's task allowlist does not restrict B, and A's
   confirmations only appear in A's window (tested with two windows).
 * **Proxies**: each profile's proxy refuses every profile's proxy port (its own included) as a
-  destination, so a page in one profile cannot relay through another profile's proxy; malformed or
+  destination in every loopback spelling (127/8 incl. `127.1` and integer forms, `0.0.0.0`, `::1`,
+  `::`, IPv4-mapped `::ffff:127.0.0.1`, `localhost` / `*.localhost` with or without a trailing dot), so a page in one profile cannot relay through another profile's proxy; malformed or
   origin-form requests get `400`, and every proxy handler is exception-safe. Main additionally
   logs any uncaught exception / unhandled rejection (stderr + each open profile's audit log) instead
   of exiting. A per-profile Proxy-Authorization secret was **not** added: Chromium only sends proxy
@@ -362,20 +363,30 @@ Per profile, stored in the profile's app-state directory as JSON (`history.json`
   AGENT badge). The reputation interstitial, internal pages, `data:` and `blob:` URLs are never
   recorded. Side panel grouped by day with search (URL + title), a source filter, open / open in new
   tab / delete, delete by range (last hour / day / week / all) and "clear history when this profile's
-  window closes". Titles are page-controlled: stored control-character-free and capped at 200
-  characters, and always rendered as text.
+  window closes" (which also clears at the next start if the app crashed before it could). Titles
+  are page-controlled: stored control-character-free and capped at 200 characters, and always
+  rendered as text. A page cannot flood history: at most 30 visits per origin and minute are
+  recorded (extra ones are coalesced), and history is written asynchronously (debounced, atomic).
 * **Bookmarks** (*Bookmarks* in the toolbar, the star in the address bar, **Ctrl+D** to bookmark
   the current page, **Ctrl+Shift+B** to toggle the bookmarks bar): nested folders (max depth 20,
   max 10 000 nodes), a bookmarks bar under the toolbar, and a side panel with add, edit (name, URL,
   folder, optional **nickname**), delete, drag-and-drop reorder / move into folders, and search.
-  Typing a nickname in the address bar opens its bookmark; the address bar suggests matching
-  bookmarks, nicknames and history entries (the page views step aside while the list is open).
+  Typing a nickname in the address bar opens its bookmark; while you type, the nickname's row is
+  highlighted in the suggestions **with its destination URL**, so you see where Enter goes. The
+  address bar also suggests matching bookmarks and history entries (the page views step aside while
+  the list is open). Nicknames are only ever set by hand: they cannot be `localhost` or other
+  reserved local / intranet words (`wpad`, `router`, `intranet`, ...), and a nickname that resolves
+  as a host name on your network is refused.
 * **Import / export** in the Netscape bookmark HTML format (what Vivaldi, Chrome and Firefox export).
   Imports are parsed strictly: only `DL` / `DT` / `H3` / `A` tags are read (scripts, styles and
   comments are removed first), only http / https URLs are accepted (`javascript:`, `data:`,
   `file:` and anything else are dropped and counted as skipped: no bookmarklets in v1), titles are
   decoded to plain text and capped, the file is capped at 5 MB, nesting beyond depth 20 is
-  flattened, and duplicate nicknames are dropped.
+  flattened, and whatever exceeds the 10 000-node cap is skipped. **Nicknames (`SHORTCUTURL`) are
+  never imported** — a shared file could otherwise bind a word like `bank` to an attacker's page —
+  and the import reports "N nickname(s) not imported, set them by hand". The parser is linear
+  (a 5 MB adversarial file parses in well under a second) and runs in a worker thread with a
+  5-second budget, so an import never freezes the windows or the confirmation timers.
 * **Favicons** in the panels use the same capped fetch (256 KB, through the profile's proxy) as the
   site accent, are decoded only in the sandboxed chrome renderer, are cached in memory only, and are
   never fetched while an agent task runs.
@@ -614,13 +625,13 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/agent.test.ts` (agent loop with compromised mock models) | 13 | pass |
 | unit | `test/unit/hardening.test.ts` (review regressions, rounds 1-5) | 25 | pass |
 | unit | `test/unit/reputation.test.ts` | 11 | pass |
-| unit | `test/unit/egress.test.ts` (proxy + content filter + robustness) | 9 | pass |
+| unit | `test/unit/egress.test.ts` (proxy + content filter + robustness + loopback spellings) | 10 | pass |
 | unit | `test/unit/taint.test.ts` | 4 | pass |
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
 | unit | `test/unit/tile-layout.test.ts` (split-view geometry, incl. tiny windows 0-1440 px) | 27 | pass |
 | unit | `test/unit/profiles.test.ts` (registry, migration, validation, sweeps, quarantine) | 8 | pass |
-| unit | `test/unit/bookmarks-history.test.ts` (stores, Netscape parser incl. malicious input, search) | 9 | pass |
+| unit | `test/unit/bookmarks-history.test.ts` (stores, Netscape parser incl. malicious input and timing, search, flood limit) | 13 | pass |
 | unit | `test/unit/theme.test.ts` (colour parsing, schema, readability, contrast, agent-yellow distance, schedule) | 14 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
 | e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-4, ported, plus controls) | 30 | pass |
@@ -632,7 +643,7 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/regressions-r5.spec.ts` (review round 5: split view + themes) | 6 | pass |
 | e2e | `test/e2e/profiles.spec.ts` (two-window isolation, delete, migration, IPC spoofing) | 7 | pass |
 | e2e | `test/e2e/profiles-hardening.spec.ts` (proxy robustness, cross-profile proxy, open/delete race, sweeps, app-wide guard settings) | 5 | pass |
-| e2e | `test/e2e/library.spec.ts` (history, bookmarks, import/export, suggestions, agent / page / profile isolation) | 9 | pass |
+| e2e | `test/e2e/library.spec.ts` (history, bookmarks, import/export, suggestions, agent / page / profile isolation, crash clear) | 11 | pass |
 | **total** | | **238** (151 unit + 87 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):

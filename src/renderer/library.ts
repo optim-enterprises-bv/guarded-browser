@@ -255,14 +255,14 @@ export function initLibrary(gb: Bridge) {
   $('b-bar').onchange = () => void gb.invoke('bookmarks:set-bar', $<HTMLInputElement>('b-bar').checked);
   $('b-import').onclick = async () => {
     const r = await gb.invoke('bookmarks:import', $<HTMLTextAreaElement>('b-io').value);
-    msg(r.ok ? `imported ${r.result.imported}, skipped ${r.result.skipped}` : `rejected: ${r.error}`);
+    msg(r.ok ? `imported ${r.result.imported}, skipped ${r.result.skipped}${r.result.nicknamesDropped ? `; ${r.result.nicknamesDropped} nickname(s) not imported, set them by hand` : ''}` : `rejected: ${r.error}`);
   };
   $('b-export').onclick = async () => {
     $<HTMLTextAreaElement>('b-io').value = await gb.invoke('bookmarks:export');
   };
   $('b-import-file').onclick = async () => {
     const r = await gb.invoke('bookmarks:import-file');
-    msg(r.ok ? `imported ${r.result.imported}, skipped ${r.result.skipped}` : r.error);
+    msg(r.ok ? `imported ${r.result.imported}, skipped ${r.result.skipped}${r.result.nicknamesDropped ? `; ${r.result.nicknamesDropped} nickname(s) not imported, set them by hand` : ''}` : r.error);
   };
   $('b-export-file').onclick = async () => {
     const r = await gb.invoke('bookmarks:export-file');
@@ -342,6 +342,13 @@ export function initLibrary(gb: Bridge) {
     for (const h of r.history) if (!r.bookmarks.some((b) => b.url === h.url)) add('history', h.title, h.url);
     sel = -1;
     if (!items.length) return hideSuggest();
+    // a typed word that is a nickname: its row is highlighted with the destination URL, so the
+    // user sees where Enter goes before pressing it
+    const first = box.querySelector('.sug');
+    if (first?.getAttribute('data-kind') === 'nickname') {
+      sel = 0;
+      first.classList.add('sel');
+    }
     const rect = addr.getBoundingClientRect();
     Object.assign(box.style, { left: `${rect.left}px`, top: `${rect.bottom + 2}px`, width: `${rect.width}px` });
     if (box.classList.contains('hidden')) {

@@ -38,6 +38,12 @@ export type Node = BookmarkNode | FolderNode;
 const ID = z.string().regex(/^(bar|other|[0-9a-f-]{36})$/);
 const Title = z.string().max(MAX_TITLE);
 export const NICK = /^[a-z0-9_-]{1,32}$/;
+/** Words a nickname may never take over: local host names and common intranet / scheme words. */
+export const RESERVED_NICKNAMES = new Set([
+  'localhost', 'local', 'localdomain', 'broadcasthost', 'ip6-localhost', 'ip6-loopback', 'wpad', 'router', 'gateway', 'modem',
+  'intranet', 'internal', 'corp', 'home', 'lan', 'nas', 'printer', 'proxy', 'dns', 'mail', 'www', 'about', 'chrome', 'file',
+  'data', 'blob', 'javascript', 'http', 'https', 'ftp', 'settings', 'history', 'bookmarks',
+]);
 
 /** http / https only, parsed and re-serialised. */
 export function safeUrl(u: unknown): string | null {
@@ -172,6 +178,7 @@ export class BookmarkStore {
   private checkNickname(nick: string | undefined, selfId?: string) {
     if (nick === undefined || nick === '') return undefined;
     if (!NICK.test(nick)) throw new Error('nickname: 1-32 of a-z 0-9 _ -');
+    if (RESERVED_NICKNAMES.has(nick)) throw new Error(`"${nick}" is reserved (it is, or could be, a host name)`);
     if (this.all().some((b) => b.nickname === nick && b.id !== selfId)) throw new Error('nickname already used');
     return nick;
   }
@@ -285,25 +292,45 @@ export class BookmarkStore {
   }
 
   /** Import a Netscape bookmark file into a new folder under "Other bookmarks". */
-  importNetscape(html: string, folderTitle = 'Imported'): { imported: number; skipped: number; folders: number } {
-    const parsed = parseNetscape(html);
-    this.ensureRoom(parsed.count + 1);
-    // nicknames must stay unique: imported ones that are already taken (or repeated) are dropped
-    const taken = new Set(this.all().map((b) => b.nickname).filter(Boolean));
-    const dedupe = (nodes: Node[]) => {
+  importNetscape(html: string, folderTitle = 'Imported') {
+    return this.importParsed(parseNetscape(html), folderTitle);
+  }
+
+  /** Store an already-parsed import (the app parses in a worker thread). Re-validated here. */
+  importParsed(parsed: ParsedImport, folderTitle = 'Imported'): { imported: number; skipped: number; folders: number; nicknamesDropped: number } {
+    const holder: FolderNode = { type: 'folder', id: randomUUID(), title: cleanTitle(folderTitle) || 'Imported', children: parsed.children, added: Date.now() };
+    const strip = (nodes: Node[]) => {
       for (const n of nodes) {
-        if (n.type === 'folder') dedupe(n.children);
-        else if (n.nickname) {
-          if (taken.has(n.nickname)) delete n.nickname;
-          else taken.add(n.nickname);
-        }
+        if (n.type === 'folder') strip(n.children);
+        else delete n.nickname; // never from a file
       }
     };
-    dedupe(parsed.children);
-    const holder: FolderNode = { type: 'folder', id: randomUUID(), title: cleanTitle(folderTitle), children: parsed.children, added: Date.now() };
-    this.folder(OTHER_ID).children.push(holder);
+    strip(holder.children);
+    const check = FolderSchema.safeParse(holder);
+    if (!check.success) throw new Error(`import rejected: ${check.error.issues[0]?.message}`);
+    const d = depthAndCount(check.data);
+    if (d.depth > MAX_DEPTH) throw new Error('import nested too deep');
+    // keep what fits under the overall cap (the holder folder counts too); the rest is skipped
+    let budget = MAX_NODES - this.countOf(this.data) - 1;
+    if (budget <= 0) throw new Error(`too many bookmarks (max ${MAX_NODES})`);
+    let kept = 0;
+    let dropped = 0;
+    const trim = (f: FolderNode) => {
+      f.children = f.children.filter((n) => {
+        if (budget <= 0) {
+          dropped += n.type === 'folder' ? 1 + depthAndCount(n).count : 1;
+          return false;
+        }
+        budget--;
+        if (n.type === 'bookmark') kept++;
+        else trim(n);
+        return true;
+      });
+    };
+    trim(check.data);
+    this.folder(OTHER_ID).children.push(check.data);
     this.save();
-    return { imported: parsed.bookmarks, skipped: parsed.skipped, folders: parsed.folders };
+    return { imported: kept, skipped: parsed.skipped + dropped, folders: parsed.folders, nicknamesDropped: parsed.nicknamesDropped };
   }
 
   exportNetscape(): string {
@@ -349,6 +376,8 @@ export interface ParsedImport {
   folders: number;
   skipped: number;
   count: number;
+  /** SHORTCUTURL nicknames present in the file and not imported */
+  nicknamesDropped: number;
 }
 
 /**
@@ -360,14 +389,17 @@ export function parseNetscape(html: string): ParsedImport {
   if (html.length > MAX_IMPORT_BYTES) throw new Error(`bookmark file larger than ${MAX_IMPORT_BYTES / 1024 / 1024} MB`);
   if (!/<!DOCTYPE\s+NETSCAPE-Bookmark-file-1>/i.test(html.slice(0, 2048)) && !/<DL\b/i.test(html)) throw new Error('not a Netscape bookmark file');
   const src = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, '');
+  // one lower-cased copy for the closing-tag searches: every search moves forward, so the whole
+  // parse is linear in the file size (the old per-tag toLowerCase() was quadratic)
+  const lower = src.toLowerCase();
   const root: FolderNode = { type: 'folder', id: randomUUID(), title: 'root', children: [], added: Date.now() };
   const stack: FolderNode[] = [root];
   let pendingFolder: FolderNode | null = null;
-  const out = { bookmarks: 0, folders: 0, skipped: 0, count: 0 };
+  const out = { bookmarks: 0, folders: 0, skipped: 0, count: 0, nicknamesDropped: 0 };
   const tagRe = /<(\/?)(dl|h3|a)\b([^>]*)>/gi;
   let m: RegExpExecArray | null;
   while ((m = tagRe.exec(src))) {
-    const [full, close, nameRaw, attrs] = m;
+    const [full, close, nameRaw] = m;
     const name = nameRaw.toLowerCase();
     if (name === 'dl') {
       if (close) {
@@ -380,13 +412,18 @@ export function parseNetscape(html: string): ParsedImport {
       continue;
     }
     if (close) continue;
-    const end = src.toLowerCase().indexOf(`</${name}`, tagRe.lastIndex);
-    const inner = src.slice(tagRe.lastIndex, end < 0 ? Math.min(src.length, tagRe.lastIndex + 1000) : end);
-    const parent = stack[stack.length - 1];
     if (out.count >= MAX_NODES) {
-      out.skipped++;
-      continue;
+      // node cap reached: stop scanning, just count what is left
+      out.skipped += 1 + (lower.slice(tagRe.lastIndex).match(/<(a|h3)\b/g) ?? []).length;
+      break;
     }
+    // the closing tag is looked for in a bounded window only (titles are capped anyway), so a file
+    // with missing or far-away closing tags cannot make every search run to the end of the file
+    const start = tagRe.lastIndex;
+    const rel = lower.slice(start, start + 4000).indexOf(`</${name}`);
+    const end = rel < 0 ? -1 : start + rel;
+    const inner = src.slice(start, end < 0 ? Math.min(src.length, start + 1000) : end);
+    const parent = stack[stack.length - 1];
     if (name === 'h3') {
       const f: FolderNode = { type: 'folder', id: randomUUID(), title: htmlText(inner) || 'Folder', children: [], added: Date.now() };
       parent.children.push(f);
@@ -400,8 +437,9 @@ export function parseNetscape(html: string): ParsedImport {
         continue;
       }
       const b: BookmarkNode = { type: 'bookmark', id: randomUUID(), title: htmlText(inner) || url, url, added: Date.now() };
-      const nick = (attr(full, 'shortcuturl') ?? '').toLowerCase();
-      if (NICK.test(nick)) b.nickname = nick;
+      // SHORTCUTURL nicknames are never imported: a shared file could bind a typed word such as
+      // "bank" to an attacker's page. The user sets nicknames by hand.
+      if (attr(full, 'shortcuturl')) out.nicknamesDropped++;
       parent.children.push(b);
       out.bookmarks++;
       out.count++;

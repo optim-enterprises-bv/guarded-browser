@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BAR_ID, BookmarkStore, MAX_DEPTH, MAX_NODES, OTHER_ID, htmlText, parseNetscape, safeUrl } from '../../src/core/bookmarks';
-import { HistoryStore, recordable } from '../../src/core/history';
+import { HistoryStore, MAX_VISITS_PER_ORIGIN_PER_MIN, recordable } from '../../src/core/history';
 
 const dirs: string[] = [];
 const tmp = () => {
@@ -125,11 +125,12 @@ describe('Netscape bookmark import / export', () => {
     expect(folder).toMatchObject({ type: 'folder', title: 'Folder & stuff' });
     const kids = folder.type === 'folder' ? folder.children : [];
     expect(kids.map((k) => (k.type === 'bookmark' ? [k.title, k.url, k.nickname ?? null] : null))).toEqual([
-      ['A <title>', 'https://a.example/', 'aa'],
+      ['A <title>', 'https://a.example/', null], // SHORTCUTURL is never imported
       ['B', 'https://b.example/x?y=1', null],
       ['C', 'http://c.example/', null],
     ]);
     expect(JSON.stringify(p)).not.toMatch(/injected|commented|javascript:|data:|file:/);
+    expect(p.nicknamesDropped).toBe(1);
   });
 
   it('caps size, node count and depth', () => {
@@ -160,10 +161,10 @@ describe('Netscape bookmark import / export', () => {
     expect(html).toContain('PERSONAL_TOOLBAR_FOLDER="true"');
     const t = new BookmarkStore(join(tmp(), 'c.json'));
     const r = t.importNetscape(html);
-    expect(r).toMatchObject({ imported: 2, skipped: 0 });
+    expect(r).toMatchObject({ imported: 2, skipped: 0, nicknamesDropped: 1 });
     const got = t.all().map((b) => [b.path, b.title, b.url, b.nickname ?? null]);
     expect(got).toEqual([
-      ['Other bookmarks/Imported/Bookmarks bar/Tools & "stuff"', 'Search <engine>', 'https://search.example/?q=a&b=c', 'srch'],
+      ['Other bookmarks/Imported/Bookmarks bar/Tools & "stuff"', 'Search <engine>', 'https://search.example/?q=a&b=c', null],
       ['Other bookmarks/Imported/Other bookmarks', 'Other', 'https://other.example/', null],
     ]);
   });
@@ -180,5 +181,70 @@ describe('Netscape bookmark import / export', () => {
   it('safeUrl accepts only http(s)', () => {
     expect(safeUrl('https://x.example')).toBe('https://x.example/');
     for (const u of ['javascript:1', ' JAVASCRIPT:alert(1)', 'data:,', 'file:///', 'chrome://settings', 'vbscript:x', '//x.example']) expect(safeUrl(u), u).toBeNull();
+  });
+});
+
+describe('review r8: parser timing, nicknames', () => {
+  it('a 5 MB adversarial file parses in well under a second (linear, stops at the node cap)', () => {
+    const pad = 'x'.repeat(100);
+    for (const tags of [8000, 30_000]) {
+      const body = Array.from({ length: tags }, (_, i) => `<DT><A HREF="https://e${i}.example/">${pad}</A>`).join('\n');
+      const html = `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n${body}\n</DL>`.slice(0, 5 * 1024 * 1024);
+      const t = Date.now();
+      const r = parseNetscape(html);
+      expect(Date.now() - t, `${tags} tags`).toBeLessThan(1000);
+      expect(r.bookmarks).toBe(Math.min(tags, MAX_NODES));
+    }
+    // no closing tags at all (every title search runs to the end of the file in the naive parser)
+    const open = `<!DOCTYPE NETSCAPE-Bookmark-file-1><DL>${'<DT><H3>t'.repeat(400_000)}`.slice(0, 5 * 1024 * 1024);
+    const t2 = Date.now();
+    parseNetscape(open);
+    expect(Date.now() - t2).toBeLessThan(1000);
+  });
+
+  it('never imports nicknames; reserved words cannot be nicknames', () => {
+    const nick = parseNetscape('<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><DT><A HREF="https://evil.example/login" SHORTCUTURL="bank">Bank</A><DT><A HREF="https://evil.example/r" SHORTCUTURL="localhost">x</A><DT><A HREF=" JaVaScRiPt:alert(1)">j</A><DT><A HREF="&#106;avascript:alert(1)">k</A><DT><A HREF="https://ok.example/" ICON="data:text/html,<script>1</script>">ok</A></DL>');
+    expect(nick.children.map((n) => (n.type === 'bookmark' ? [n.url, n.nickname ?? ''] : null))).toEqual([
+      ['https://evil.example/login', ''],
+      ['https://evil.example/r', ''],
+      ['https://ok.example/', ''],
+    ]);
+    expect(nick.skipped).toBe(2);
+    expect(nick.nicknamesDropped).toBe(2);
+    expect(JSON.stringify(nick)).not.toMatch(/icon|data:text/i);
+    const s = new BookmarkStore(join(tmp(), 'r.json'));
+    for (const bad of ['localhost', 'wpad', 'router', 'intranet', 'javascript']) {
+      expect(() => s.addBookmark(BAR_ID, 'x', 'https://x.example/', bad), bad).toThrow(/reserved/);
+    }
+  });
+});
+
+describe('review: history clear-on-exit after a crash, flood limit, async writes', () => {
+  it('clears at load when "clear on exit" was set and the last exit did not clear', () => {
+    const f = join(tmp(), 'history.json');
+    writeFileSync(f, JSON.stringify({ version: 1, clearOnExit: true, visits: [{ url: 'https://left.example/', title: 't', t: 1, source: 'user' }] }));
+    const h = new HistoryStore(f);
+    expect(h.visits()).toEqual([]);
+    expect(JSON.parse(readFileSync(f, 'utf8')).visits).toEqual([]);
+  });
+
+  it('a page cannot flood history: <= 30 visits per origin per minute, other origins unaffected', async () => {
+    const f = join(tmp(), 'history.json');
+    const h = new HistoryStore(f);
+    h.record('https://real.example/', 'real', 'user', 1_000);
+    const t0 = 10_000;
+    let stored = 0;
+    for (let i = 0; i < 500; i++) if (h.record(`https://flood.example/${i}`, 'x', 'page', t0 + i * 10)) stored++;
+    expect(stored).toBe(MAX_VISITS_PER_ORIGIN_PER_MIN);
+    expect(h.record('https://other.example/', 'o', 'user', t0 + 5000)).toBe(true);
+    expect(h.record('https://flood.example/later', 'x', 'page', t0 + 61_000)).toBe(true); // next minute
+    expect(h.visits().some((v) => v.url === 'https://real.example/')).toBe(true);
+    // writes are asynchronous and atomic; a later synchronous flush always wins
+    await new Promise((r) => setTimeout(r, 2200));
+    await h.settled();
+    expect(JSON.parse(readFileSync(f, 'utf8')).visits.length).toBe(33);
+    h.deleteRange('all');
+    await h.settled();
+    expect(JSON.parse(readFileSync(f, 'utf8')).visits).toEqual([]);
   });
 });

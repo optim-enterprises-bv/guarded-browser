@@ -149,3 +149,21 @@ describe('proxy robustness (review: profiles round)', () => {
     await other.close();
   });
 });
+
+describe('loopback spellings (review r7)', () => {
+  it('every spelling of a refused proxy port is refused', () => {
+    const c = new EgressController([], () => undefined);
+    c.setRefusedPorts([40000]);
+    for (const h of ['127.0.0.1:40000', 'localhost:40000', '[::1]:40000', '127.1:40000', '2130706433:40000', '0x7f000001:40000', '[::ffff:127.0.0.1]:40000', '[::]:40000', '[0:0:0:0:0:0:0:1]:40000', 'LOCALHOST.:40000', 'a.localhost:40000', '0.0.0.0:40000', '[::ffff:0.0.0.0]:40000', '127.9.9.9:40000']) {
+      const key = hostKey(h);
+      expect(key, h).not.toBeNull();
+      expect(c.decideHost(key!, 'CONNECT'), h).toBe(false);
+      expect(c.hostPasses(key!), h).toBe(false);
+    }
+    // other ports and other hosts are not affected
+    c.endTask();
+    expect(c.decideHost(hostKey('127.0.0.1:40001')!, 'CONNECT')).toBe(true);
+    expect(c.decideHost(hostKey('[::ffff:10.0.0.1]:40000')!, 'CONNECT')).toBe(true);
+    expect(c.decideHost(hostKey('example.com:40000')!, 'CONNECT')).toBe(true);
+  });
+});
