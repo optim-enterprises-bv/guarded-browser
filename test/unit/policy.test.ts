@@ -14,11 +14,9 @@ const act = (name: PlannerAction['name'], args: Record<string, unknown>): Planne
 const input = (o: Partial<SnapshotElement> = {}): SnapshotElement => ({ ref: 'e1', role: 'textbox', name: 'Notes', tag: 'input', inputType: 'text', formAction: `${SITE}/submit`, inForm: true, ...o });
 
 describe('originsInTask', () => {
-  it('extracts URLs and bare hostnames but not email domains', () => {
-    const o = originsInTask('Find the price on http://127.0.0.1:4001/shop.html and compare with shop.example.com. Mail me at bob@mail.example.org');
-    expect(o).toContain('http://127.0.0.1:4001');
-    expect(o).toContain('https://shop.example.com');
-    expect(o.some((x) => x.includes('mail.example.org'))).toBe(false);
+  it('only allowlists hosts written with an explicit scheme (not filenames, bare names or email domains)', () => {
+    const o = originsInTask('Find the price on http://127.0.0.1:4001/shop.html and compare with shop.example.com. Attach report.zip, setup.py and notes.md. Mail me at bob@mail.example.org');
+    expect(o).toEqual(['http://127.0.0.1:4001']);
   });
 });
 

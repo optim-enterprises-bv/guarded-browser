@@ -76,6 +76,7 @@ export class EgressController {
     this.allow = new Set(seedHosts.map((h) => hostKey(h)).filter((h): h is string => !!h));
     this.blocked.clear();
     this.confirmedFlows.clear();
+    this.approvedSubmissions = [];
     this.taint = taint;
     this.changed();
   }
@@ -85,6 +86,7 @@ export class EgressController {
     this.allow.clear();
     this.blocked.clear();
     this.confirmedFlows.clear();
+    this.approvedSubmissions = [];
     this.taint = null;
     this.changed();
   }
@@ -161,6 +163,26 @@ export class EgressController {
     }
     this.audit({ layer: 'proxy', decision: ok ? (this.mode === 'manual' ? 'log' : 'allow') : 'block', host: key, method, url: url?.slice(0, 500), reason });
     return ok;
+  }
+
+  private approvedSubmissions: Array<{ url: string; until: number }> = [];
+
+  /** A form submission the user confirmed at the action layer: one matching POST may pass. */
+  approveSubmission(url: string) {
+    this.approvedSubmissions.push({ url: url.split('#')[0], until: Date.now() + 30_000 });
+  }
+
+  /**
+   * Is a state-changing top-level request (POST/PUT/PATCH/DELETE navigation, i.e. a form submission)
+   * covered by a confirmed submission? Consumes the approval. Independent of snapshot heuristics.
+   */
+  consumeSubmission(url: string): boolean {
+    const now = Date.now();
+    this.approvedSubmissions = this.approvedSubmissions.filter((a) => a.until > now);
+    const i = this.approvedSubmissions.findIndex((a) => a.url === url.split('#')[0]);
+    if (i < 0) return false;
+    this.approvedSubmissions.splice(i, 1);
+    return true;
   }
 
   /** Mark registry values as approved for sending to a host (after a user confirmation). */

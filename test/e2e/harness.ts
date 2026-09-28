@@ -1,6 +1,6 @@
 // Launches the real Electron app against the mock LLM and the fixture servers.
 import { _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultSettings } from '../../src/core/config';
@@ -43,7 +43,12 @@ export async function launch(o: LaunchOpts): Promise<App> {
     GUARDED_START_URL: o.startUrl ?? 'about:blank',
   };
   if (!o.guard) env.GUARDED_GUARD = 'off';
-  if (o.policyDisabled) env.GUARDED_UNSAFE_DISABLE_POLICY = '1';
+  if (o.policyDisabled) {
+    env.GUARDED_UNSAFE_DISABLE_POLICY = '1';
+    env.GUARDED_TEST = '1';
+  }
+  env.GUARDED_DOWNLOAD_DIR = join(userData, 'downloads');
+  mkdirSync(env.GUARDED_DOWNLOAD_DIR, { recursive: true });
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await electron.launch({ args: [ROOT], cwd: ROOT, env });
   const ui = await app.firstWindow();
@@ -57,13 +62,20 @@ export async function launch(o: LaunchOpts): Promise<App> {
       const f = readdirSync(auditDir).find((x) => x.endsWith('.jsonl'));
       return f ? readFileSync(join(auditDir, f), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     },
-    close: () => app.close(),
+    close: async () => {
+      await app.close();
+      rmSync(userData, { recursive: true, force: true });
+    },
   };
 }
 
-export async function runTask(ui: Page, text: string) {
+/** Type a task, press Run, accept (or replace) the seed allowlist, press Start. */
+export async function runTask(ui: Page, text: string, origins?: string[]) {
   await ui.fill('[data-testid=task-input]', text);
   await ui.click('[data-testid=task-run]');
+  await expect(ui.locator('[data-testid=preflight]')).toBeVisible();
+  if (origins) await ui.fill('[data-testid=preflight-origins]', origins.join('\n'));
+  await ui.click('[data-testid=preflight-start]');
 }
 
 /** Wait for the task to end; returns the final status string (finished, stopped, ...). */

@@ -2,7 +2,7 @@
 // is broadly ineffective (a single miss is reported, not fatal). Set GUARDED_SKIP_GUARD_TEST=1 to skip.
 
 import { describe, expect, it, beforeAll } from 'vitest';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { TransformersGuard, chunkText, screenText } from '../../src/core/guard';
@@ -47,8 +47,12 @@ export function allText(html: string): string {
 }
 
 const skip = process.env.GUARDED_SKIP_GUARD_TEST === '1';
+const cacheDir = process.env.GUARDED_MODEL_CACHE ?? join(homedir(), '.cache', 'guarded-browser', 'models');
+function modelCached(): boolean {
+  return existsSync(join(cacheDir, ...defaultSettings().guard.model.split('/'), 'onnx', 'model.onnx'));
+}
 const s = defaultSettings().guard;
-const guard = new TransformersGuard({ ...s, enabled: true, cacheDir: process.env.GUARDED_MODEL_CACHE ?? join(homedir(), '.cache', 'guarded-browser', 'models') });
+const guard = new TransformersGuard({ ...s, enabled: true, cacheDir });
 
 describe.skipIf(skip)('guard classifier on fixtures (real model, CPU)', () => {
   beforeAll(async () => {
@@ -64,9 +68,13 @@ describe.skipIf(skip)('guard classifier on fixtures (real model, CPU)', () => {
 
   it('flags injection fixtures and passes benign ones (score table)', async () => {
     if (guard.status() !== 'ready') {
-      console.warn(`GUARD UNAVAILABLE: ${guard.statusDetail()} - guard table not produced`);
-      expect(guard.status()).toBe('unavailable');
-      return;
+      // Only acceptable when the model is genuinely absent AND the caller said that is expected.
+      const absent = !modelCached();
+      if (absent && process.env.GUARDED_ALLOW_GUARD_UNAVAILABLE === '1') {
+        console.warn(`GUARD UNAVAILABLE (model not cached, allowed by GUARDED_ALLOW_GUARD_UNAVAILABLE=1): ${guard.statusDetail()}`);
+        return;
+      }
+      throw new Error(`guard failed to load (${absent ? 'model not in cache' : 'model IS cached'}): ${guard.statusDetail()}`);
     }
     const rows: Array<{ file: string; expected: string; maxScore: number; flagged: number; chunks: number; ok: boolean | null }> = [];
     for (const [file, expected] of Object.entries(EXPECTED)) {

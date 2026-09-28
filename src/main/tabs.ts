@@ -1,6 +1,7 @@
 // Tabs are WebContentsViews in the dedicated `persist:guarded` session, laid out beside the UI.
 
 import { WebContentsView, type BaseWindow, type Session, type WebContents } from 'electron';
+import { join } from 'node:path';
 import type { ActionOutcome, BrowserDriver } from '../core/agent';
 import type { Snapshot } from '../core/types';
 import { ISOLATED_WORLD, PAGE_TEXT_JS, SNAPSHOT_JS, actionJs } from './page-scripts';
@@ -67,7 +68,15 @@ export class TabManager {
 
   create(url?: string): Tab {
     const view = new WebContentsView({
-      webPreferences: { session: this.session, contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true },
+      webPreferences: {
+        session: this.session,
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        // tiny sandboxed preload: removes RTCPeerConnection from the page while an agent task drives the tab
+        preload: join(__dirname, 'tab-preload.js'),
+      },
     });
     const tab = new Tab(++this.seq, view);
     this.tabs.push(tab);

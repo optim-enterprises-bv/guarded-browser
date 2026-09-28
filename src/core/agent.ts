@@ -13,6 +13,8 @@ import { PLANNER_SYSTEM, plannerStep } from './planner';
 import { combine, evaluatePolicy, originOf, originsInTask } from './policy';
 import { MAX_STRING, runReader, type SchemaSpec } from './reader';
 import { MIN_MATCH_LENGTH, TaintRegistry } from './taint';
+import { HandleStore } from './handles';
+import { capName, errorCode, safeInputType, safeMethod, safeRole, urlParts } from './sanitize';
 import {
   WITHHELD,
   type ConfirmOutcome,
@@ -54,6 +56,11 @@ export interface AgentDeps {
   confirm: (req: ConfirmRequest, taskId: string) => Promise<ConfirmOutcome>;
   settings: () => Settings['agent'];
   egress?: EgressController;
+  /**
+   * Origins the user confirmed for this task (from the allowlist editor shown at task start).
+   * Default: http(s) URLs written in the task + the tab's origin at task start.
+   */
+  seedOrigins?: string[];
   /** TEST ONLY: bypass policy engine and judge (used to show the egress layer holds on its own) */
   policyDisabled?: boolean;
   onGuardFlag?: (url: string, count: number) => void;
@@ -71,12 +78,25 @@ export interface TaskResult {
 }
 
 const MAX_ELEMENTS = 80;
-const MAX_NAME = 80;
+
+/** Planner-facing, sanitised view of one snapshot element (see src/core/sanitize.ts). */
+interface SafeElement {
+  role: string;
+  name: string;
+  inputType?: string;
+  href?: string;
+  form?: string;
+  isSubmit?: boolean;
+}
 
 export class AgentTask {
   readonly id = randomUUID().slice(0, 8);
   readonly taint: TaintRegistry;
   readonly allowedOrigins = new Set<string>();
+  /** origins the task itself names (or the user confirmed at task start); approvals do not add here */
+  readonly taskOrigins = new Set<string>();
+  readonly handles = new HandleStore();
+  private safeView = new Map<string, SafeElement>();
   private readonly history: string[] = [];
   private readonly messages: ChatMessage[] = [];
   private readonly contextOrigins = new Set<string>();
@@ -114,11 +134,24 @@ export class AgentTask {
     const { driver } = this.deps;
     const cfg = this.deps.settings();
     const started = Date.now();
-    for (const o of originsInTask(this.task)) this.allowedOrigins.add(o);
     const startOrigin = originOf(driver.currentUrl());
-    if (startOrigin) this.allowedOrigins.add(startOrigin);
+    const seeds = this.deps.seedOrigins ?? [...originsInTask(this.task), ...(startOrigin ? [startOrigin] : [])];
+    for (const o of seeds) {
+      const origin = originOf(o);
+      if (origin) {
+        this.taskOrigins.add(origin);
+        this.allowedOrigins.add(origin);
+      }
+    }
+    const secrets = this.taint.preRegisterTaskSecrets();
+    this.deps.audit.addRedactions(this.taint.secretValues());
     this.deps.egress?.startTask([...this.allowedOrigins], this.taint);
-    this.audit('task-start', { task: this.task, allowedOrigins: [...this.allowedOrigins], policyDisabled: !!this.deps.policyDisabled });
+    this.audit('task-start', {
+      task: this.task,
+      allowedOrigins: [...this.allowedOrigins],
+      sensitiveValues: secrets.map((s) => ({ id: s.id, kind: s.sensitivity })),
+      policyDisabled: !!this.deps.policyDisabled,
+    });
 
     this.messages.push({ role: 'system', content: PLANNER_SYSTEM });
     let first = `User task: ${this.task}`;
@@ -148,7 +181,8 @@ export class AgentTask {
         this.audit('planner-action', { step, action: action.name, args: action.args, native: !!action.callId });
 
         if (action.name === 'finish') {
-          answer = String(action.args.answer ?? '').slice(0, 4000);
+          // handles are substituted for display only; the answer is based on untrusted data
+          answer = this.handles.resolve(String(action.args.answer ?? '')).text.slice(0, 4000);
           status = 'finished';
           break;
         }
@@ -185,22 +219,30 @@ export class AgentTask {
     if (observation) this.snapshotMsgIdx.push(this.messages.length - 1);
   }
 
-  /** Snapshot the current page, guard every element name, and render it for the planner. */
+  /**
+   * Snapshot the current page and render it for the planner. Every page-derived string is mapped
+   * onto a fixed vocabulary, capped, or guard-screened (src/core/sanitize.ts).
+   */
   private async observe(): Promise<string> {
     const snap = await this.deps.driver.snapshot();
     this.lastSnapshot = snap;
     const origin = originOf(snap.url);
     if (origin) this.contextOrigins.add(origin);
     const elements = snap.elements.slice(0, MAX_ELEMENTS);
-    const names = elements.map((e) => e.name.replace(/\s+/g, ' ').trim().slice(0, MAX_NAME));
-    const title = snap.title.slice(0, MAX_NAME);
-    const verdicts = await this.deps.guard.classify([title, ...names]);
+    // one guard batch: title, names, and every URL path shown to the planner
+    const texts: string[] = [capName(snap.title), ...elements.map((e) => capName(e.name))];
+    const urlSlot = (url: string | undefined): number | undefined => {
+      if (!url) return undefined;
+      const p = urlParts(url);
+      if (!p) return undefined;
+      texts.push(`${p.origin}\u0000${p.path}`);
+      return texts.length - 1;
+    };
+    const pageSlot = urlSlot(snap.url);
+    const slots = elements.map((e) => ({ href: urlSlot(e.href), form: urlSlot(e.formAction) }));
+    const verdicts = await this.deps.guard.classify(texts.map((t) => t.replace('\u0000', '')));
     const flagged = verdicts.filter((v) => v.flagged).length;
-    this.audit('snapshot', {
-      url: snap.url,
-      hash: sha256(JSON.stringify(snap)),
-      elements: snap.elements.length,
-    });
+    this.audit('snapshot', { url: snap.url, hash: sha256(JSON.stringify(snap)), elements: snap.elements.length });
     this.audit('guard', {
       what: 'snapshot',
       url: snap.url,
@@ -210,22 +252,63 @@ export class AgentTask {
       flaggedScores: verdicts.filter((v) => v.flagged).map((v) => ({ text: v.text.slice(0, 80), score: v.score })),
     });
     if (flagged) this.deps.onGuardFlag?.(snap.url, flagged);
-    const safe = (i: number) => (verdicts[i].flagged ? WITHHELD : verdicts[i].text);
-    const lines = elements.map((e, i) => renderElement(e, safe(i + 1)));
+    const text = (i: number) => (verdicts[i].flagged ? WITHHELD : texts[i]);
+    const url = (i: number | undefined) => {
+      if (i === undefined) return undefined;
+      const [o, path] = texts[i].split('\u0000');
+      return verdicts[i].flagged ? `${o}/[path withheld]` : `${o}${path}`;
+    };
+    this.safeView = new Map();
+    const lines = elements.map((e, i) => {
+      const v: SafeElement = {
+        role: safeRole(e.role),
+        name: text(i + 1),
+        inputType: safeInputType(e.inputType),
+        href: url(slots[i].href),
+        form: e.formAction && !e.href ? `${safeMethod(e.formMethod)} ${url(slots[i].form)}` : undefined,
+        isSubmit: !!e.isSubmit,
+      };
+      this.safeView.set(e.ref, v);
+      return renderElement(/^e\d{1,4}$/.test(e.ref) ? e.ref : '?', v);
+    });
     const guardNote = this.deps.guard.status() === 'ready' ? '' : `\n(guard ${this.deps.guard.status()}: names were not screened)`;
-    return `URL: ${snap.url}\nTitle (untrusted): ${safe(0)}\nElements (names are untrusted page data):\n${lines.join('\n') || '(none)'}${
+    return `URL: ${url(pageSlot) ?? '(none)'}\nTitle (untrusted): ${text(0)}\nElements (names are untrusted page data):\n${lines.join('\n') || '(none)'}${
       snap.elements.length > MAX_ELEMENTS ? `\n(${snap.elements.length - MAX_ELEMENTS} more elements not shown)` : ''
     }${guardNote}`;
+  }
+
+  /** Sanitised one-line description of an element, for the judge and the confirmation dialog. */
+  private describeTarget(ref: string): { structural: string; name: string } | undefined {
+    const v = this.safeView.get(ref);
+    if (!v) return undefined;
+    return { structural: `${v.role} [${ref}]${v.href ? ` -> ${v.href}` : ''}${v.form ? ` (form ${v.form})` : ''}`, name: v.name };
   }
 
   private element(ref: unknown): SnapshotElement | undefined {
     return this.lastSnapshot?.elements.find((e) => e.ref === String(ref));
   }
 
+  /** Substitute reader handles in the arguments that may carry values. */
+  private resolveHandles(action: PlannerAction): { resolved: PlannerAction; used: string[] } {
+    const args = { ...action.args };
+    const used: string[] = [];
+    for (const k of ['url', 'text', 'value'] as const) {
+      if (typeof args[k] === 'string') {
+        const r = this.handles.resolve(args[k] as string);
+        args[k] = r.text;
+        used.push(...r.used);
+      }
+    }
+    return { resolved: { ...action, args }, used };
+  }
+
   private async handle(action: PlannerAction): Promise<{ text: string; summary: string; observation?: string }> {
     const { driver } = this.deps;
-    const el = this.element(action.args.ref);
-    const formFields = el && (action.name === 'submit' || (action.name === 'click' && el.isSubmit)) ? await driver.formFields(el.ref) : undefined;
+    const { resolved, used } = this.resolveHandles(action);
+    const el = this.element(resolved.args.ref);
+    const ref = String(resolved.args.ref ?? '');
+    const formFields = el && (resolved.name === 'submit' || (resolved.name === 'click' && el.isSubmit)) ? await driver.formFields(el.ref) : undefined;
+    const target = el ? this.describeTarget(ref) : undefined;
 
     // 1. rule-based policy (code), 2. judge (LLM, can only escalate)
     let policy: PolicyResult;
@@ -238,34 +321,41 @@ export class AgentTask {
       decision = 'allow';
       reasons = policy.reasons;
     } else {
-      policy = evaluatePolicy(action, {
+      policy = evaluatePolicy(resolved, {
         currentUrl: driver.currentUrl(),
         allowedOrigins: this.allowedOrigins,
+        taskOrigins: this.taskOrigins,
         taint: this.taint,
         contextOrigins: [...this.contextOrigins],
         element: el,
         formFields,
       });
-      this.audit('policy', { action: action.name, decision: policy.decision, reasons: policy.reasons, destination: policy.destination, values: policy.values });
-      const target = el ? `${el.role} "${el.name.slice(0, 80)}"${el.href ? ` -> ${el.href}` : ''}${el.formAction ? ` (form -> ${el.formAction})` : ''}` : String(action.args.url ?? '');
-      judge = policy.decision === 'block' ? { verdict: 'block', reason: 'policy blocked; judge not consulted' } : await runJudge(this.deps.judge, this.task, this.history, action, target);
+      this.audit('policy', { action: action.name, decision: policy.decision, reasons: policy.reasons, destination: policy.destination, values: policy.values, handles: used });
+      // The judge sees the planner's action with handles UNRESOLVED and a sanitised target: no page text.
+      const judgeTarget = target ? `${target.structural} labelled "${target.name}" (label is page data)` : urlParts(String(action.args.url ?? ''))?.origin ?? '';
+      judge = policy.decision === 'block' ? { verdict: 'block', reason: 'policy blocked; judge not consulted' } : await runJudge(this.deps.judge, this.task, this.history, action, judgeTarget);
       this.audit('judge', { action: action.name, verdict: judge.verdict, reason: judge.reason, error: judge.error });
       ({ decision, reasons } = combine(policy, judge));
     }
 
+    // Results returned to the planner are fixed strings: no reasons, names or URLs from the page.
     if (decision === 'block') {
-      return { text: `BLOCKED: ${reasons.join('; ')}. Do not retry this action.`, summary: 'blocked' };
+      return { text: 'BLOCKED by the security policy. Do not retry this action.', summary: 'blocked' };
     }
     if (decision === 'confirm') {
+      const pageDerived: ConfirmRequest['pageDerived'] = [];
+      if (target) pageDerived.push({ label: 'element label (text from the page)', text: target.name });
+      if (judge.reason && judge.verdict !== 'allow') pageDerived.push({ label: 'judge reason (model output, may echo page content)', text: judge.reason });
       const req: ConfirmRequest = {
         id: randomUUID().slice(0, 8),
         kind: 'action',
-        action: describeAction(action),
-        target: el ? `${el.role} "${el.name.slice(0, 80)}"` : String(action.args.url ?? ''),
+        action: describeAction(resolved),
+        target: target ? target.structural : String(resolved.args.url ?? ''),
         destination: policy.destination,
         values: policy.values,
         reasons,
         judge,
+        pageDerived,
       };
       this.deps.onUpdate?.({ taskId: this.id, status: 'awaiting confirmation', step: 0 });
       const outcome = await this.deps.confirm(req, this.id);
@@ -278,13 +368,17 @@ export class AgentTask {
       if (outcome !== 'approve') {
         return { text: `DENIED by the user (${outcome === 'timeout' ? 'no answer, default deny' : 'denied'}). Do not retry this action.`, summary: 'denied' };
       }
-      this.recordApproval(policy);
+      this.recordApproval(policy, resolved);
     }
-    return this.execute(action);
+    return this.execute(resolved);
   }
 
-  private recordApproval(policy: PolicyResult) {
+  private recordApproval(policy: PolicyResult, action: PlannerAction) {
     if (policy.newOrigin) this.approveOrigin(policy.newOrigin);
+    // an approved form submission lets exactly that POST through the egress method check
+    if (policy.destination && (action.name === 'submit' || (action.name === 'click' && this.element(action.args.ref)?.isSubmit))) {
+      this.deps.egress?.approveSubmission(policy.destination);
+    }
     if (policy.destination && this.deps.egress) {
       const text = [policy.destination, ...policy.values.map((v) => v.value)].join('\n');
       const ids = [...new Set([...policy.values.flatMap((v) => v.taintIds), ...this.deps.egress.idsIn(text)])];
@@ -298,7 +392,7 @@ export class AgentTask {
     const withObservation = async (o: { ok: boolean; detail?: string }, what: string) => {
       this.audit('action-result', { action: action.name, ok: o.ok, detail: o.detail });
       const observation = await this.observe();
-      const text = o.ok ? `${what} ok${o.detail ? ` (${o.detail})` : ''}` : `${what} failed: ${o.detail ?? 'error'}`;
+      const text = o.ok ? `${what} ok` : `${what} failed: ${errorCode(o.detail)}`;
       return { text, summary: o.ok ? 'ok' : 'failed', observation };
     };
     switch (action.name) {
@@ -316,19 +410,19 @@ export class AgentTask {
       case 'type':
       case 'select': {
         const text = String(action.name === 'type' ? a.text ?? '' : a.value ?? '');
-        const r = action.name === 'type' ? await driver.type(String(a.ref), text) : await driver.select(String(a.ref), text);
-        if (r.ok && text.trim().length >= MIN_MATCH_LENGTH) {
-          // Anything we put into a page is now watched by the egress content filter.
+        if (text.trim().length >= MIN_MATCH_LENGTH) {
+          // Register BEFORE the value enters the page: page JS may send it on the first input event.
           const l = this.taint.labelPlannerText(text, [...this.contextOrigins]);
           this.taint.register(text, l.label === 'trusted' ? 'user-sensitive' : 'untrusted', l.provenance);
         }
+        const r = action.name === 'type' ? await driver.type(String(a.ref), text) : await driver.select(String(a.ref), text);
         this.audit('action-result', { action: action.name, ok: r.ok, detail: r.detail });
-        return { text: r.ok ? `${action.name} ok` : `${action.name} failed: ${r.detail}`, summary: r.ok ? 'ok' : 'failed' };
+        return { text: r.ok ? `${action.name} ok` : `${action.name} failed: ${errorCode(r.detail)}`, summary: r.ok ? 'ok' : 'failed' };
       }
       case 'extract':
         return this.extract(String(a.query ?? ''), (a.schema ?? {}) as SchemaSpec);
       default:
-        return { text: `unsupported action ${action.name}`, summary: 'failed' };
+        return { text: 'unsupported action', summary: 'failed' };
     }
   }
 
@@ -351,21 +445,25 @@ export class AgentTask {
     try {
       r = await runReader(this.deps.reader, screened.text, query, spec);
     } catch (e) {
-      this.audit('reader', { url, query, schema: spec, ok: false, error: (e as Error).message });
-      return { text: `extract failed: ${(e as Error).message}`, summary: 'failed' };
+      const msg = (e as Error).message;
+      this.audit('reader', { url, query, schema: spec, ok: false, error: msg });
+      // schema errors come from the planner's own spec; anything else is reported generically
+      return { text: `extract failed: ${/^(schema|invalid)/.test(msg) ? msg.slice(0, 200) : 'reader error'}`, summary: 'failed' };
     }
     if (r.usedFallback) this.audit('fallback', { role: 'reader' });
     if (!r.ok || !r.data) {
-      this.audit('reader', { url, query, schema: spec, ok: false, error: r.error, attempts: r.attempts });
-      return { text: `extract failed: ${r.error}`, summary: 'failed' };
+      this.audit('reader', { url, query, schema: spec, ok: false, error: r.error, attempts: r.attempts, raw: r.raw });
+      return { text: 'extract failed: reader output did not match the schema', summary: 'failed' };
     }
-    // Reader output is untrusted too: screen its strings before the planner sees them.
     const data = await this.screenValues(r.data, url);
     const tainted = this.taint.wrapReaderOutput(data, url);
-    this.audit('reader', { url, query, schema: spec, ok: true, output: data, attempts: r.attempts, taint: tainted.provenance });
+    // Strings stay in code; the planner (and, via history, the judge) only gets handles.
+    const { id, view } = this.handles.add(data);
+    const src = urlParts(url);
+    this.audit('reader', { url, query, schema: spec, ok: true, output: data, handle: id, plannerView: view, attempts: r.attempts, taint: tainted.provenance });
     return {
-      text: JSON.stringify({ ok: true, label: 'untrusted', source: url, data }),
-      summary: `extracted ${JSON.stringify(data).slice(0, 200)}`,
+      text: JSON.stringify({ ok: true, label: 'untrusted', source: src ? `${src.origin}${src.path}` : '', handle: id, data: view }),
+      summary: `extracted ${id}`,
     };
   }
 
@@ -387,11 +485,11 @@ export class AgentTask {
   }
 }
 
-function renderElement(e: SnapshotElement, name: string): string {
-  let s = `[${e.ref}] ${e.role} "${name}"`;
-  if (e.inputType) s += ` type=${e.inputType}`;
-  if (e.href) s += ` -> ${e.href.slice(0, 120)}`;
-  if (e.isSubmit) s += ' (submits form)';
-  if (e.formAction && !e.href) s += ` [form ${e.formMethod ?? 'get'} ${e.formAction.slice(0, 120)}]`;
+function renderElement(ref: string, v: SafeElement): string {
+  let s = `[${ref}] ${v.role} "${v.name}"`;
+  if (v.inputType) s += ` type=${v.inputType}`;
+  if (v.href) s += ` -> ${v.href}`;
+  if (v.isSubmit) s += ' (submits form)';
+  if (v.form) s += ` [form ${v.form}]`;
   return s;
 }

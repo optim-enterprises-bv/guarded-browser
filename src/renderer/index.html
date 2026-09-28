@@ -33,6 +33,15 @@
     <button id="stop" class="danger" data-testid="task-stop" disabled>Stop</button>
     <span id="status" data-testid="task-status">idle</span>
   </div>
+  <div id="preflight" class="preflight hidden" data-testid="preflight">
+    <strong>Allowed sites for this task</strong>
+    <p class="muted small">Only these origins may be used without asking (one per line). Sites named with http(s):// in your task and the current tab are pre-filled; bare names like report.zip are not.</p>
+    <textarea id="pf-origins" rows="3" data-testid="preflight-origins" spellcheck="false"></textarea>
+    <div class="row">
+      <button id="pf-start" class="primary" data-testid="preflight-start">Start task</button>
+      <button id="pf-cancel">Cancel</button>
+    </div>
+  </div>
   <div id="answer" class="answer hidden" data-testid="task-answer"></div>
   <div id="blocked" class="hidden" data-testid="blocked-hosts"></div>
   <h3>Timeline</h3>
@@ -47,6 +56,7 @@
       <div id="c-values"></div>
       <ul id="c-reasons"></ul>
       <div class="kv"><span>Judge</span><span id="c-judge"></span></div>
+      <div id="c-page" data-testid="confirm-page-derived"></div>
       <div class="row actions">
         <button id="c-approve" class="primary" data-testid="confirm-approve">Approve</button>
         <button id="c-deny" data-testid="confirm-deny">Deny</button>

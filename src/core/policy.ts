@@ -7,6 +7,8 @@ export interface PolicyContext {
   currentUrl: string;
   /** origins named in the task, the tab's origin at task start, and user-approved origins */
   allowedOrigins: Set<string>;
+  /** only the origins the task named / the user confirmed at task start (never grown by approvals) */
+  taskOrigins?: Set<string>;
   taint: TaintRegistry;
   /** origins whose (untrusted) content the planner has seen so far */
   contextOrigins: string[];
@@ -17,7 +19,7 @@ export interface PolicyContext {
 
 /** Button / link names that always require confirmation (irreversible or outward). */
 export const RISKY_NAME =
-  /\b(buy|purchase|pay|checkout|check out|place order|order now|send|post|publish|delete|remove|sign ?in|log ?in|login|sign ?up|register|subscribe|transfer|confirm|download|upload|share|submit)\b/i;
+  /\b(buy|purchase|pay|checkout|check out|order|complete|finali[sz]e|proceed|approve|accept|authori[sz]e|grant|allow|merge|deploy|make public|publish|send|post|delete|remove|erase|sign ?in|log ?in|login|sign ?up|register|subscribe|unsubscribe|transfer|confirm|download|upload|share|submit|invite|book|reserve|donate|save)\b/i;
 
 const SEVERITY: Record<Decision, number> = { allow: 0, confirm: 1, block: 2 };
 
@@ -31,18 +33,16 @@ export function originOf(url: string): string | null {
   }
 }
 
-/** Origins literally mentioned in the task text (http(s) URLs and bare host names). */
+/**
+ * Origins the task names with an explicit http(s):// scheme. Bare names ("report.zip", "setup.py",
+ * "shop.example.com") are NOT allowlisted; the user can add hosts in the allowlist editor shown at
+ * task start.
+ */
 export function originsInTask(task: string): string[] {
   const out = new Set<string>();
   for (const m of task.matchAll(/\bhttps?:\/\/[^\s"'<>)]+/gi)) {
     const o = originOf(m[0].replace(/[.,;:!?]+$/, ''));
     if (o) out.add(o);
-  }
-  for (const m of task.matchAll(/(?<![\w/@.-])((?:[a-z0-9-]+\.)+[a-z]{2,})(?::(\d+))?(?![\w@-])/gi)) {
-    if (m.index !== undefined && /https?:\/\/$/i.test(task.slice(Math.max(0, m.index - 8), m.index))) continue;
-    const host = m[0].toLowerCase();
-    out.add(`https://${host}`);
-    out.add(`http://${host}`);
   }
   return [...out];
 }
@@ -102,7 +102,7 @@ export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): Polic
         });
         r = checkFormOrigin(r, el, ctx);
       }
-      if (RISKY_NAME.test(el.name)) r = escalate(r, `irreversible/outward-looking control "${el.name.slice(0, 60)}" (always confirmed)`);
+      if (RISKY_NAME.test(el.name)) r = escalate(r, 'control labelled like an irreversible / outward action (always confirmed; label shown below)');
       if (el.inputType === 'file') r = escalate(r, 'file upload control (always confirmed)');
       if (el.href) {
         const o = originOf(el.href);
@@ -121,13 +121,19 @@ export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): Polic
       if (!el) return result('block', [`unknown element ref ${String(a.ref)}`]);
       const text = String(action.name === 'type' ? a.text ?? '' : a.value ?? '');
       const l = ctx.taint.labelPlannerText(text, ctx.contextOrigins);
+      const password = el.inputType === 'password';
       let r = result('allow', [action.name], {
         destination: el.formAction || ctx.currentUrl,
-        values: [{ field: el.name.slice(0, 60), value: text, ...l }],
+        values: [{ field: el.name.slice(0, 60), value: password ? '•'.repeat(text.length) + ' (password)' : text, masked: password, ...l }],
       });
-      if (el.inputType === 'password') r = escalate(r, 'password field (always confirmed)');
+      if (password) r = escalate(r, 'password field (always confirmed)');
       else if (el.formHasPassword) r = escalate(r, 'field belongs to a login form (always confirmed)');
       if (l.label === 'untrusted') r = escalate(r, 'typing a value that did not come from the user (untrusted data into a form)');
+      const sensitive = ctx.taint.sensitiveIn(text);
+      const dest = originOf(el.formAction || ctx.currentUrl);
+      if (sensitive.length && (!dest || !(ctx.taskOrigins ?? ctx.allowedOrigins).has(dest))) {
+        r = escalate(r, `typing ${[...new Set(sensitive.map((v) => v.sensitivity))].join('/')} from your task into a site your task did not name (${dest ?? 'unknown'})`);
+      }
       return r;
     }
     case 'submit': {

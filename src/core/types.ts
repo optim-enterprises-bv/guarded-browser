@@ -59,7 +59,7 @@ export interface PolicyResult {
   /** set when the action would send data out of the browser */
   destination?: string;
   /** values that would leave, with their taint */
-  values: Array<{ field?: string; value: string; label: Label; provenance: Provenance[]; taintIds: string[] }>;
+  values: Array<{ field?: string; value: string; label: Label; provenance: Provenance[]; taintIds: string[]; masked?: boolean }>;
   /** origin that the user would be approving (added to the allowlist on approval) */
   newOrigin?: string;
 }
@@ -81,6 +81,8 @@ export interface ConfirmRequest {
   values: PolicyResult['values'];
   reasons: string[];
   judge?: JudgeVerdict;
+  /** attacker-influenced text, shown quoted and labelled in the dialog */
+  pageDerived?: Array<{ label: string; text: string }>;
 }
 
 export interface GuardVerdict {

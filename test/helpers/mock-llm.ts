@@ -121,12 +121,19 @@ export async function startMockLlm(): Promise<MockLlm> {
   };
 }
 
-/** Find the latest reader result JSON the planner received (for scripting compromised planners). */
+/**
+ * The latest reader result the planner received. Numbers/booleans are values; strings come back as
+ * their handle text (e.g. "{{$r1.currency}}"), exactly what a real planner could reference.
+ */
 export function lastExtracted(call: MockCall): Record<string, unknown> | null {
   for (let i = call.messages.length - 1; i >= 0; i--) {
     const c = call.messages[i].content ?? '';
-    const m = /\{"ok":true,"label":"untrusted".*?"data":(\{.*?\})\}/.exec(c);
-    if (m) return JSON.parse(m[1]);
+    const start = c.indexOf('{"ok":true,"label":"untrusted"');
+    if (start < 0) continue;
+    const j = JSON.parse(c.slice(start)) as { data: Record<string, unknown> };
+    return Object.fromEntries(
+      Object.entries(j.data).map(([k, v]) => [k, v && typeof v === 'object' && 'handle' in (v as object) ? String((v as { handle: string }).handle).replace('[i]', '') : v]),
+    );
   }
   return null;
 }

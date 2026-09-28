@@ -8,11 +8,32 @@ import type { Label, Provenance, Tainted } from './types';
 /** Values shorter than this are never matched in outgoing requests (too many false positives). */
 export const MIN_MATCH_LENGTH = 6;
 
+export type Sensitivity = 'email' | 'phone' | 'card' | 'secret';
+
 export interface RegisteredValue {
   id: string;
   value: string;
   kind: 'untrusted' | 'user-sensitive';
   provenance: Provenance[];
+  /** set for values pre-registered from the task text */
+  sensitivity?: Sensitivity;
+}
+
+/** Sensitive-looking values in the user's task: emails, phone / card numbers, secrets after a keyword. */
+export function findTaskSecrets(task: string): Array<{ value: string; sensitivity: Sensitivity }> {
+  const out: Array<{ value: string; sensitivity: Sensitivity }> = [];
+  const add = (value: string, sensitivity: Sensitivity) => {
+    const v = value.trim().replace(/[.,;:!?)]+$/, '');
+    if (v && !out.some((o) => o.value === v)) out.push({ value: v, sensitivity });
+  };
+  for (const m of task.matchAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g)) add(m[0], 'email');
+  for (const m of task.matchAll(/(?<![\w/:.])\+?\d[\d ().-]{5,}\d(?![\w/])/g)) {
+    const digits = m[0].replace(/\D/g, '');
+    if (digits.length >= 13 && digits.length <= 19) add(m[0], 'card');
+    else if (digits.length >= 7 && digits.length <= 15) add(m[0], 'phone');
+  }
+  for (const m of task.matchAll(/\b(?:password|passcode|passphrase|pin|token|api[ _-]?key|secret|otp|cvv|cvc|ssn)\b\s*(?:is|=|:)?\s*["']?([^\s"']{3,})/gi)) add(m[1], 'secret');
+  return out;
 }
 
 export interface TextLabel {
@@ -30,6 +51,26 @@ function b64(s: string): string[] {
   return [std, noPad, url];
 }
 
+/**
+ * Base64 needles for all three byte alignments. For an offset k (value preceded by k unknown bytes)
+ * only the 4-char groups made entirely of value bytes are stable, so the needle is the interior of
+ * base64(pad_k + value) without the first mixed group and without the last partial group.
+ */
+function b64Aligned(v: string): string[] {
+  const out = new Set<string>();
+  const bytes = Buffer.from(v, 'utf8');
+  for (let k = 0; k < 3; k++) {
+    const buf = Buffer.concat([Buffer.alloc(k, 0x41), bytes]);
+    const std = buf.toString('base64');
+    const firstPure = k === 0 ? 0 : 1; // group index where the value's bytes start alone
+    const fullGroups = Math.floor(buf.length / 3);
+    const inner = std.slice(firstPure * 4, fullGroups * 4);
+    for (const s of [inner, inner.replace(/\+/g, '-').replace(/\//g, '_')]) if (s.length >= 8) out.add(s);
+  }
+  for (const s of b64(v)) if (s.length >= MIN_MATCH_LENGTH) out.add(s); // exact start + padding forms
+  return [...out];
+}
+
 /** Lower-case needles (checked against lower-cased haystacks) and case-sensitive base64 needles. */
 export function variants(value: string): { lower: string[]; exact: string[] } {
   const v = value.trim();
@@ -39,7 +80,7 @@ export function variants(value: string): { lower: string[]; exact: string[] } {
     encodeURIComponent(v).replace(/%20/g, '+').toLowerCase(),
     encodeURIComponent(encodeURIComponent(v)).toLowerCase(),
   ]);
-  const exact = new Set<string>([...b64(v), ...b64(v.toLowerCase())].filter((x) => x.length >= MIN_MATCH_LENGTH));
+  const exact = new Set<string>([...b64Aligned(v), ...b64Aligned(v.toLowerCase())]);
   return { lower: [...lower].filter((x) => x.length >= MIN_MATCH_LENGTH), exact: [...exact] };
 }
 
@@ -76,6 +117,26 @@ export class TaintRegistry {
     const entry = { id: `t${++this.counter}`, value: v, kind, provenance };
     this.values.set(entry.id, entry);
     return entry;
+  }
+
+  /** Register emails / phone / card numbers / secrets found in the task as user-sensitive. */
+  preRegisterTaskSecrets(): RegisteredValue[] {
+    return findTaskSecrets(this.task).map(({ value, sensitivity }) => {
+      const e = this.register(value, 'user-sensitive', [{ source: 'user-task', timestamp: now(), note: sensitivity }]);
+      e.sensitivity = sensitivity;
+      return e;
+    });
+  }
+
+  /** Task-registered sensitive values contained in a text (any length; used by the policy engine). */
+  sensitiveIn(text: string): RegisteredValue[] {
+    const lower = text.toLowerCase();
+    return this.all().filter((e) => e.sensitivity && lower.includes(e.value.toLowerCase()));
+  }
+
+  /** Values that must never be written to the audit log in clear. */
+  secretValues(): string[] {
+    return this.all().filter((e) => e.sensitivity === 'secret' || e.sensitivity === 'card').map((e) => e.value);
   }
 
   /** Wrap reader output: every leaf value is untrusted and registered. */

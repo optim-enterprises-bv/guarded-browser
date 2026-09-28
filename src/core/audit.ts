@@ -1,6 +1,6 @@
 // Append-only JSONL audit log, one file per app session, in userData/audit/.
 
-import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -20,10 +20,30 @@ export class AuditLog {
   readonly file: string;
   private seq = 0;
   private listeners: Array<(e: AuditEvent) => void> = [];
+  private redactions: string[] = [];
 
   constructor(dir: string, sessionId = new Date().toISOString().replace(/[:.]/g, '-')) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.file = join(dir, `session-${sessionId}.jsonl`);
+    if (!existsSync(this.file)) writeFileSync(this.file, '', { mode: 0o600 });
+    chmodSync(this.file, 0o600);
+  }
+
+  /** Values (task passwords, card numbers, ...) replaced by [redacted] in every later event. */
+  addRedactions(values: string[]) {
+    for (const v of values) if (v.length >= 3 && !this.redactions.includes(v)) this.redactions.push(v);
+    this.redactions.sort((a, b) => b.length - a.length);
+  }
+
+  private redact(line: string): string {
+    let out = line;
+    for (const v of this.redactions) {
+      const j = JSON.stringify(v).slice(1, -1); // as it appears inside JSON strings
+      out = out.split(j).join('[redacted]');
+      const enc = encodeURIComponent(v);
+      if (enc !== v) out = out.split(enc).join('[redacted]');
+    }
+    return out;
   }
 
   onEvent(fn: (e: AuditEvent) => void): void {
@@ -33,9 +53,11 @@ export class AuditLog {
   write(type: AuditType, data: Record<string, unknown> = {}): AuditEvent {
     const e: AuditEvent = { ts: new Date().toISOString(), seq: ++this.seq, type, ...data };
     // appendFileSync with flag 'a': we never rewrite or truncate the file
-    appendFileSync(this.file, JSON.stringify(e) + '\n', { flag: 'a' });
-    for (const l of this.listeners) l(e);
-    return e;
+    const line = this.redact(JSON.stringify(e));
+    appendFileSync(this.file, line + '\n', { flag: 'a', mode: 0o600 });
+    const out = this.redactions.length ? (JSON.parse(line) as AuditEvent) : e;
+    for (const l of this.listeners) l(out);
+    return out;
   }
 
   read(): AuditEvent[] {

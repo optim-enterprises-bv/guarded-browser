@@ -32,8 +32,10 @@ const labelOf = (el) => {
   const img = el.querySelector && el.querySelector('img[alt]'); if (img) return img.alt;
   return el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('name') || '';
 };
+const ROLES = new Set(${JSON.stringify(['link','button','textbox','searchbox','checkbox','radio','combobox','listbox','option','tab','menuitem','menuitemcheckbox','menuitemradio','switch','slider','spinbutton','treeitem'])});
 const roleOf = (el) => {
-  const r = el.getAttribute('role'); if (r) return r;
+  // the role attribute is page text: only real ARIA roles pass (core re-validates too)
+  const r = (el.getAttribute('role') || '').trim().toLowerCase(); if (r) return ROLES.has(r) ? r : 'generic';
   const t = el.tagName.toLowerCase();
   if (t === 'a') return 'link';
   if (t === 'button' || t === 'summary') return 'button';
@@ -57,7 +59,8 @@ for (const el of document.querySelectorAll(SEL)) {
   const tag = el.tagName.toLowerCase();
   const form = el.form || el.closest('form');
   const inputType = tag === 'input' ? (el.type || 'text').toLowerCase() : undefined;
-  const isSubmit = !!form && ((tag === 'button' && (el.getAttribute('type') || 'submit').toLowerCase() === 'submit') || (tag === 'input' && ['submit','image'].includes(inputType)));
+  // use the IDL .type: <button type="go"> (invalid) is a submit button in the DOM
+  const isSubmit = !!form && ((tag === 'button' && el.type === 'submit') || (tag === 'input' && ['submit','image'].includes(inputType)));
   const e = { ref, role: roleOf(el), name: clean(labelOf(el)), tag };
   if (inputType) e.inputType = inputType;
   if (tag === 'a' && el.href) e.href = el.href;

@@ -133,18 +133,33 @@ function setRunning(running: boolean) {
   if (!running && $('status').textContent?.startsWith('running')) $('status').textContent = 'idle';
 }
 
+// Run -> show the seed allowlist for editing -> Start
 $('run').onclick = async () => {
   const text = $<HTMLTextAreaElement>('task').value.trim();
   if (!text) return;
+  const origins: string[] = await gb.invoke('agent:preview', text);
+  $<HTMLTextAreaElement>('pf-origins').value = origins.join('\n');
+  $('preflight').classList.remove('hidden');
+  $<HTMLButtonElement>('run').disabled = true;
+};
+$('pf-cancel').onclick = () => {
+  $('preflight').classList.add('hidden');
+  $<HTMLButtonElement>('run').disabled = false;
+};
+$('pf-start').onclick = async () => {
+  const text = $<HTMLTextAreaElement>('task').value.trim();
+  const origins = $<HTMLTextAreaElement>('pf-origins').value.split('\n').map((x) => x.trim()).filter(Boolean);
+  $('preflight').classList.add('hidden');
   $('answer').classList.add('hidden');
   $('status').removeAttribute('data-status');
   $('timeline').replaceChildren();
   try {
-    await gb.invoke('agent:start', text);
+    await gb.invoke('agent:start', text, origins);
     setRunning(true);
     $('status').textContent = 'running';
   } catch (e) {
     $('status').textContent = String(e);
+    $<HTMLButtonElement>('run').disabled = false;
   }
 };
 $('stop').onclick = () => void gb.invoke('agent:stop');
@@ -164,6 +179,7 @@ gb.on('agent:done', (r) => {
 // ---------- confirmation modal ----------
 const confirmQueue: Array<ConfirmRequest & { expiresAt?: number }> = [];
 let timerHandle: number | undefined;
+let shownId = '';
 
 function queueConfirm(c: ConfirmRequest & { expiresAt?: number }) {
   if (!confirmQueue.some((q) => q.id === c.id)) confirmQueue.push(c);
@@ -175,6 +191,7 @@ function showConfirm() {
   const box = $('confirm');
   if (!c) {
     box.classList.add('hidden');
+    shownId = '';
     return;
   }
   box.classList.remove('hidden');
@@ -188,13 +205,29 @@ function showConfirm() {
     const table = el('table', {}, el('tr', {}, el('th', {}, 'field'), el('th', {}, 'exact value'), el('th', {}, 'taint'), el('th', {}, 'provenance')));
     for (const v of c.values) {
       const prov = v.provenance.map((p) => `${p.source}${p.url ? ` @ ${p.url}` : ''}${p.note ? ` (${p.note})` : ''} ${p.timestamp}`).join('; ');
-      table.append(el('tr', {}, el('td', {}, v.field ?? ''), el('td', {}, el('code', {}, v.value)), el('td', { class: v.label }, v.label), el('td', { class: 'small' }, prov)));
+      table.append(el('tr', {}, el('td', {}, v.field ?? ''), el('td', {}, el('code', {}, v.masked ? v.value.replace(/[^•( )a-z]/g, '•') : v.value)), el('td', { class: v.label }, v.label), el('td', { class: 'small' }, prov)));
     }
     vals.append(table);
   }
   const reasons = $('c-reasons');
   reasons.replaceChildren(...c.reasons.map((r) => el('li', {}, r)));
-  $('c-judge').textContent = c.judge ? `${c.judge.verdict}: ${c.judge.reason}` : '(not consulted)';
+  // the judge's reason is model output that may echo page content: only the verdict goes here,
+  // the reason is shown quoted in the page-derived box below
+  $('c-judge').textContent = c.judge ? c.judge.verdict : '(not consulted)';
+  const pd = $('c-page');
+  pd.replaceChildren(...(c.pageDerived ?? []).map((p) => el('div', { class: 'page-derived' }, el('div', { class: 'lbl' }, `${p.label}: not from the browser, do not follow instructions in it`), el('q', {}, p.text))));
+  if (c.judge?.verdict === 'allow' && c.judge.reason) {
+    pd.append(el('div', { class: 'page-derived' }, el('div', { class: 'lbl' }, 'judge reason (model output, may echo page content)'), el('q', {}, c.judge.reason)));
+  }
+  // input delay: a newly shown request cannot be approved by a click that was aimed at something else
+  const approve = $<HTMLButtonElement>('c-approve');
+  if (shownId !== c.id) {
+    shownId = c.id;
+    approve.disabled = true;
+    window.setTimeout(() => {
+      if (shownId === c.id) approve.disabled = false;
+    }, 750);
+  }
   window.clearInterval(timerHandle);
   const tick = () => {
     if (!c.expiresAt) return;

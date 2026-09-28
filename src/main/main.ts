@@ -2,6 +2,7 @@
 
 import { app, BrowserWindow, ipcMain, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { AgentTask } from '../core/agent';
@@ -10,17 +11,22 @@ import { loadSettings, saveSettings, type Role, type Settings } from '../core/co
 import { EgressController, hostKey, startProxy, type ProxyHandle } from '../core/egress';
 import { NullGuard, TransformersGuard } from '../core/guard';
 import { LlmClient } from '../core/llm';
-import { originOf } from '../core/policy';
+import { originOf, originsInTask } from '../core/policy';
 import { HostSet, ReputationDb, normalizeHost, safeBrowsingLookup, type FeedBuilder } from '../core/reputation';
 import { Worker } from 'node:worker_threads';
-import type { ConfirmOutcome, Guard } from '../core/types';
+import type { ConfirmOutcome, ConfirmRequest, Guard, PolicyResult } from '../core/types';
 import { ConfirmBroker } from './confirm';
 import { ElectronDriver, TabManager, type Tab } from './tabs';
 
 if (process.env.GUARDED_USER_DATA) app.setPath('userData', process.env.GUARDED_USER_DATA);
 
 /** TEST ONLY. Bypasses the policy engine and judge so tests can show the egress layer holds alone. */
-const POLICY_DISABLED = process.env.GUARDED_UNSAFE_DISABLE_POLICY === '1';
+const POLICY_DISABLED = process.env.GUARDED_UNSAFE_DISABLE_POLICY === '1' && process.env.GUARDED_TEST === '1' && !app.isPackaged;
+
+// No speculative DNS / connections: with a proxy configured these are the remaining ways a page
+// could make the network layer touch a host it names.
+app.commandLine.appendSwitch('dns-prefetch-disable');
+app.commandLine.appendSwitch('disable-features', 'Prerender2,SpeculationRulesPrefetchFuture,NoStatePrefetchHoldback,PreconnectToSearch,LoadingPredictorPrefetch');
 
 let settings: Settings;
 let settingsFile = '';
@@ -167,7 +173,7 @@ function setupEgress(ses: Session) {
     }
     if (d.resourceType === 'mainFrame' && settings.reputation.safeBrowsing.enabled) {
       void safeBrowsingVerdict(d.url).then((v) => {
-        if (!v) return contentCheck(d, cb);
+        if (!v) return void egressCheck(d).then((cancel) => cb({ cancel }), () => cb({ cancel: true }));
         const host = normalizeHost(d.url);
         audit.write('egress', { layer: 'reputation', decision: 'block', host, method: d.method, url: d.url, reason: `interstitial: google safe browsing ${v}`, feed: 'google-safe-browsing' });
         if (d.webContents) showInterstitial(d.webContents, d.url, host, `google-safe-browsing (${v})`, host);
@@ -175,54 +181,115 @@ function setupEgress(ses: Session) {
       });
       return;
     }
-    contentCheck(d, cb);
+    void egressCheck(d).then((cancel) => cb({ cancel }), () => cb({ cancel: true }));
   });
 
-  function contentCheck(d: Electron.OnBeforeRequestListenerDetails, cb: (r: Electron.CallbackResponse) => void) {
-    const body = (d.uploadData ?? []).map((u) => (u.bytes ? Buffer.from(u.bytes).toString('utf8') : '')).join('');
-    const { unconfirmed, host } = egress.checkRequest(d.url, d.method, body);
-    if (!unconfirmed.length) return cb({});
-    const ids = unconfirmed.map((v) => v.id).sort();
-    const key = `${ids.join(',')}|${host}`;
-    const base = { host, method: d.method, url: d.url.slice(0, 500), taintIds: ids };
-    if (deniedFlows.has(key)) {
-      egress.auditWebRequest({ ...base, decision: 'block', reason: 'flow already denied in this task' });
-      return cb({ cancel: true });
+  async function readBody(d: Electron.OnBeforeRequestListenerDetails): Promise<{ text: string; unreadable: string[] }> {
+    let text = '';
+    const unreadable: string[] = [];
+    for (const u of d.uploadData ?? []) {
+      if (u.bytes) text += Buffer.from(u.bytes).toString('utf8');
+      else if (u.blobUUID) {
+        try {
+          text += (await ses.getBlobData(u.blobUUID)).toString('utf8');
+        } catch {
+          unreadable.push('blob');
+        }
+      } else if (u.file) unreadable.push(`file upload (${u.file.split('/').pop()})`);
     }
+    return { text, unreadable };
+  }
+
+  /** Ask once per key; remember denials for the rest of the task. Resolves true = allowed. */
+  function askEgress(key: string, req: Omit<ConfirmRequest, 'id' | 'kind'>): Promise<boolean> {
+    if (deniedFlows.has(key)) return Promise.resolve(false);
     let p = inflightFlows.get(key);
     if (!p) {
-      p = broker.request({
-        id: `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-        kind: 'egress',
-        action: `${d.method} request (${d.resourceType})`,
-        target: host,
-        destination: d.url,
-        values: unconfirmed.map((v) => ({ value: v.value, label: v.kind === 'untrusted' ? 'untrusted' : 'trusted', provenance: v.provenance, taintIds: [v.id], field: v.kind })),
-        reasons: [`egress filter: this request carries ${unconfirmed.length} tracked value(s) to ${host} with no confirmed flow`],
-      });
+      p = broker.request({ id: `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, kind: 'egress', ...req });
       inflightFlows.set(key, p);
       void p.finally(() => inflightFlows.delete(key));
     }
-    void p.then((o) => {
-      if (o === 'approve') {
-        egress.confirmFlow(ids, d.url);
-        egress.auditWebRequest({ ...base, decision: 'allow', reason: 'user confirmed this flow' });
-        cb({});
-      } else {
-        deniedFlows.add(key);
-        egress.auditWebRequest({ ...base, decision: 'block', reason: `tainted value in request, confirmation ${o}` });
-        if (o === 'stop') stopTask();
-        cb({ cancel: true });
-      }
+    return p.then((o) => {
+      if (o === 'approve') return true;
+      deniedFlows.add(key);
+      if (o === 'stop') stopTask();
+      return false;
     });
   }
 
+  function formValues(body: string): PolicyResult['values'] {
+    const now = new Date().toISOString();
+    const prov = [{ source: 'snapshot' as const, timestamp: now, note: 'request body built by the page' }];
+    if (/^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$/.test(body)) {
+      return [...new URLSearchParams(body)].slice(0, 20).map(([k, v]) => ({ field: k.slice(0, 60), value: /pass|pwd/i.test(k) ? '•••• (password)' : v.slice(0, 300), masked: /pass|pwd/i.test(k), label: 'untrusted' as const, provenance: prov, taintIds: egress.idsIn(v) }));
+    }
+    return body ? [{ field: 'body', value: body.slice(0, 300), label: 'untrusted' as const, provenance: prov, taintIds: egress.idsIn(body) }] : [];
+  }
+
+  /** Layers after reputation. Resolves true = cancel the request. */
+  async function egressCheck(d: Electron.OnBeforeRequestListenerDetails): Promise<boolean> {
+    const inTask = !!current && egress.mode === 'agent';
+    const host = hostKey(d.url) ?? '?';
+    const base = { host, method: d.method, url: d.url.slice(0, 500) };
+    const { text: body, unreadable } = await readBody(d);
+
+    // (a) bodies we cannot inspect never leave silently during a task
+    if (inTask && unreadable.length) {
+      const ok = await askEgress(`unreadable|${host}|${unreadable.join(',')}`, {
+        action: `${d.method} request (${d.resourceType}) with a body the egress filter cannot inspect`,
+        target: host,
+        destination: d.url,
+        values: unreadable.map((u) => ({ field: 'body part', value: u, label: 'untrusted', provenance: [], taintIds: [] })),
+        reasons: ['request body contains parts (file / blob) that could not be scanned for your data'],
+      });
+      egress.auditWebRequest({ ...base, decision: ok ? 'allow' : 'block', reason: `uninspectable body (${unreadable.join(', ')}): ${ok ? 'confirmed' : 'not confirmed'}` });
+      if (!ok) return true;
+    }
+
+    // (b) form submissions (state-changing top-level requests) from the agent tab need a confirmed submit
+    const agentTab = inTask && current!.tab.wc.id === d.webContentsId;
+    if (agentTab && (d.resourceType === 'mainFrame' || d.resourceType === 'subFrame') && !['GET', 'HEAD', 'OPTIONS'].includes(d.method)) {
+      if (egress.consumeSubmission(d.url)) {
+        egress.auditWebRequest({ ...base, decision: 'allow', reason: 'form submission confirmed at the action layer' });
+      } else {
+        const values = formValues(body);
+        const ok = await askEgress(`submit|${d.method}|${d.url}|${body.length}`, {
+          action: `form submission ${d.method} (not confirmed by the agent's action layer)`,
+          target: host,
+          destination: d.url,
+          values,
+          reasons: ['a page / agent action is submitting a form (POST/PUT/PATCH/DELETE) that was not confirmed'],
+        });
+        egress.auditWebRequest({ ...base, decision: ok ? 'allow' : 'block', reason: `unconfirmed ${d.method} form submission: ${ok ? 'user approved' : 'blocked'}` });
+        if (!ok) return true;
+        egress.confirmFlow(egress.idsIn(`${d.url}\n${body}`), d.url);
+      }
+    }
+
+    // (c) tracked values (reader output, user data the agent typed) in URL or body
+    const { unconfirmed } = egress.checkRequest(d.url, d.method, body);
+    if (!unconfirmed.length) return false;
+    const ids = unconfirmed.map((v) => v.id).sort();
+    const ok = await askEgress(`${ids.join(',')}|${host}`, {
+      action: `${d.method} request (${d.resourceType})`,
+      target: host,
+      destination: d.url,
+      values: unconfirmed.map((v) => ({ value: v.value, label: v.kind === 'untrusted' ? 'untrusted' : 'trusted', provenance: v.provenance, taintIds: [v.id], field: v.kind })),
+      reasons: [`egress filter: this request carries ${unconfirmed.length} tracked value(s) to ${host} with no confirmed flow`],
+    });
+    if (ok) egress.confirmFlow(ids, d.url);
+    egress.auditWebRequest({ ...base, taintIds: ids, decision: ok ? 'allow' : 'block', reason: ok ? 'user confirmed this flow' : 'tainted value in request, not confirmed' });
+    return !ok;
+  }
+
   ses.on('will-download', (_e, item) => {
-    item.setSavePath(join(app.getPath('downloads'), item.getFilename()));
     if (!current) {
-      audit.write('egress', { layer: 'download', decision: 'log', host: hostKey(item.getURL()), method: 'GET', url: item.getURL(), reason: 'manual download' });
+      // manual browsing: Electron's save dialog (no silent writes, no overwrites without asking)
+      audit.write('egress', { layer: 'download', decision: 'log', host: hostKey(item.getURL()), method: 'GET', url: item.getURL(), reason: 'manual download (save dialog)' });
       return;
     }
+    // agent task: never overwrite; the file lands only after the user approves
+    item.setSavePath(uniquePath(process.env.GUARDED_DOWNLOAD_DIR || app.getPath('downloads'), item.getFilename()));
     item.pause();
     void broker
       .request({ id: `d${Date.now().toString(36)}`, kind: 'download', action: 'file download', target: item.getFilename(), destination: item.getURL(), values: [], reasons: ['file downloads during an agent task are always confirmed'] })
@@ -237,8 +304,20 @@ function setupEgress(ses: Session) {
   ses.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
 }
 
+function uniquePath(dir: string, name: string): string {
+  const safe = name.replace(/[/\\\0]/g, '_').replace(/^\.+/, '_') || 'download';
+  const dot = safe.lastIndexOf('.');
+  const [stem, ext] = dot > 0 ? [safe.slice(0, dot), safe.slice(dot)] : [safe, ''];
+  for (let i = 0; ; i++) {
+    const p = join(dir, i === 0 ? safe : `${stem} (${i})${ext}`);
+    if (!existsSync(p)) return p;
+  }
+}
+
 function setupTab(tab: Tab) {
   const wc = tab.wc;
+  // WebRTC may only use proxied transports: no direct UDP past the egress proxy
+  wc.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   wc.setWindowOpenHandler(({ url }) => {
     if (current?.tab === tab) {
       audit.write('navigation', { url, by: 'page', blocked: true, reason: 'popup during agent task' });
@@ -296,7 +375,24 @@ function stopTask() {
   broker.denyAll('stop');
 }
 
-async function startTask(text: string) {
+/** Seed allowlist shown to the user before a task starts (explicit-scheme URLs + current tab). */
+function previewOrigins(text: string): string[] {
+  const start = originOf(tabs.active()?.wc.getURL() ?? '');
+  return [...new Set([...originsInTask(text), ...(start ? [start] : [])])];
+}
+
+function parseOrigins(lines: string[]): string[] {
+  const out = new Set<string>();
+  for (const l of lines) {
+    const t = l.trim();
+    if (!t) continue;
+    const o = originOf(/^[a-z]+:\/\//i.test(t) ? t : `https://${t}`);
+    if (o) out.add(o);
+  }
+  return [...out];
+}
+
+async function startTask(text: string, origins?: string[]) {
   if (current) throw new Error('a task is already running');
   const tab = tabs.active();
   if (!tab) throw new Error('no active tab');
@@ -311,6 +407,7 @@ async function startTask(text: string) {
     confirm: (req) => broker.request(req),
     settings: () => settings.agent,
     egress,
+    seedOrigins: origins ? parseOrigins(origins) : undefined,
     policyDisabled: POLICY_DISABLED,
     onGuardFlag: (_url, n) => {
       tab.guardFlags += n;
@@ -347,7 +444,12 @@ function registerIpc() {
   ipcMain.handle('nav:back', () => tabs.active()?.wc.navigationHistory.goBack());
   ipcMain.handle('nav:forward', () => tabs.active()?.wc.navigationHistory.goForward());
   ipcMain.handle('nav:reload', () => tabs.active()?.wc.reload());
-  ipcMain.handle('agent:start', (_e, text: string) => startTask(String(text)));
+  ipcMain.handle('agent:preview', (_e, text: string) => previewOrigins(String(text)));
+  ipcMain.handle('agent:start', (_e, text: string, origins?: string[]) => startTask(String(text), Array.isArray(origins) ? origins.map(String) : undefined));
+  // asked synchronously by the tab preload at document start: is an agent task driving this tab?
+  ipcMain.on('tab:agent-active', (e) => {
+    e.returnValue = !!current && current.tab.wc === e.sender;
+  });
   ipcMain.handle('agent:stop', () => stopTask());
   ipcMain.handle('confirm:answer', (_e, id: string, outcome: ConfirmOutcome) => {
     if (['approve', 'deny', 'stop'].includes(outcome)) broker.answer(id, outcome);
