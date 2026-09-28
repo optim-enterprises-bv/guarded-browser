@@ -1,6 +1,6 @@
 // Launches the real Electron app against the mock LLM and the fixture servers.
 import { _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultSettings } from '../../src/core/config';
@@ -24,7 +24,10 @@ export interface App {
   app: ElectronApplication;
   ui: Page;
   userData: string;
-  audit(): Array<Record<string, any>>;
+  /** app-state directory of the n-th profile in profiles.json (0 = the default profile) */
+  profileDir(n?: number): string;
+  /** audit events of the n-th profile */
+  audit(n?: number): Array<Record<string, any>>;
   close(): Promise<void>;
 }
 
@@ -65,12 +68,18 @@ export async function launch(o: LaunchOpts): Promise<App> {
   const app = await electron.launch({ args: ['--ozone-platform=x11', ROOT], cwd: ROOT, env });
   const ui = await app.firstWindow();
   await ui.waitForSelector('[data-testid=task-input]');
-  const auditDir = join(userData, 'audit');
+  const profileDir = (n = 0) => {
+    const reg = JSON.parse(readFileSync(join(userData, 'profiles.json'), 'utf8')) as { profiles: Array<{ id: string }> };
+    return join(userData, 'profiles', reg.profiles[n].id);
+  };
   return {
     app,
     ui,
     userData,
-    audit: () => {
+    profileDir,
+    audit: (n = 0) => {
+      const auditDir = join(profileDir(n), 'audit');
+      if (!existsSync(auditDir)) return [];
       const f = readdirSync(auditDir).find((x) => x.endsWith('.jsonl'));
       return f ? readFileSync(join(auditDir, f), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
     },

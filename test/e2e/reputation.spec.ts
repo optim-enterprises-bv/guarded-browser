@@ -128,7 +128,7 @@ test('manual browsing: Proceed anyway always goes through a confirmation', async
 test('(d) local allowlist overrides the feed', async () => {
   a = await launch({ llmUrl: mock.url, feeds: feeds() });
   await feedsLoaded(a.ui);
-  appendFileSync(join(a.userData, 'reputation', 'local-allowlist.txt'), 'localhost\n');
+  appendFileSync(join(a.profileDir(), 'reputation', 'local-allowlist.txt'), 'localhost\n');
   await openSettings(a.ui);
   await a.ui.click('[data-testid=reputation-refresh]');
   await a.ui.fill('[data-testid=address]', `${fx.attacker}/allowed`);
@@ -145,7 +145,7 @@ test('settings UI shows feed status and saves changes', async () => {
   await a.ui.fill('input[data-path="agent.maxSteps"]', '7');
   await a.ui.click('[data-testid=settings-save]');
   await expect(a.ui.locator('#s-msg')).toHaveText('saved');
-  const saved = JSON.parse(readFileSync(join(a.userData, 'settings.json'), 'utf8'));
+  const saved = JSON.parse(readFileSync(join(a.profileDir(), 'settings.json'), 'utf8'));
   expect(saved.agent.maxSteps).toBe(7);
   expect(saved.models.planner.primary.extraBody).toEqual({ enable_thinking: false });
 });

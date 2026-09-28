@@ -10,6 +10,7 @@
 <header id="topbar">
   <div id="tabstrip"><div id="tabs" data-testid="tabs"></div><button id="newtab" title="New tab" data-testid="new-tab">+</button></div>
   <div id="toolbar">
+    <button id="profile-btn" class="profile-btn" title="Profiles" data-testid="profile-button"><span id="profile-avatar" class="avatar"></span><span id="profile-name"></span></button>
     <button id="back" title="Back">&#8592;</button>
     <button id="forward" title="Forward">&#8594;</button>
     <button id="reload" title="Reload">&#8635;</button>
@@ -75,6 +76,20 @@
         <span id="c-timer" class="muted"></span>
       </div>
       <p class="muted small">This dialog is drawn by the browser, never by the page. No answer means deny.</p>
+    </div>
+  </div>
+
+  <div id="profiles" class="overlay hidden" data-testid="profiles-panel">
+    <div class="card scroll">
+      <h2>Profiles</h2>
+      <p class="muted small">Each profile has its own window, cookies and site data, settings, themes, audit log and agent state.</p>
+      <div id="profile-list" data-testid="profile-list"></div>
+      <div class="row">
+        <input id="pn-name" placeholder="New profile name" maxlength="40" data-testid="profile-new-name">
+        <input id="pn-color" type="color" value="#1b8a5a" data-testid="profile-new-color">
+        <button id="pn-create" class="primary" data-testid="profile-create">Create</button>
+      </div>
+      <div class="row"><button id="pr-close">Close</button><span id="pr-msg" class="muted" data-testid="profile-msg"></span></div>
     </div>
   </div>
 

@@ -17,7 +17,7 @@ import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import type { RegisteredValue, TaintRegistry } from './taint';
-import type { ReputationDb, ReputationHit } from './reputation';
+import type { ReputationChecker, ReputationHit } from './reputation';
 import type { FormField } from './types';
 
 export interface ApprovedRequest {
@@ -138,7 +138,7 @@ export class EgressController {
   private blocked = new Map<string, number>();
   private confirmedFlows = new Set<string>();
   taint: TaintRegistry | null = null;
-  reputation: ReputationDb | null = null;
+  reputation: ReputationChecker | null = null;
   /** hosts the user chose to visit despite a reputation listing (manual browsing only) */
   private reputationOverrides = new Set<string>();
   private listeners: Array<() => void> = [];

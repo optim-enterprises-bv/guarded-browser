@@ -186,6 +186,10 @@ gb.on('geometry', renderPanes);
 
 // ---------- status chips ----------
 function renderState(s: any) {
+  if (s.profile) {
+    myProfile = s.profile;
+    renderProfileButton();
+  }
   renderTabs(s.tabs);
   const g = $('chip-guard');
   g.textContent = s.guard.status === 'ready' ? 'guard: on' : s.guard.status === 'loading' ? 'guard: loading' : 'guard unavailable';
@@ -485,6 +489,63 @@ $('s-save').onclick = async () => {
     $('s-msg').textContent = `not saved: ${(e as Error).message}`;
   }
 };
+
+// ---------- profiles ----------
+interface ProfileInfo { id: string; name: string; color: string; open: boolean }
+let myProfile: { id: string; name: string; color: string } | null = null;
+
+function avatar(p: { name: string; color: string }) {
+  const a = el('span', { class: 'avatar' }, (p.name.trim()[0] ?? '?').toUpperCase());
+  a.style.background = /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : '#888888';
+  return a;
+}
+
+function renderProfileButton() {
+  if (!myProfile) return;
+  const av = $('profile-avatar');
+  av.textContent = (myProfile.name.trim()[0] ?? '?').toUpperCase();
+  av.style.background = /^#[0-9a-f]{6}$/i.test(myProfile.color) ? myProfile.color : '#888888';
+  $('profile-name').textContent = myProfile.name;
+  $('profile-btn').setAttribute('data-profile-id', myProfile.id);
+}
+
+function renderProfiles(list: ProfileInfo[]) {
+  const box = $('profile-list');
+  box.replaceChildren();
+  for (const p of list) {
+    const name = el('input', { value: p.name, maxlength: '40', 'data-testid': 'profile-name-input' }) as HTMLInputElement;
+    const color = el('input', { type: 'color', value: p.color, 'data-testid': 'profile-color-input' }) as HTMLInputElement;
+    const save = el('button', { 'data-testid': 'profile-save' }, 'Save');
+    save.onclick = async () => {
+      const r = await gb.invoke('profiles:update', p.id, { name: name.value, color: color.value });
+      $('pr-msg').textContent = r.ok ? 'saved' : r.error;
+    };
+    const open = el('button', { 'data-testid': 'profile-open' }, p.id === myProfile?.id ? 'This window' : p.open ? 'Show window' : 'Open in new window');
+    open.onclick = () => void gb.invoke('profiles:open', p.id);
+    const del = el('button', { class: 'danger', 'data-testid': 'profile-delete' }, 'Delete');
+    del.onclick = async () => {
+      const r = await gb.invoke('profiles:delete', p.id);
+      $('pr-msg').textContent = r?.ok ? 'deleted' : r?.error ?? '';
+    };
+    box.append(el('div', { class: 'profile-row', 'data-testid': 'profile-row', 'data-profile-id': p.id }, avatar(p), name, color, el('span', { class: 'actions-inline' }, save, open, del)));
+  }
+}
+
+async function openProfiles() {
+  renderProfiles(await gb.invoke('profiles:list'));
+  $('profiles').classList.remove('hidden');
+}
+$('profile-btn').onclick = () => void openProfiles();
+$('pr-close').onclick = () => $('profiles').classList.add('hidden');
+$('pn-create').onclick = async () => {
+  const r = await gb.invoke('profiles:create', $<HTMLInputElement>('pn-name').value, $<HTMLInputElement>('pn-color').value);
+  $('pr-msg').textContent = r.ok ? 'created' : r.error;
+  if (r.ok) $<HTMLInputElement>('pn-name').value = '';
+};
+gb.on('profiles', (list: ProfileInfo[]) => {
+  if (!$('profiles').classList.contains('hidden')) renderProfiles(list);
+});
+gb.on('profiles:show-manager', () => void openProfiles());
 
 // ---------- boot ----------
 const appearanceUi = initAppearance(gb);

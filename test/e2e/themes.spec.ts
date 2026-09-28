@@ -96,7 +96,7 @@ test('theme import is validated strictly: CSS injection, named colours, ranges, 
   for (const b of bad) expect(await importTheme(a.ui, b), JSON.stringify(b)).toMatch(/^rejected/);
   expect(await importTheme(a.ui, { ...READABLE, name: 'Good one', background: 'rgb(10, 20, 30)' })).toBe('imported "Good one"');
   await expect(a.ui.locator('[data-testid=theme-select] option')).toContainText(['System', 'Light', 'Dark', 'Light Violet', 'Dark Teal', 'Good one']);
-  const saved = JSON.parse(readFileSync(join(a.userData, 'settings.json'), 'utf8')).appearance.custom;
+  const saved = JSON.parse(readFileSync(join(a.profileDir(), 'settings.json'), 'utf8')).appearance.custom;
   expect(saved).toEqual([{ ...READABLE, name: 'Good one', background: '#0a141e' }]);
 });
 

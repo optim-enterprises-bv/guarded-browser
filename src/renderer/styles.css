@@ -137,3 +137,9 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .phead.lock-pane-head { background: #e8eaed !important; color: #202124 !important; }
 .phead.lock-pane-head .pnum { color: #202124 !important; }
 .phead .ptitle { font-style: italic; }
+
+.profile-btn { display: flex; align-items: center; gap: 6px; max-width: 160px; }
+.profile-btn #profile-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.avatar { display: inline-flex; width: 20px; height: 20px; border-radius: 50%; align-items: center; justify-content: center; color: #ffffff; font-weight: 700; font-size: 11px; flex: none; }
+.profile-row { display: grid; grid-template-columns: 24px 1fr 44px auto; gap: 6px; align-items: center; margin: 6px 0; }
+.profile-row .actions-inline { display: flex; gap: 4px; flex-wrap: wrap; }

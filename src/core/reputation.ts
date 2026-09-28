@@ -179,6 +179,37 @@ const defaultFetcher: Fetcher = async (url) => {
   return { status: r.status, text: await r.text() };
 };
 
+/** Anything that can answer "is this host listed?" (a profile's view: shared feeds + its own lists). */
+export interface ReputationChecker {
+  check(hostOrUrl: string): ReputationHit;
+}
+
+/**
+ * A profile's own local blocklist / allowlist files (profiles/<id>/reputation/). The feeds are
+ * shared public data; these overrides are per profile.
+ */
+export class LocalLists {
+  block = new Set<string>();
+  allow = new Set<string>();
+  readonly blockFile: string;
+  readonly allowFile: string;
+
+  constructor(dir: string) {
+    mkdirSync(dir, { recursive: true });
+    this.blockFile = join(dir, 'local-blocklist.txt');
+    this.allowFile = join(dir, 'local-allowlist.txt');
+    if (!existsSync(this.blockFile)) writeFileSync(this.blockFile, '# One host per line. Parent domains match subdomains. Blocked in manual and agent mode.\n');
+    if (!existsSync(this.allowFile)) writeFileSync(this.allowFile, '# One host per line. The allowlist wins over every feed and the local blocklist.\n');
+    this.reload();
+  }
+
+  reload() {
+    const read = (f: string) => new Set(existsSync(f) ? parseFeed(readFileSync(f, 'utf8'), 'domains') : []);
+    this.block = read(this.blockFile);
+    this.allow = read(this.allowFile);
+  }
+}
+
 export class ReputationDb {
   private sets = new Map<string, HostSet>();
   private statuses = new Map<string, FeedStatus>();
@@ -187,21 +218,27 @@ export class ReputationDb {
   private timer: NodeJS.Timeout | null = null;
   private listeners: Array<() => void> = [];
   readonly feedDir: string;
-  readonly localBlockFile: string;
-  readonly localAllowFile: string;
+  localBlockFile: string;
+  localAllowFile: string;
 
   constructor(
     dir: string,
     private feeds: FeedConfig[],
     private readonly fetcher: Fetcher = defaultFetcher,
     private readonly builder: FeedBuilder = inProcessBuilder,
+    /** false for the app's shared feed store: local lists then live per profile (LocalLists) */
+    ownLocalLists = true,
   ) {
     this.feedDir = join(dir, 'feeds');
     mkdirSync(this.feedDir, { recursive: true });
     this.localBlockFile = join(dir, 'local-blocklist.txt');
     this.localAllowFile = join(dir, 'local-allowlist.txt');
-    if (!existsSync(this.localBlockFile)) writeFileSync(this.localBlockFile, '# One host per line. Parent domains match subdomains. Blocked in manual and agent mode.\n');
-    if (!existsSync(this.localAllowFile)) writeFileSync(this.localAllowFile, '# One host per line. The allowlist wins over every feed and the local blocklist.\n');
+    if (!ownLocalLists) {
+      this.localBlockFile = this.localAllowFile = '';
+    } else {
+      if (!existsSync(this.localBlockFile)) writeFileSync(this.localBlockFile, '# One host per line. Parent domains match subdomains. Blocked in manual and agent mode.\n');
+      if (!existsSync(this.localAllowFile)) writeFileSync(this.localAllowFile, '# One host per line. The allowlist wins over every feed and the local blocklist.\n');
+    }
     for (const f of feeds) this.statuses.set(f.name, { name: f.name, url: f.url, enabled: f.enabled, entries: 0, failures: 0, source: 'none' });
   }
 
@@ -229,7 +266,7 @@ export class ReputationDb {
   }
 
   reloadLocalLists() {
-    const read = (f: string) => new Set(existsSync(f) ? parseFeed(readFileSync(f, 'utf8'), 'domains') : []);
+    const read = (f: string) => new Set(f && existsSync(f) ? parseFeed(readFileSync(f, 'utf8'), 'domains') : []);
     this.localBlock = read(this.localBlockFile);
     this.localAllow = read(this.localAllowFile);
     this.changed();
@@ -321,12 +358,15 @@ export class ReputationDb {
     if (this.timer) clearInterval(this.timer);
   }
 
-  check(hostOrUrl: string): ReputationHit {
+  /** With `local`, that profile's lists are used instead of this db's own local files. */
+  check(hostOrUrl: string, local?: LocalLists): ReputationHit {
     const host = normalizeHost(hostOrUrl);
     if (!host) return { listed: false, host };
     const keys = parents(host);
-    for (const k of keys) if (this.localAllow.has(k)) return { listed: false, host, allowlisted: true, matched: k };
-    for (const k of keys) if (this.localBlock.has(k)) return { listed: true, host, feed: 'local-blocklist', matched: k };
+    const allow = local ? local.allow : this.localAllow;
+    const block = local ? local.block : this.localBlock;
+    for (const k of keys) if (allow.has(k)) return { listed: false, host, allowlisted: true, matched: k };
+    for (const k of keys) if (block.has(k)) return { listed: true, host, feed: 'local-blocklist', matched: k };
     for (const [name, set] of this.sets) {
       for (const k of keys) if (set.has(k)) return { listed: true, host, feed: name, matched: k };
     }

@@ -75,7 +75,7 @@ export type ConfirmOutcome = 'approve' | 'deny' | 'stop' | 'timeout';
 
 export interface ConfirmRequest {
   id: string;
-  kind: 'action' | 'egress' | 'redirect' | 'download' | 'reputation';
+  kind: 'action' | 'egress' | 'redirect' | 'download' | 'reputation' | 'profile';
   action: string;
   target: string;
   destination?: string;
