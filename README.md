@@ -512,14 +512,14 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/policy.test.ts` | 15 | pass |
 | unit | `test/unit/llm-reader.test.ts` (client, fallback, planner parsing, reader validation, judge) | 13 | pass |
 | unit | `test/unit/agent.test.ts` (agent loop with compromised mock models) | 13 | pass |
-| unit | `test/unit/hardening.test.ts` (review regressions, rounds 1-4) | 24 | pass |
+| unit | `test/unit/hardening.test.ts` (review regressions, rounds 1-5) | 25 | pass |
 | unit | `test/unit/reputation.test.ts` | 11 | pass |
 | unit | `test/unit/egress.test.ts` (proxy + content filter) | 7 | pass |
 | unit | `test/unit/taint.test.ts` | 4 | pass |
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
 | unit | `test/unit/tile-layout.test.ts` (split-view geometry, incl. tiny windows 0-1440 px) | 27 | pass |
-| unit | `test/unit/theme.test.ts` (colour parsing, schema, contrast, schedule) | 11 | pass |
+| unit | `test/unit/theme.test.ts` (colour parsing, schema, readability, contrast, agent-yellow distance, schedule) | 14 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
 | e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-4, ported, plus controls) | 30 | pass |
 | e2e | `test/e2e/benign.spec.ts` | 3 | pass |
@@ -527,7 +527,8 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/guard.spec.ts` | 2 | pass |
 | e2e | `test/e2e/splitview.spec.ts` (tiling + agent confined to its pane + small windows) | 5 | pass |
 | e2e | `test/e2e/themes.spec.ts` (themes + locked security styling) | 5 | pass |
-| **total** | | **188** (128 unit + 60 e2e) | **all pass** |
+| e2e | `test/e2e/regressions-r5.spec.ts` (review round 5: split view + themes) | 6 | pass |
+| **total** | | **198** (132 unit + 66 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 
