@@ -17,6 +17,7 @@ import { Worker } from 'node:worker_threads';
 import type { ConfirmOutcome, ConfirmRequest, Guard, PolicyResult } from '../core/types';
 import { ConfirmBroker } from './confirm';
 import { ElectronDriver, TabManager, type Tab } from './tabs';
+import type { TileLayout } from './tile-layout';
 
 if (process.env.GUARDED_USER_DATA) app.setPath('userData', process.env.GUARDED_USER_DATA);
 
@@ -58,6 +59,13 @@ const postTaskGuard = new Set<number>();
  */
 const guardedOrigins = new Set<string>();
 let guardedSession: Session | null = null;
+
+/** Browser-generated "where does this request come from" for confirmation dialogs. */
+function sourceOf(wcId: number | undefined): ConfirmRequest['source'] {
+  const t = tabs?.list().map((x) => tabs.byId(x.id)!).find((x) => x.wc.id === wcId);
+  if (!t) return { label: 'a background worker or the browser itself (no tab)' };
+  return tabs.describe(t.id) ?? undefined;
+}
 
 function isTabRequest(id: number | undefined): boolean {
   return id !== undefined && tabs.list().some((t) => tabs.byId(t.id)?.wc.id === id);
@@ -131,6 +139,7 @@ function handleProceed(token: string) {
     .request({
       id: `r${Date.now().toString(36)}`,
       kind: 'reputation',
+      source: sourceOf(tabs.active()?.wc.id),
       action: 'visit a host listed as malicious',
       target: it.host,
       destination: it.url,
@@ -264,6 +273,7 @@ function setupEgress(ses: Session) {
     // (a) bodies we cannot inspect never leave silently during a task
     if (inTask && unreadable.length) {
       const ok = await askEgress(`unreadable|${host}|${unreadable.join(',')}`, {
+        source: sourceOf(d.webContentsId),
         action: `${d.method} request (${d.resourceType}) with a body the egress filter cannot inspect`,
         target: host,
         destination: d.url,
@@ -286,6 +296,7 @@ function setupEgress(ses: Session) {
         egress.auditWebRequest({ ...base, decision: 'allow', reason: 'matches the submission confirmed at the action layer (method, URL, fields)' });
       } else {
         const ok = await askEgress(`write|${d.method}|${d.url}|${createHash('sha256').update(body).digest('hex')}`, {
+        source: sourceOf(d.webContentsId),
           action: `${d.method} ${d.resourceType} request that was not confirmed`,
           target: host,
           destination: d.url,
@@ -311,6 +322,7 @@ function setupEgress(ses: Session) {
     if (!unconfirmed.length) return false;
     const ids = unconfirmed.map((v) => v.id).sort();
     const ok = await askEgress(`${ids.join(',')}|${host}`, {
+        source: sourceOf(d.webContentsId),
       action: `${d.method} request (${d.resourceType})`,
       target: host,
       destination: d.url,
@@ -340,7 +352,7 @@ function setupEgress(ses: Session) {
     cb({ requestHeaders: d.requestHeaders });
   });
 
-  ses.on('will-download', (_e, item) => {
+  ses.on('will-download', (_e, item, dlWc) => {
     if (!current) {
       // manual browsing: Electron's save dialog (no silent writes, no overwrites without asking)
       audit.write('egress', { layer: 'download', decision: 'log', host: hostKey(item.getURL()), method: 'GET', url: item.getURL(), reason: 'manual download (save dialog)' });
@@ -357,7 +369,7 @@ function setupEgress(ses: Session) {
     const url = item.getURL();
     const name = item.getFilename();
     void broker
-      .request({ id: `d${Date.now().toString(36)}`, kind: 'download', action: 'file download', target: name, destination: url, values: [], reasons: ['file downloads during an agent task are always confirmed'] })
+      .request({ id: `d${Date.now().toString(36)}`, kind: 'download', source: sourceOf(dlWc?.id), action: 'file download', target: name, destination: url, values: [], reasons: ['file downloads during an agent task are always confirmed'] })
       .then(async (o) => {
         audit.write('egress', { layer: 'download', decision: o === 'approve' ? 'allow' : 'block', host: hostKey(url), method: 'GET', url, reason: `confirmation ${o}` });
         if (o === 'approve') {
@@ -390,8 +402,24 @@ function uniquePath(dir: string, name: string): string {
   }
 }
 
+/** Ctrl+Shift+S tiles the selected tabs, Ctrl+Shift+U untiles; works while a page has focus too. */
+function installShortcuts(wc: WebContents) {
+  wc.on('before-input-event', (e, input) => {
+    if (input.type !== 'keyDown' || !(input.control || input.meta) || !input.shift) return;
+    const k = input.key.toLowerCase();
+    if (k === 's') {
+      e.preventDefault();
+      tabs.tile(undefined, 'columns');
+    } else if (k === 'u') {
+      e.preventDefault();
+      tabs.untile();
+    }
+  });
+}
+
 function setupTab(tab: Tab) {
   const wc = tab.wc;
+  installShortcuts(wc);
   // WebRTC may only use proxied transports: no direct UDP past the egress proxy
   wc.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   wc.setWindowOpenHandler(({ url }) => {
@@ -419,6 +447,7 @@ function setupTab(tab: Tab) {
       .request({
         id: `n${Date.now().toString(36)}`,
         kind: 'redirect',
+        source: sourceOf(wc.id),
         action: `page-initiated ${kind}`,
         target: origin,
         destination: url,
@@ -488,7 +517,8 @@ async function startTask(text: string, origins?: string[]) {
     guard,
     driver: new ElectronDriver(tab),
     audit,
-    confirm: (req) => broker.request(req),
+    // every agent-action confirmation names the agent's own pane
+    confirm: (req) => broker.request({ ...req, source: tabs.describe(tab.id) ?? undefined }),
     settings: () => settings.agent,
     egress,
     seedOrigins: origins ? parseOrigins(origins) : undefined,
@@ -500,6 +530,7 @@ async function startTask(text: string, origins?: string[]) {
     onUpdate: (u) => sendUI('agent:update', u),
   });
   current = { task, tab };
+  tabs.setAgentTab(tab.id);
   sendUI('agent:update', { taskId: task.id, status: 'started', step: 0 });
   void task
     .run()
@@ -508,6 +539,7 @@ async function startTask(text: string, origins?: string[]) {
     .finally(() => {
       broker.denyAll('deny');
       current = null;
+      tabs.setAgentTab(null);
       // Service workers registered by pages the agent visited would outlive the task and act
       // without a tab: unregister them for every origin the agent's tab visited.
       // (TEST ONLY: GUARDED_TEST_KEEP_SW=1 skips this to show the worker gate holds on its own)
@@ -528,11 +560,24 @@ function registerIpc() {
   ipcMain.handle('tabs:new', (_e, url?: string) => tabs.create(url || 'about:blank').id);
   ipcMain.handle('tabs:close', (_e, id: number) => {
     const t = tabs.byId(id);
+    if (current && current.tab === t) stopTask(); // closing the agent's pane ends its task
     if (t) postTaskGuard.delete(t.wc.id);
     if (!postTaskGuard.size) guardedOrigins.clear();
     tabs.close(id);
   });
   ipcMain.handle('tabs:activate', (_e, id: number) => tabs.activate(id));
+  ipcMain.handle('tabs:select', (_e, id: number, on?: boolean) => tabs.toggleSelected(Number(id), typeof on === 'boolean' ? on : undefined));
+  const LAYOUTS = new Set(['columns', 'rows', 'grid']);
+  const layoutArg = (l: unknown): TileLayout => (LAYOUTS.has(String(l)) ? (String(l) as TileLayout) : 'columns');
+  ipcMain.handle('tiles:tile', (_e, ids: unknown, layout: unknown) => tabs.tile(Array.isArray(ids) ? ids.map(Number) : undefined, layoutArg(layout)));
+  ipcMain.handle('tiles:untile', () => tabs.untile());
+  ipcMain.handle('tiles:layout', (_e, layout: unknown) => tabs.setTileLayout(layoutArg(layout)));
+  ipcMain.handle('tiles:drag', (_e, phase: unknown, key: unknown, at: unknown) => {
+    if (phase === 'start') tabs.setDragging(true);
+    else if (phase === 'move' && typeof key === 'string' && /^(col|row|c\d|r\d)$/.test(key)) tabs.dragDivider(key as never, Number(at));
+    else if (phase === 'end') tabs.setDragging(false);
+  });
+  ipcMain.handle('tiles:state', () => tabs.tileState());
   ipcMain.handle('nav:go', (_e, input: string) => {
     const t = tabs.active();
     if (!t) return;
@@ -652,6 +697,8 @@ app.whenReady().then(async () => {
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   await win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
   tabs = new TabManager(win, ses, () => sendUI('tabs', tabs.list()), setupTab);
+  tabs.onGeometry = (g) => sendUI('geometry', g);
+  installShortcuts(win.webContents);
   tabs.create(process.env.GUARDED_START_URL || 'about:blank');
   sendUI('state', state());
 });

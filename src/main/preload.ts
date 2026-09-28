@@ -2,10 +2,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 const INVOKE = new Set([
-  'state:get', 'tabs:new', 'tabs:close', 'tabs:activate', 'nav:go', 'nav:back', 'nav:forward', 'nav:reload',
+  'state:get', 'tabs:new', 'tabs:close', 'tabs:activate', 'tabs:select', 'tiles:tile', 'tiles:untile', 'tiles:layout', 'tiles:drag', 'tiles:state', 'nav:go', 'nav:back', 'nav:forward', 'nav:reload',
   'agent:preview', 'agent:start', 'agent:stop', 'confirm:answer', 'egress:allow', 'settings:get', 'settings:save', 'audit:recent', 'reputation:refresh',
 ]);
-const EVENTS = new Set(['state', 'tabs', 'agent:update', 'agent:done', 'confirm:request', 'confirm:clear', 'audit', 'egress', 'fallback', 'reputation']);
+const EVENTS = new Set(['state', 'tabs', 'agent:update', 'agent:done', 'confirm:request', 'confirm:clear', 'audit', 'egress', 'fallback', 'reputation', 'geometry']);
 
 contextBridge.exposeInMainWorld('gb', {
   invoke: (channel: string, ...args: unknown[]) => {

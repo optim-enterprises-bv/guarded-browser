@@ -24,9 +24,11 @@ function el(tag: string, attrs: Record<string, string> = {}, ...children: Array<
 }
 
 // ---------- tabs & navigation ----------
-interface TabInfo { id: number; title: string; url: string; loading: boolean; active: boolean; guardFlags: number; canGoBack: boolean; canGoForward: boolean }
+interface TabInfo { id: number; title: string; url: string; loading: boolean; active: boolean; guardFlags: number; canGoBack: boolean; canGoForward: boolean; pane: number | null; selected: boolean; agent: boolean }
+let lastTabs: TabInfo[] = [];
 
 function renderTabs(list: TabInfo[]) {
+  lastTabs = list;
   const box = $('tabs');
   box.replaceChildren();
   for (const t of list) {
@@ -35,10 +37,20 @@ function renderTabs(list: TabInfo[]) {
       ev.stopPropagation();
       void gb.invoke('tabs:close', t.id);
     };
-    const tab = el('div', { class: `tab${t.active ? ' active' : ''}`, 'data-testid': 'tab', title: t.url },
-      ...(t.guardFlags ? [el('span', { class: 'flag', title: 'content withheld by the guard' }, '!')] : []),
+    const tab = el('div', { class: `tab${t.active ? ' active' : ''}${t.selected ? ' selected' : ''}`, 'data-testid': 'tab', 'data-tab-id': String(t.id), title: t.url },
+      ...(t.agent ? [el('span', { class: 'lock-agent-chip', title: 'the agent is operating this tab' }, 'AGENT')] : []),
+      ...(t.guardFlags ? [el('span', { class: 'lock-flag', title: 'content withheld by the guard' }, '!')] : []),
+      ...(t.pane ? [el('span', { class: 'pnum' }, `[${t.pane}]`)] : []),
       el('span', { class: 'title' }, `${t.loading ? '… ' : ''}${t.title}`), x);
-    tab.onclick = () => void gb.invoke('tabs:activate', t.id);
+    // Ctrl/Cmd+click selects tabs for tiling; plain click activates
+    tab.onclick = (ev) => {
+      if (ev.ctrlKey || ev.metaKey) void gb.invoke('tabs:select', t.id);
+      else void gb.invoke('tabs:activate', t.id);
+    };
+    tab.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      showTabMenu(t, ev.clientX, ev.clientY);
+    };
     box.append(tab);
   }
   const active = list.find((t) => t.active);
@@ -63,6 +75,108 @@ $<HTMLInputElement>('address').addEventListener('keydown', (e) => {
     (e.target as HTMLInputElement).blur();
   }
 });
+
+// ---------- split view ----------
+interface Rect { x: number; y: number; width: number; height: number }
+interface Geometry {
+  mode: 'single' | 'tiled';
+  layout: string | null;
+  dragging: boolean;
+  panes: Array<{ tabId: number; pane: number | null; outer: Rect; active: boolean; agent: boolean; chrome: boolean }>;
+  dividers: Array<{ key: string; orientation: 'vertical' | 'horizontal'; rect: Rect }>;
+}
+let geometry: Geometry | null = null;
+let dragKey: string | null = null;
+
+const place = (e: HTMLElement, r: Rect) => Object.assign(e.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.width}px`, height: `${r.height}px` });
+
+function renderPanes(g: Geometry) {
+  geometry = g;
+  const box = $('panes');
+  box.replaceChildren();
+  $('untile').toggleAttribute('disabled', g.mode !== 'tiled');
+  if (g.layout) $<HTMLSelectElement>('tile-layout').value = g.layout;
+  for (const p of g.panes) {
+    const t = lastTabs.find((x) => x.id === p.tabId);
+    if (g.dragging) {
+      const ghost = el('div', { class: 'ghost' }, t?.title ?? '');
+      place(ghost, p.outer);
+      box.append(ghost);
+      continue;
+    }
+    if (!p.chrome) continue;
+    // Frame and header are browser chrome around the page view: a page cannot draw or fake them.
+    const frame = el('div', { class: `pane${p.active ? ' active' : ''}${p.agent ? ' lock-agent-frame' : ''}`, 'data-testid': p.agent ? 'agent-pane' : 'pane', 'data-tab-id': String(p.tabId) });
+    const head = el('div', { class: `phead${p.agent ? ' lock-agent-head' : ''}` },
+      ...(p.agent ? [el('span', { class: 'lock-agent-badge', 'data-testid': 'agent-active-badge' }, 'AGENT ACTIVE')] : []),
+      ...(p.pane ? [el('span', { class: 'pnum' }, `pane ${p.pane}`)] : []),
+      el('span', { class: 'ptitle' }, t?.title ?? ''));
+    head.onclick = () => void gb.invoke('tabs:activate', p.tabId);
+    frame.append(head);
+    place(frame, p.outer);
+    box.append(frame);
+  }
+  for (const d of g.dividers) {
+    const div = el('div', { class: `divider ${d.orientation}${dragKey === d.key ? ' dragging' : ''}`, 'data-testid': 'divider', 'data-key': d.key });
+    place(div, d.rect);
+    div.onpointerdown = (ev) => {
+      ev.preventDefault();
+      dragKey = d.key;
+      void gb.invoke('tiles:drag', 'start');
+      const move = (m: PointerEvent) => void gb.invoke('tiles:drag', 'move', d.key, d.orientation === 'vertical' ? m.clientX : m.clientY);
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        dragKey = null;
+        void gb.invoke('tiles:drag', 'end');
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    };
+    box.append(div);
+  }
+}
+
+function showTabMenu(t: TabInfo, x: number, y: number) {
+  const menu = $('tab-menu');
+  const item = (label: string, fn: () => void) => {
+    const b = el('button', { role: 'menuitem' }, label);
+    b.onclick = () => {
+      menu.classList.add('hidden');
+      fn();
+    };
+    return b;
+  };
+  const selected = lastTabs.filter((x) => x.selected).map((x) => x.id);
+  const ids = [...new Set([t.id, ...selected])];
+  menu.replaceChildren(
+    item(t.selected ? 'Deselect for split view' : 'Select for split view', () => void gb.invoke('tabs:select', t.id)),
+    item('Tile side by side', () => void gb.invoke('tiles:tile', ids.length >= 2 ? ids : undefined, 'columns')),
+    item('Tile stacked', () => void gb.invoke('tiles:tile', ids.length >= 2 ? ids : undefined, 'rows')),
+    item('Tile as grid', () => void gb.invoke('tiles:tile', ids.length >= 2 ? ids : undefined, 'grid')),
+    item('Untile', () => void gb.invoke('tiles:untile')),
+  );
+  Object.assign(menu.style, { left: `${x}px`, top: `${y}px` });
+  menu.classList.remove('hidden');
+}
+document.addEventListener('click', (e) => {
+  if (!$('tab-menu').contains(e.target as Node)) $('tab-menu').classList.add('hidden');
+});
+$('tile').onclick = () => void gb.invoke('tiles:tile', undefined, $<HTMLSelectElement>('tile-layout').value);
+$('untile').onclick = () => void gb.invoke('tiles:untile');
+$<HTMLSelectElement>('tile-layout').onchange = () => {
+  if (geometry?.mode === 'tiled') void gb.invoke('tiles:layout', $<HTMLSelectElement>('tile-layout').value);
+};
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    void gb.invoke('tiles:tile', undefined, $<HTMLSelectElement>('tile-layout').value);
+  } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'u') {
+    e.preventDefault();
+    void gb.invoke('tiles:untile');
+  }
+});
+gb.on('geometry', renderPanes);
 
 // ---------- status chips ----------
 function renderState(s: any) {
@@ -198,6 +312,9 @@ function showConfirm() {
   }
   box.classList.remove('hidden');
   box.setAttribute('data-kind', c.kind);
+  // which tab / pane asks: browser-generated label; the tab title is page text, so it is quoted
+  const src = $('c-source');
+  src.replaceChildren(el('strong', {}, c.source?.label ?? 'unknown'), ...(c.source?.title ? [' ', el('q', { class: 'small' }, c.source.title)] : []));
   $('c-action').textContent = c.action;
   $('c-target').textContent = c.target;
   $('c-dest').textContent = c.destination ?? '(stays in this page)';
@@ -362,7 +479,10 @@ $('s-save').onclick = async () => {
 
 // ---------- boot ----------
 gb.on('state', renderState);
-gb.on('tabs', renderTabs);
+gb.on('tabs', (l: TabInfo[]) => {
+  renderTabs(l);
+  if (geometry) renderPanes(geometry);
+});
 gb.on('egress', renderEgress);
 gb.on('fallback', renderFallback);
 gb.on('reputation', renderReputation);

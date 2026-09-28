@@ -82,6 +82,8 @@ export interface ConfirmRequest {
   values: PolicyResult['values'];
   reasons: string[];
   judge?: JudgeVerdict;
+  /** which tab / pane the request comes from (browser-generated label + the tab's title, quoted) */
+  source?: { label: string; title?: string };
   /** attacker-influenced text, shown quoted and labelled in the dialog */
   pageDerived?: Array<{ label: string; text: string }>;
 }

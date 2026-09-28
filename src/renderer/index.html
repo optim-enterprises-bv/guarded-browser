@@ -14,9 +14,18 @@
     <button id="forward" title="Forward">&#8594;</button>
     <button id="reload" title="Reload">&#8635;</button>
     <input id="address" data-testid="address" spellcheck="false" placeholder="Enter a URL">
-    <span id="guard-badge" class="badge warn hidden" data-testid="guard-badge"></span>
+    <span id="guard-badge" class="lock-badge hidden" data-testid="guard-badge"></span>
+    <select id="tile-layout" title="Split view layout" data-testid="tile-layout">
+      <option value="columns">Side by side</option>
+      <option value="rows">Stacked</option>
+      <option value="grid">Grid</option>
+    </select>
+    <button id="tile" title="Tile selected tabs (Ctrl+Shift+S; Ctrl+click tabs to select)" data-testid="tile">Tile</button>
+    <button id="untile" title="Back to a single view (Ctrl+Shift+U)" data-testid="untile">Untile</button>
   </div>
 </header>
+<div id="panes" data-testid="panes"></div>
+<div id="tab-menu" class="menu hidden" data-testid="tab-menu" role="menu"></div>
 <aside id="panel">
   <div id="panel-head">
     <strong>Agent</strong>
@@ -33,7 +42,7 @@
     <button id="stop" class="danger" data-testid="task-stop" disabled>Stop</button>
     <span id="status" data-testid="task-status">idle</span>
   </div>
-  <div id="preflight" class="preflight hidden" data-testid="preflight">
+  <div id="preflight" class="preflight hidden lock-notice" data-testid="preflight">
     <strong>Allowed sites for this task</strong>
     <p class="muted small">Only these origins may be used without asking (one per line). Sites named with http(s):// in your task and the current tab are pre-filled; bare names like report.zip are not.</p>
     <textarea id="pf-origins" rows="3" data-testid="preflight-origins" spellcheck="false"></textarea>
@@ -43,13 +52,14 @@
     </div>
   </div>
   <div id="answer" class="answer hidden" data-testid="task-answer"></div>
-  <div id="blocked" class="hidden" data-testid="blocked-hosts"></div>
+  <div id="blocked" class="hidden lock-notice" data-testid="blocked-hosts"></div>
   <h3>Timeline</h3>
   <ol id="timeline" data-testid="timeline"></ol>
 
-  <div id="confirm" class="overlay hidden" data-testid="confirm-modal" role="dialog" aria-modal="true">
+  <div id="confirm" class="overlay hidden lock-dialog" data-testid="confirm-modal" role="dialog" aria-modal="true">
     <div class="card">
       <h2>Confirm agent action</h2>
+      <div class="kv"><span>From</span><span id="c-source" data-testid="confirm-source"></span></div>
       <div class="kv"><span>Action</span><code id="c-action"></code></div>
       <div class="kv"><span>Target</span><code id="c-target"></code></div>
       <div class="kv"><span>Destination</span><code id="c-dest" data-testid="confirm-destination"></code></div>
