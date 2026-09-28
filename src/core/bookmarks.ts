@@ -88,7 +88,7 @@ function emptyFile(): BookmarksFile {
   const now = Date.now();
   return {
     version: 1,
-    showBar: true,
+    showBar: false,
     roots: [
       { type: 'folder', id: BAR_ID, title: 'Bookmarks bar', children: [], added: now },
       { type: 'folder', id: OTHER_ID, title: 'Other bookmarks', children: [], added: now },
@@ -288,6 +288,18 @@ export class BookmarkStore {
   importNetscape(html: string, folderTitle = 'Imported'): { imported: number; skipped: number; folders: number } {
     const parsed = parseNetscape(html);
     this.ensureRoom(parsed.count + 1);
+    // nicknames must stay unique: imported ones that are already taken (or repeated) are dropped
+    const taken = new Set(this.all().map((b) => b.nickname).filter(Boolean));
+    const dedupe = (nodes: Node[]) => {
+      for (const n of nodes) {
+        if (n.type === 'folder') dedupe(n.children);
+        else if (n.nickname) {
+          if (taken.has(n.nickname)) delete n.nickname;
+          else taken.add(n.nickname);
+        }
+      }
+    };
+    dedupe(parsed.children);
     const holder: FolderNode = { type: 'folder', id: randomUUID(), title: cleanTitle(folderTitle), children: parsed.children, added: Date.now() };
     this.folder(OTHER_ID).children.push(holder);
     this.save();

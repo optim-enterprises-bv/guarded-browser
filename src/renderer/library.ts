@@ -354,6 +354,16 @@ export function initLibrary(gb: Bridge) {
     addr.blur();
     void gb.invoke('nav:go', url);
   }
+  // like other browsers: focusing the address bar selects the whole URL
+  let justFocused = false;
+  addr.addEventListener('focus', () => {
+    addr.select();
+    justFocused = true;
+  });
+  addr.addEventListener('mouseup', (e) => {
+    if (justFocused) e.preventDefault();
+    justFocused = false;
+  });
   let sTimer: number | undefined;
   addr.addEventListener('input', () => {
     window.clearTimeout(sTimer);

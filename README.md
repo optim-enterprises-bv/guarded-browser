@@ -351,6 +351,50 @@ recolour, **open in a new window** and delete profiles.
   one profile affect another; stronger isolation would need one OS process per profile (not
   implemented).
 
+### History and bookmarks
+Per profile, stored in the profile's app-state directory as JSON (`history.json`,
+`bookmarks.json`), validated with zod on every read and written atomically (temp file + rename,
+0600). JSON was chosen over better-sqlite3 to avoid a native build (and its RAM cost) for v1.
+
+* **History** (**Ctrl+H**, or *History* in the toolbar): every top-level navigation to an http(s)
+  page with URL, title, time and source: `user` (address bar, bookmarks, back / forward), `page`
+  (links, forms, scripts, popups) or `agent` (in the agent's tab during a task, shown with an
+  AGENT badge). The reputation interstitial, internal pages, `data:` and `blob:` URLs are never
+  recorded. Side panel grouped by day with search (URL + title), a source filter, open / open in new
+  tab / delete, delete by range (last hour / day / week / all) and "clear history when this profile's
+  window closes". Titles are page-controlled: stored control-character-free and capped at 200
+  characters, and always rendered as text.
+* **Bookmarks** (*Bookmarks* in the toolbar, the star in the address bar, **Ctrl+D** to bookmark
+  the current page, **Ctrl+Shift+B** to toggle the bookmarks bar): nested folders (max depth 20,
+  max 10 000 nodes), a bookmarks bar under the toolbar, and a side panel with add, edit (name, URL,
+  folder, optional **nickname**), delete, drag-and-drop reorder / move into folders, and search.
+  Typing a nickname in the address bar opens its bookmark; the address bar suggests matching
+  bookmarks, nicknames and history entries (the page views step aside while the list is open).
+* **Import / export** in the Netscape bookmark HTML format (what Vivaldi, Chrome and Firefox export).
+  Imports are parsed strictly: only `DL` / `DT` / `H3` / `A` tags are read (scripts, styles and
+  comments are removed first), only http / https URLs are accepted (`javascript:`, `data:`,
+  `file:` and anything else are dropped and counted as skipped: no bookmarklets in v1), titles are
+  decoded to plain text and capped, the file is capped at 5 MB, nesting beyond depth 20 is
+  flattened, and duplicate nicknames are dropped.
+* **Favicons** in the panels use the same capped fetch (256 KB, through the profile's proxy) as the
+  site accent, are decoded only in the sandboxed chrome renderer, are cached in memory only, and are
+  never fetched while an agent task runs.
+
+Security:
+* **The agent cannot read history or bookmarks.** The stores are only reachable through the
+  profile window's chrome IPC handlers; the agent code gets no reference to them, and no planner /
+  reader / judge prompt or tool list contains them. A test fills history and bookmarks with a
+  secret, runs a task, and checks no model request contains it. (Giving an agent private data, plus
+  untrusted pages, plus a way out would recreate the "lethal trifecta".)
+* **Web pages cannot query them.** Pages have no bridge (`window.gb` is undefined in a tab), and
+  the IPC handlers refuse any sender that is not a profile's chrome window; a test calls the
+  handlers with a tab's webContents as the sender and gets `unknown sender`.
+* **Opening a bookmark or history entry uses the normal navigation path**, so reputation, the
+  proxy, the webRequest gates and (during a task) confirmations all apply (tested with a bookmark to
+  a listed host: the interstitial appears, nothing is fetched).
+* **Profiles**: A's history and bookmarks are not visible from B (also when B sends A's profile
+  id), and deleting a profile deletes both files (tested).
+
 ### Split view (tab tiling)
 Tile 2-4 tabs **side by side**, **stacked** or as a **grid** (3 tabs: two on top, one below; 4: 2x2).
 Select tabs with **Ctrl+click** in the tab strip, then use the **Tile** toolbar button (layout from the
@@ -570,12 +614,13 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/agent.test.ts` (agent loop with compromised mock models) | 13 | pass |
 | unit | `test/unit/hardening.test.ts` (review regressions, rounds 1-5) | 25 | pass |
 | unit | `test/unit/reputation.test.ts` | 11 | pass |
-| unit | `test/unit/egress.test.ts` (proxy + content filter) | 7 | pass |
+| unit | `test/unit/egress.test.ts` (proxy + content filter + robustness) | 9 | pass |
 | unit | `test/unit/taint.test.ts` | 4 | pass |
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
 | unit | `test/unit/tile-layout.test.ts` (split-view geometry, incl. tiny windows 0-1440 px) | 27 | pass |
-| unit | `test/unit/profiles.test.ts` (registry, migration, validation) | 5 | pass |
+| unit | `test/unit/profiles.test.ts` (registry, migration, validation, sweeps, quarantine) | 8 | pass |
+| unit | `test/unit/bookmarks-history.test.ts` (stores, Netscape parser incl. malicious input, search) | 9 | pass |
 | unit | `test/unit/theme.test.ts` (colour parsing, schema, readability, contrast, agent-yellow distance, schedule) | 14 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
 | e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-4, ported, plus controls) | 30 | pass |
@@ -586,6 +631,8 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/themes.spec.ts` (themes + locked security styling) | 5 | pass |
 | e2e | `test/e2e/regressions-r5.spec.ts` (review round 5: split view + themes) | 6 | pass |
 | e2e | `test/e2e/profiles.spec.ts` (two-window isolation, delete, migration, IPC spoofing) | 7 | pass |
+| e2e | `test/e2e/profiles-hardening.spec.ts` (proxy robustness, cross-profile proxy, open/delete race, sweeps, app-wide guard settings) | 5 | pass |
+| e2e | `test/e2e/library.spec.ts` (history, bookmarks, import/export, suggestions, agent / page / profile isolation) | 9 | pass |
 | **total** | | **210** (137 unit + 73 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):

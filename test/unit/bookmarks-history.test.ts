@@ -168,6 +168,15 @@ describe('Netscape bookmark import / export', () => {
     ]);
   });
 
+  it('importing into the same store drops nicknames that are already taken; the bar is off by default', () => {
+    const s = new BookmarkStore(join(tmp(), 'n.json'));
+    expect(s.showBar).toBe(false);
+    s.addBookmark(BAR_ID, 'A', 'https://a.example/', 'aa');
+    const r = s.importNetscape(s.exportNetscape());
+    expect(r.imported).toBe(1);
+    expect(s.all().filter((b) => b.nickname === 'aa')).toHaveLength(1);
+  });
+
   it('safeUrl accepts only http(s)', () => {
     expect(safeUrl('https://x.example')).toBe('https://x.example/');
     for (const u of ['javascript:1', ' JAVASCRIPT:alert(1)', 'data:,', 'file:///', 'chrome://settings', 'vbscript:x', '//x.example']) expect(safeUrl(u), u).toBeNull();
