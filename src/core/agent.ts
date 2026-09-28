@@ -14,11 +14,12 @@ import { combine, evaluatePolicy, originOf, originsInTask } from './policy';
 import { MAX_STRING, runReader, type SchemaSpec } from './reader';
 import { MIN_MATCH_LENGTH, TaintRegistry } from './taint';
 import { HandleStore } from './handles';
-import { capName, errorCode, safeInputType, safeMethod, safeRole, urlParts } from './sanitize';
+import { SITE_WITHHELD, capName, errorCode, safeInputType, safeMethod, safeRole, urlParts } from './sanitize';
 import {
   WITHHELD,
   type ConfirmOutcome,
   type ConfirmRequest,
+  type FormField,
   type Guard,
   type JudgeVerdict,
   type PlannerAction,
@@ -43,7 +44,7 @@ export interface BrowserDriver {
   select(ref: string, value: string): Promise<ActionOutcome>;
   scroll(direction: 'up' | 'down'): Promise<ActionOutcome>;
   submit(ref: string): Promise<ActionOutcome>;
-  formFields(ref: string): Promise<Array<{ name: string; value: string }>>;
+  formFields(ref: string): Promise<FormField[]>;
 }
 
 export interface AgentDeps {
@@ -253,10 +254,11 @@ export class AgentTask {
     });
     if (flagged) this.deps.onGuardFlag?.(snap.url, flagged);
     const text = (i: number) => (verdicts[i].flagged ? WITHHELD : texts[i]);
+    // a flagged URL is withheld whole: the host is attacker-chosen text as much as the path is
     const url = (i: number | undefined) => {
       if (i === undefined) return undefined;
       const [o, path] = texts[i].split('\u0000');
-      return verdicts[i].flagged ? `${o}/[path withheld]` : `${o}${path}`;
+      return verdicts[i].flagged ? SITE_WITHHELD : `${o}${path}`;
     };
     this.safeView = new Map();
     const lines = elements.map((e, i) => {
@@ -368,16 +370,21 @@ export class AgentTask {
       if (outcome !== 'approve') {
         return { text: `DENIED by the user (${outcome === 'timeout' ? 'no answer, default deny' : 'denied'}). Do not retry this action.`, summary: 'denied' };
       }
-      this.recordApproval(policy, resolved);
+      this.recordApproval(policy, resolved, el, formFields);
     }
-    return this.execute(resolved);
+    try {
+      return await this.execute(resolved);
+    } finally {
+      // one-shot request approvals live exactly as long as the action that earned them
+      this.deps.egress?.clearApprovals();
+    }
   }
 
-  private recordApproval(policy: PolicyResult, action: PlannerAction) {
+  private recordApproval(policy: PolicyResult, action: PlannerAction, el: SnapshotElement | undefined, fields: FormField[] | undefined) {
     if (policy.newOrigin) this.approveOrigin(policy.newOrigin);
-    // an approved form submission lets exactly that POST through the egress method check
-    if (policy.destination && (action.name === 'submit' || (action.name === 'click' && this.element(action.args.ref)?.isSubmit))) {
-      this.deps.egress?.approveSubmission(policy.destination);
+    // an approved form submission lets through ONE request with this method, URL and exactly these fields
+    if (el && fields && policy.destination && (action.name === 'submit' || (action.name === 'click' && el.isSubmit))) {
+      this.deps.egress?.approveRequest({ method: el.formMethod === 'post' ? 'POST' : 'GET', url: policy.destination, fields });
     }
     if (policy.destination && this.deps.egress) {
       const text = [policy.destination, ...policy.values.map((v) => v.value)].join('\n');

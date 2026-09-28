@@ -91,8 +91,16 @@ if (!el || !el.isConnected) return { ok: false, detail: 'element ' + ref + ' not
 const form = el.form || el.closest('form');
 if (kind === 'formFields') {
   if (!form) return { ok: true, fields: [] };
-  return { ok: true, fields: [...form.elements].filter((f) => f.name && !['submit','button','reset','image','file'].includes(f.type) && (!['checkbox','radio'].includes(f.type) || f.checked))
-    .map((f) => ({ name: (f.type === 'hidden' ? '(hidden) ' : '') + f.name, value: f.type === 'password' ? '•'.repeat(String(f.value).length) + ' (password)' : String(f.value) })) };
+  const fields = [];
+  for (const f of form.elements) {
+    if (!f.name || f.disabled) continue;
+    if (['submit','image'].includes(f.type) || (f.tagName === 'BUTTON' && f.type === 'submit')) { fields.push({ name: f.name, value: String(f.value), submitter: true }); continue; }
+    if (['button','reset','file'].includes(f.type)) continue;
+    if (['checkbox','radio'].includes(f.type) && !f.checked) continue;
+    if (f.tagName === 'SELECT' && f.multiple) { for (const o of f.selectedOptions) fields.push({ name: f.name, value: o.value }); continue; }
+    fields.push({ name: f.name, value: String(f.value), hidden: f.type === 'hidden' || undefined, password: f.type === 'password' || undefined });
+  }
+  return { ok: true, fields };
 }
 el.scrollIntoView({ block: 'center' });
 if (kind === 'click') { el.focus(); el.click(); return { ok: true }; }

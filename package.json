@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",
+    "tldts": "^7.4.16",
     "zod": "^4.6.5"
   },
   "devDependencies": {

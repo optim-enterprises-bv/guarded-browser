@@ -1,6 +1,6 @@
 // Append-only JSONL audit log, one file per app session, in userData/audit/.
 
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, readdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -24,6 +24,8 @@ export class AuditLog {
 
   constructor(dir: string, sessionId = new Date().toISOString().replace(/[:.]/g, '-')) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700); // also tighten directories / files created by older versions
+    for (const f of readdirSync(dir)) if (f.endsWith('.jsonl')) chmodSync(join(dir, f), 0o600);
     this.file = join(dir, `session-${sessionId}.jsonl`);
     if (!existsSync(this.file)) writeFileSync(this.file, '', { mode: 0o600 });
     chmodSync(this.file, 0o600);

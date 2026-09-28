@@ -3,7 +3,7 @@
 import { WebContentsView, type BaseWindow, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
 import type { ActionOutcome, BrowserDriver } from '../core/agent';
-import type { Snapshot } from '../core/types';
+import type { FormField, Snapshot } from '../core/types';
 import { ISOLATED_WORLD, PAGE_TEXT_JS, SNAPSHOT_JS, actionJs } from './page-scripts';
 
 export const TOP_BAR = 84;
@@ -202,8 +202,8 @@ export class ElectronDriver implements BrowserDriver {
   submit(ref: string) {
     return this.act('submit', ref);
   }
-  async formFields(ref: string) {
-    const r = await this.run<{ ok: boolean; fields?: Array<{ name: string; value: string }> }>(actionJs('formFields', ref)).catch(() => ({ ok: false, fields: [] }));
+  async formFields(ref: string): Promise<FormField[]> {
+    const r = await this.run<{ ok: boolean; fields?: FormField[] }>(actionJs('formFields', ref)).catch(() => ({ ok: false, fields: [] }));
     return r.fields ?? [];
   }
 }

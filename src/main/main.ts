@@ -3,7 +3,7 @@
 import { app, BrowserWindow, ipcMain, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
@@ -246,21 +246,25 @@ function setupEgress(ses: Session) {
       if (!ok) return true;
     }
 
-    // (b) form submissions (state-changing top-level requests) from the agent tab need a confirmed submit
-    const agentTab = inTask && current!.tab.wc.id === d.webContentsId;
-    if (agentTab && (d.resourceType === 'mainFrame' || d.resourceType === 'subFrame') && !['GET', 'HEAD', 'OPTIONS'].includes(d.method)) {
-      if (egress.consumeSubmission(d.url)) {
-        egress.auditWebRequest({ ...base, decision: 'allow', reason: 'form submission confirmed at the action layer' });
+    // (b) every state-changing request during a task (any tab of this session, any resource type:
+    //     form POST, fetch, XHR, beacon, ping, ...) needs a matching one-shot approval or a confirmation.
+    if (inTask && !['GET', 'HEAD', 'OPTIONS'].includes(d.method)) {
+      const m = egress.matchApproval(d.method, d.url, body);
+      if (m === 'match') {
+        egress.auditWebRequest({ ...base, decision: 'allow', reason: 'matches the submission confirmed at the action layer (method, URL, fields)' });
       } else {
-        const values = formValues(body);
-        const ok = await askEgress(`submit|${d.method}|${d.url}|${body.length}`, {
-          action: `form submission ${d.method} (not confirmed by the agent's action layer)`,
+        const ok = await askEgress(`write|${d.method}|${d.url}|${createHash('sha256').update(body).digest('hex')}`, {
+          action: `${d.method} ${d.resourceType} request that was not confirmed`,
           target: host,
           destination: d.url,
-          values,
-          reasons: ['a page / agent action is submitting a form (POST/PUT/PATCH/DELETE) that was not confirmed'],
+          values: formValues(body),
+          reasons: [
+            m === 'mismatch'
+              ? 'the page changed what is sent after you approved it: this is the ACTUAL request body'
+              : `a state-changing ${d.method} request (${d.resourceType}) during the task, not covered by an approval`,
+          ],
         });
-        egress.auditWebRequest({ ...base, decision: ok ? 'allow' : 'block', reason: `unconfirmed ${d.method} form submission: ${ok ? 'user approved' : 'blocked'}` });
+        egress.auditWebRequest({ ...base, decision: ok ? 'allow' : 'block', reason: `unconfirmed ${d.method} ${d.resourceType}${m === 'mismatch' ? ' (body differs from the approved one)' : ''}: ${ok ? 'user approved' : 'blocked'}` });
         if (!ok) return true;
         egress.confirmFlow(egress.idsIn(`${d.url}\n${body}`), d.url);
       }

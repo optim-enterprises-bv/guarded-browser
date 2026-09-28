@@ -1,6 +1,6 @@
 // Rule-based data-flow policy. Enforced in code; no LLM can downgrade its decisions.
 
-import type { Decision, JudgeVerdict, PlannerAction, PolicyResult, SnapshotElement } from './types';
+import type { Decision, FormField, JudgeVerdict, PlannerAction, PolicyResult, SnapshotElement } from './types';
 import type { TaintRegistry } from './taint';
 
 export interface PolicyContext {
@@ -14,7 +14,7 @@ export interface PolicyContext {
   contextOrigins: string[];
   element?: SnapshotElement;
   /** current values of the fields in the element's form (for submit confirmations) */
-  formFields?: Array<{ name: string; value: string }>;
+  formFields?: FormField[];
 }
 
 /** Button / link names that always require confirmation (irreversible or outward). */
@@ -57,10 +57,11 @@ function escalate(r: PolicyResult, reason: string, extra: Partial<PolicyResult> 
 
 function formValues(ctx: PolicyContext): PolicyResult['values'] {
   return (ctx.formFields ?? [])
-    .filter((f) => f.value !== '')
+    .filter((f) => f.value !== '' && !f.submitter)
     .map((f) => {
       const l = ctx.taint.labelPlannerText(f.value, ctx.contextOrigins);
-      return { field: f.name, value: f.value, label: l.label, provenance: l.provenance, taintIds: l.taintIds };
+      const value = f.password ? `${'•'.repeat(f.value.length)} (password)` : f.value;
+      return { field: `${f.hidden ? '(hidden) ' : ''}${f.name}`, value, masked: !!f.password, label: l.label, provenance: l.provenance, taintIds: l.taintIds };
     });
 }
 

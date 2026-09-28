@@ -19,20 +19,38 @@ export interface RegisteredValue {
   sensitivity?: Sensitivity;
 }
 
-/** Sensitive-looking values in the user's task: emails, phone / card numbers, secrets after a keyword. */
+/** Registered task secrets are matched in outgoing requests down to this length (PINs). */
+export const MIN_SECRET_MATCH_LENGTH = 4;
+
+/**
+ * Sensitive-looking values in the user's task: emails, phone / card numbers, values after a keyword
+ * (quoted values are taken whole, punctuation kept), and keyword-less high-entropy tokens.
+ */
 export function findTaskSecrets(task: string): Array<{ value: string; sensitivity: Sensitivity }> {
   const out: Array<{ value: string; sensitivity: Sensitivity }> = [];
   const add = (value: string, sensitivity: Sensitivity) => {
-    const v = value.trim().replace(/[.,;:!?)]+$/, '');
+    const v = value.trim();
     if (v && !out.some((o) => o.value === v)) out.push({ value: v, sensitivity });
   };
+  const urls = [...task.matchAll(/\bhttps?:\/\/\S+/gi)].map((m) => m[0]);
   for (const m of task.matchAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g)) add(m[0], 'email');
   for (const m of task.matchAll(/(?<![\w/:.])\+?\d[\d ().-]{5,}\d(?![\w/])/g)) {
     const digits = m[0].replace(/\D/g, '');
     if (digits.length >= 13 && digits.length <= 19) add(m[0], 'card');
     else if (digits.length >= 7 && digits.length <= 15) add(m[0], 'phone');
   }
-  for (const m of task.matchAll(/\b(?:password|passcode|passphrase|pin|token|api[ _-]?key|secret|otp|cvv|cvc|ssn)\b\s*(?:is|=|:)?\s*["']?([^\s"']{3,})/gi)) add(m[1], 'secret');
+  const KW = String.raw`\b(?:password|passcode|passphrase|pin|token|api[ _-]?key|secret|otp|cvv|cvc|ssn)\b\s*(?:is|=|:)?\s*`;
+  for (const m of task.matchAll(new RegExp(`${KW}(?:"([^"]+)"|'([^']+)'|“([^”]+)”|(\\S{3,}))`, 'gi'))) {
+    let v = m[1] ?? m[2] ?? m[3] ?? m[4];
+    // an unquoted value at the end of a sentence: keep inner punctuation, drop one final . or ,
+    if (m[4] && /[.,]$/.test(v) && v.length > 4) v = v.slice(0, -1);
+    add(v, 'secret');
+  }
+  // keyword-less: tokens that look machine-generated (letters AND digits, 10+ chars, not URL/email)
+  for (const m of task.matchAll(/(?<![\w@/.:-])[A-Za-z0-9_\-+/=!$%#*]{10,}(?![\w@])/g)) {
+    const t = m[0];
+    if (/[A-Za-z]/.test(t) && /\d/.test(t) && !urls.some((u) => u.includes(t)) && !out.some((o) => o.value.includes(t))) add(t, 'secret');
+  }
   return out;
 }
 
@@ -56,7 +74,7 @@ function b64(s: string): string[] {
  * only the 4-char groups made entirely of value bytes are stable, so the needle is the interior of
  * base64(pad_k + value) without the first mixed group and without the last partial group.
  */
-function b64Aligned(v: string): string[] {
+function b64Aligned(v: string, min = MIN_MATCH_LENGTH): string[] {
   const out = new Set<string>();
   const bytes = Buffer.from(v, 'utf8');
   for (let k = 0; k < 3; k++) {
@@ -65,14 +83,14 @@ function b64Aligned(v: string): string[] {
     const firstPure = k === 0 ? 0 : 1; // group index where the value's bytes start alone
     const fullGroups = Math.floor(buf.length / 3);
     const inner = std.slice(firstPure * 4, fullGroups * 4);
-    for (const s of [inner, inner.replace(/\+/g, '-').replace(/\//g, '_')]) if (s.length >= 8) out.add(s);
+    for (const s of [inner, inner.replace(/\+/g, '-').replace(/\//g, '_')]) if (s.length >= Math.max(4, min)) out.add(s);
   }
-  for (const s of b64(v)) if (s.length >= MIN_MATCH_LENGTH) out.add(s); // exact start + padding forms
+  for (const s of b64(v)) if (s.length >= min) out.add(s); // exact start + padding forms
   return [...out];
 }
 
 /** Lower-case needles (checked against lower-cased haystacks) and case-sensitive base64 needles. */
-export function variants(value: string): { lower: string[]; exact: string[] } {
+export function variants(value: string, min = MIN_MATCH_LENGTH): { lower: string[]; exact: string[] } {
   const v = value.trim();
   const lower = new Set<string>([
     v.toLowerCase(),
@@ -80,8 +98,8 @@ export function variants(value: string): { lower: string[]; exact: string[] } {
     encodeURIComponent(v).replace(/%20/g, '+').toLowerCase(),
     encodeURIComponent(encodeURIComponent(v)).toLowerCase(),
   ]);
-  const exact = new Set<string>([...b64Aligned(v), ...b64Aligned(v.toLowerCase())]);
-  return { lower: [...lower].filter((x) => x.length >= MIN_MATCH_LENGTH), exact: [...exact] };
+  const exact = new Set<string>([...b64Aligned(v, min), ...b64Aligned(v.toLowerCase(), min)]);
+  return { lower: [...lower].filter((x) => x.length >= min), exact: [...exact] };
 }
 
 function safeDecode(s: string): string {
@@ -182,8 +200,9 @@ export class TaintRegistry {
     const lowered = [raw, safeDecode(url), body ? safeDecode(body) : ''].join('\n').toLowerCase();
     const hits: RegisteredValue[] = [];
     for (const e of this.values.values()) {
-      if (e.value.length < MIN_MATCH_LENGTH) continue;
-      const { lower, exact } = variants(e.value);
+      const min = e.sensitivity ? MIN_SECRET_MATCH_LENGTH : MIN_MATCH_LENGTH;
+      if (e.value.length < min) continue;
+      const { lower, exact } = variants(e.value, min);
       if (lower.some((n) => lowered.includes(n)) || exact.some((n) => raw.includes(n))) hits.push(e);
     }
     return hits;

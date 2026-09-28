@@ -98,4 +98,14 @@ export interface Guard {
   classify(texts: string[]): Promise<GuardVerdict[]>;
 }
 
+/** A form control as read by our isolated-world script (raw values; display code masks passwords). */
+export interface FormField {
+  name: string;
+  value: string;
+  hidden?: boolean;
+  password?: boolean;
+  /** a named submit button: only sent when it is the submitter */
+  submitter?: boolean;
+}
+
 export const WITHHELD = '[content withheld: possible prompt injection]';

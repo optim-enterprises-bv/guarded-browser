@@ -18,6 +18,43 @@ import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import type { RegisteredValue, TaintRegistry } from './taint';
 import type { ReputationDb, ReputationHit } from './reputation';
+import type { FormField } from './types';
+
+export interface ApprovedRequest {
+  method: string;
+  url: string;
+  fields: FormField[];
+}
+
+const norm = (v: string) => v.replace(/\r\n/g, '\n');
+
+/** Parse a form body (urlencoded or multipart). null = not a form body (JSON, binary, ...). */
+export function parseBody(body: string): Array<[string, string]> | null {
+  if (body === '') return [];
+  const mp = /^--([^\r\n]+)\r\n/.exec(body);
+  if (mp) {
+    const out: Array<[string, string]> = [];
+    for (const part of body.split(`--${mp[1]}`)) {
+      const m = /^\r\nContent-Disposition: form-data; name="([^"]*)"(?:; filename="[^"]*")?\r\n(?:[^\r\n]+\r\n)*\r\n([\s\S]*)\r\n$/i.exec(part);
+      if (m) out.push([m[1], m[2]]);
+    }
+    return out;
+  }
+  if (/^[^=&\s{[]*=[^&]*(&[^=&]*=[^&]*)*$/.test(body)) return [...new URLSearchParams(body)];
+  return null;
+}
+
+/** Same keys and values (order-insensitive, multiset); extra pairs only for named submit buttons. */
+export function fieldsMatch(expected: FormField[], actual: Array<[string, string]>): boolean {
+  const rest = actual.map(([k, v]) => `${k}\u0000${norm(v)}`);
+  for (const f of expected.filter((x) => !x.submitter)) {
+    const i = rest.indexOf(`${f.name}\u0000${norm(f.value)}`);
+    if (i < 0) return false;
+    rest.splice(i, 1);
+  }
+  const submitters = expected.filter((x) => x.submitter).map((f) => `${f.name}\u0000${norm(f.value)}`);
+  return rest.length <= 1 && rest.every((r) => submitters.includes(r));
+}
 
 export type EgressMode = 'manual' | 'agent';
 
@@ -76,7 +113,7 @@ export class EgressController {
     this.allow = new Set(seedHosts.map((h) => hostKey(h)).filter((h): h is string => !!h));
     this.blocked.clear();
     this.confirmedFlows.clear();
-    this.approvedSubmissions = [];
+    this.approvals = [];
     this.taint = taint;
     this.changed();
   }
@@ -86,7 +123,7 @@ export class EgressController {
     this.allow.clear();
     this.blocked.clear();
     this.confirmedFlows.clear();
-    this.approvedSubmissions = [];
+    this.approvals = [];
     this.taint = null;
     this.changed();
   }
@@ -165,24 +202,37 @@ export class EgressController {
     return ok;
   }
 
-  private approvedSubmissions: Array<{ url: string; until: number }> = [];
+  private approvals: ApprovedRequest[] = [];
 
-  /** A form submission the user confirmed at the action layer: one matching POST may pass. */
-  approveSubmission(url: string) {
-    this.approvedSubmissions.push({ url: url.split('#')[0], until: Date.now() + 30_000 });
+  /**
+   * A request the user confirmed at the action layer (a form submission): method + URL + the exact
+   * field set shown in the dialog. Valid only while that action runs (see clearApprovals).
+   */
+  approveRequest(a: ApprovedRequest) {
+    this.approvals.push({ ...a, url: a.url.split('#')[0] });
+  }
+
+  /** Called when the approved action completes: unconsumed approvals must not linger. */
+  clearApprovals() {
+    this.approvals = [];
   }
 
   /**
-   * Is a state-changing top-level request (POST/PUT/PATCH/DELETE navigation, i.e. a form submission)
-   * covered by a confirmed submission? Consumes the approval. Independent of snapshot heuristics.
+   * Does a state-changing request match a one-shot approval? 'match' consumes it. 'mismatch' means an
+   * approval exists for this method + URL but the body differs (re-confirm with the real body).
    */
-  consumeSubmission(url: string): boolean {
-    const now = Date.now();
-    this.approvedSubmissions = this.approvedSubmissions.filter((a) => a.until > now);
-    const i = this.approvedSubmissions.findIndex((a) => a.url === url.split('#')[0]);
-    if (i < 0) return false;
-    this.approvedSubmissions.splice(i, 1);
-    return true;
+  matchApproval(method: string, url: string, body: string): 'match' | 'mismatch' | 'none' {
+    const u = url.split('#')[0];
+    const cands = this.approvals.filter((a) => a.method === method.toUpperCase() && a.url === u);
+    if (!cands.length) return 'none';
+    const pairs = parseBody(body);
+    for (const a of cands) {
+      if (pairs && fieldsMatch(a.fields, pairs)) {
+        this.approvals.splice(this.approvals.indexOf(a), 1);
+        return 'match';
+      }
+    }
+    return 'mismatch';
   }
 
   /** Mark registry values as approved for sending to a host (after a user confirmation). */

@@ -9,6 +9,8 @@
 //   action results  -> fixed strings; driver errors reduced to a Chromium error code
 //   reader output   -> numbers / booleans only; strings become handles (src/core/handles.ts)
 
+import { getDomain } from 'tldts';
+
 export const ROLES = new Set([
   'link', 'button', 'textbox', 'searchbox', 'checkbox', 'radio', 'combobox', 'listbox', 'option',
   'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'switch', 'slider', 'spinbutton', 'treeitem', 'generic',
@@ -41,14 +43,25 @@ export function capName(s: string, max = MAX_NAME): string {
   return s.replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
-/** Split a URL for display: origin (structural, from URL parsing) and a capped path (page data). */
-export function urlParts(url: string): { origin: string; path: string } | null {
+export const MAX_SITE = 40;
+export const SITE_WITHHELD = '[site withheld]';
+
+/**
+ * Split a URL for display. The host is page data too (attackers choose hostnames), so only the
+ * registrable domain (eTLD+1, public-suffix list via tldts) is shown, subdomains collapse to "*.",
+ * and a domain longer than MAX_SITE is withheld. IP literals / localhost are shown with their port.
+ */
+export function urlParts(url: string): { origin: string; path: string; withheld: boolean } | null {
   try {
     const u = new URL(url);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { origin: `${u.protocol}`, path: '' };
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { origin: `${u.protocol}`, path: '', withheld: false };
+    const host = u.hostname;
+    const domain = getDomain(host, { allowPrivateDomains: true }) ?? host;
     let path = decodeURIComponentSafe(u.pathname);
     if (path.length > MAX_PATH) path = `${path.slice(0, MAX_PATH)}…`;
-    return { origin: u.origin, path };
+    if (domain.length > MAX_SITE) return { origin: SITE_WITHHELD, path: '', withheld: true };
+    const site = `${u.protocol}//${domain !== host ? '*.' : ''}${domain}${u.port ? `:${u.port}` : ''}`;
+    return { origin: site, path, withheld: false };
   } catch {
     return null;
   }

@@ -61,7 +61,7 @@ export class FakeDriver implements BrowserDriver {
     this.submissions.push({ action: e?.formAction ?? this.url, fields: { ...this.fields } });
     return { ok: true };
   }
-  async formFields() {
+  async formFields(): Promise<Array<{ name: string; value: string }>> {
     return Object.entries(this.fields).map(([name, value]) => ({ name, value }));
   }
 }
