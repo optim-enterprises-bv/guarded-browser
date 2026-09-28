@@ -202,7 +202,9 @@ The agent panel shows it as a timeline (manual-browsing proxy chatter is only in
      soon as that action finishes. If the page changes the fields after your approval (submit
      handler rewrites, a different hidden form, JSON instead of form data), the request is held again
      and the dialog says the page changed what is sent and shows the **actual** body. GET / HEAD /
-     OPTIONS are not gated, so ordinary browsing stays unprompted. Consequences: sites that fire
+     OPTIONS are not gated, so ordinary browsing stays unprompted. The tab the agent drove stays
+     under this gate after the task ends, until you navigate that tab yourself (address bar, back,
+     forward, reload) or close it, so a page cannot simply wait for the task to finish. Consequences: sites that fire
      analytics or telemetry POSTs during a task will prompt (acceptable in v1); an approved click on a
      button whose script then POSTs in the background prompts a second time with the real request.
   3. *Tracked values.* A request containing a taint-registry value (reader output, task secrets,
@@ -283,7 +285,10 @@ requests to listed hosts are dropped silently. Every hit is audited with the fee
   state-changing request is confirmed, but **GET requests are not**: a page can put data it already
   has (its own content, cookies, anything the user typed there) into GET URLs to any host on the
   allowlist; the content filter only recognises values in the taint registry. Outside a task nothing
-  is gated except the denylist and reputation lists.
+  is gated except the denylist, reputation lists and the post-task gate on the agent's tab.
+* **A malicious page can always act on its own.** Any page you visit can send POSTs with your cookies
+  for its own origin without any agent; the gates above only stop the *agent* (and pages it is
+  driving) from doing it unconfirmed. This is ordinary web risk, not something an agent layer removes.
 * **iframes.** Snapshots and page text cover the main frame only, so the agent cannot read or operate
   inside iframes; the RTCPeerConnection removal applies to the main frame only. Network rules (proxy,
   webRequest incl. the state-change gate, WebRTC IP policy, reputation) apply to all frames.
@@ -410,7 +415,7 @@ What the attack tests assert (planner, reader and judge scripted to be compromis
 | injection in a hostname (review H) | registrable domain only, capped at 40, withheld when flagged | yes (real guard) | yes |
 | click → `fetch` POST state change (review F) | every non-GET during a task confirmed; denied → nothing sent, approved → sent | yes | - |
 | submit handler rewrites approved fields (review G) | approval bound to exact fields → re-confirm shows actual body | yes | yes |
-| approval reused by a different POST later (review G2) | approvals are single-use and die with the action | yes | yes |
+| approval reused by a different POST later (review G2), also after the task ended | approvals are single-use and die with the action; the agent's tab stays gated after the task | yes | yes |
 | WebRTC from a page loaded before the task / via iframe (review C2, C3) | IP handling policy: 0 UDP packets | yes | - |
 | typing race, Blob body, base64 at offset 1 and 2 (review B) | register-before-type; `getBlobData`; 3-alignment base64 | yes | yes |
 | WebRTC UDP with base64 email in ICE ufrag (review C) | `disable_non_proxied_udp` (0 packets, also in manual mode); no RTCPeerConnection in agent mode | yes | - |

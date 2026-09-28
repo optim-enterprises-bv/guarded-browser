@@ -472,3 +472,18 @@ test('R2-H: attacker text in a hostname never reaches the planner', async () => 
   expect(seen).toMatch(/link "Offers" -> (\[site withheld\]|http:\/\/\*\.evil-example\.com)/);
   expect(seen).not.toMatch(/ignore|authorized|navigate-here|send-the-email/i);
 });
+
+test('R2-G2 (late): a page that waits until the task has ENDED to submit is still held', async () => {
+  mock.script('planner', sequence(
+    { tool: 'navigate', args: { url: `${site}/pay2.html` } },
+    (c) => ({ tool: 'click', args: { ref: refFor(c, /button "Pay"/) } }),
+    { tool: 'finish', args: { answer: 'x' } },
+  ));
+  a = await launch({ llmUrl: mock.url, confirmTimeoutMs: 1500 });
+  await runTask(a.ui, `Pay 10 to alice-shop on ${site}/pay2.html`);
+  await expect(a.ui.locator('[data-testid=confirm-modal][data-kind=action]')).toBeVisible({ timeout: 20_000 });
+  await a.ui.click('[data-testid=confirm-approve]');
+  expect(await waitDone(a.ui)).toBe('finished'); // task over before the page's 3 s timer fires
+  await expect.poll(() => a!.audit().some((e) => e.type === 'egress' && e.layer === 'webrequest' && e.decision === 'block' && String(e.url).endsWith('/sink/pay2')), { timeout: 15_000 }).toBe(true);
+  expect(sink).toEqual([]);
+});

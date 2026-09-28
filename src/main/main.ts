@@ -46,6 +46,12 @@ const sbCache = new Map<string, { verdict: string | null; at: number }>();
 const fallbackActive: Partial<Record<Role, string>> = {};
 /** webRequest-layer flows the user denied during the current task (not asked again) */
 let deniedFlows = new Set<string>();
+/**
+ * Tabs whose current document was driven by an agent task. They stay under the state-change gate
+ * after the task ends (a page could otherwise wait for the task to finish, then submit), until the
+ * user navigates the tab themselves or closes it.
+ */
+const postTaskGuard = new Set<number>();
 const inflightFlows = new Map<string, Promise<ConfirmOutcome>>();
 
 function sendUI(channel: string, payload: unknown) {
@@ -248,7 +254,9 @@ function setupEgress(ses: Session) {
 
     // (b) every state-changing request during a task (any tab of this session, any resource type:
     //     form POST, fetch, XHR, beacon, ping, ...) needs a matching one-shot approval or a confirmation.
-    if (inTask && !['GET', 'HEAD', 'OPTIONS'].includes(d.method)) {
+    //     After the task, the tab it drove stays gated until the user navigates it.
+    const gated = inTask || (d.webContentsId !== undefined && postTaskGuard.has(d.webContentsId));
+    if (gated && !['GET', 'HEAD', 'OPTIONS'].includes(d.method)) {
       if (!egress.hostPasses(host)) {
         // the proxy would refuse this host anyway: no prompt, just cancel (the proxy layer counts it)
         egress.decideHost(host, d.method, d.url);
@@ -264,7 +272,9 @@ function setupEgress(ses: Session) {
           destination: d.url,
           values: formValues(body),
           reasons: [
-            m === 'mismatch'
+            !inTask
+              ? 'the page the agent was operating is sending data after the task ended (the tab stays guarded until you navigate it yourself)'
+              : m === 'mismatch'
               ? 'the page changed what is sent after you approved it: this is the ACTUAL request body'
               : `a state-changing ${d.method} request (${d.resourceType}) during the task, not covered by an approval`,
           ],
@@ -424,6 +434,7 @@ async function startTask(text: string, origins?: string[]) {
   const tab = tabs.active();
   if (!tab) throw new Error('no active tab');
   deniedFlows = new Set();
+  postTaskGuard.add(tab.wc.id);
   const task = new AgentTask(text, {
     planner: llm('planner'),
     reader: llm('reader'),
@@ -459,18 +470,29 @@ async function startTask(text: string, origins?: string[]) {
 function registerIpc() {
   ipcMain.handle('state:get', () => state());
   ipcMain.handle('tabs:new', (_e, url?: string) => tabs.create(url || 'about:blank').id);
-  ipcMain.handle('tabs:close', (_e, id: number) => tabs.close(id));
+  ipcMain.handle('tabs:close', (_e, id: number) => {
+    const t = tabs.byId(id);
+    if (t) postTaskGuard.delete(t.wc.id);
+    tabs.close(id);
+  });
   ipcMain.handle('tabs:activate', (_e, id: number) => tabs.activate(id));
   ipcMain.handle('nav:go', (_e, input: string) => {
     const t = tabs.active();
     if (!t) return;
+    if (!current) postTaskGuard.delete(t.wc.id); // the user took the tab back
     let url = input.trim();
     if (!/^[a-z]+:/i.test(url)) url = /^[\w.-]+(:\d+)?(\/|$)/.test(url) ? `http://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
     void t.wc.loadURL(url).catch(() => undefined);
   });
-  ipcMain.handle('nav:back', () => tabs.active()?.wc.navigationHistory.goBack());
-  ipcMain.handle('nav:forward', () => tabs.active()?.wc.navigationHistory.goForward());
-  ipcMain.handle('nav:reload', () => tabs.active()?.wc.reload());
+  const userNav = (fn: (wc: WebContents) => void) => {
+    const t = tabs.active();
+    if (!t) return;
+    if (!current) postTaskGuard.delete(t.wc.id);
+    fn(t.wc);
+  };
+  ipcMain.handle('nav:back', () => userNav((wc) => wc.navigationHistory.goBack()));
+  ipcMain.handle('nav:forward', () => userNav((wc) => wc.navigationHistory.goForward()));
+  ipcMain.handle('nav:reload', () => userNav((wc) => wc.reload()));
   ipcMain.handle('agent:preview', (_e, text: string) => previewOrigins(String(text)));
   ipcMain.handle('agent:start', (_e, text: string, origins?: string[]) => startTask(String(text), Array.isArray(origins) ? origins.map(String) : undefined));
   // asked synchronously by the tab preload at document start: is an agent task driving this tab?

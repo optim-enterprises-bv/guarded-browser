@@ -62,6 +62,10 @@ export class TabManager {
     return this.tabs.find((t) => t.id === this.activeId);
   }
 
+  byId(id: number): Tab | undefined {
+    return this.tabs.find((t) => t.id === id);
+  }
+
   byWebContents(wc: WebContents): Tab | undefined {
     return this.tabs.find((t) => t.wc === wc);
   }
