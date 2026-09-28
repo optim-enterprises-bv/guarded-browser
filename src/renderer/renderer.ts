@@ -442,7 +442,7 @@ async function openSettings() {
     field('max steps', 'agent.maxSteps', s.agent.maxSteps, 'number'),
     field('task timeout ms', 'agent.taskTimeoutMs', s.agent.taskTimeoutMs, 'number'),
     field('confirm timeout ms', 'agent.confirmTimeoutMs', s.agent.confirmTimeoutMs, 'number')));
-  form.append(el('fieldset', {}, el('legend', {}, 'guard (restart to apply)'),
+  form.append(el('fieldset', { 'data-testid': 'guard-settings' }, el('legend', {}, 'guard \u2014 applies to ALL profiles (restart to apply)'),
     field('enabled', 'guard.enabled', s.guard.enabled, 'checkbox'),
     field('threshold', 'guard.threshold', s.guard.threshold, 'number'),
     field('CPU threads', 'guard.threads', s.guard.threads, 'number')));
@@ -450,7 +450,7 @@ async function openSettings() {
     field('denylist (comma)', 'egress.denylist', s.egress.denylist.join(', '))));
   form.append(el('fieldset', {}, el('legend', {}, 'reputation'),
     field('enabled', 'reputation.enabled', s.reputation.enabled, 'checkbox'),
-    field('feeds (JSON)', 'reputation.feeds', s.reputation.feeds),
+    field('feeds (JSON) \u2014 applies to ALL profiles', 'reputation.feeds', s.reputation.feeds),
     field('Safe Browsing', 'reputation.safeBrowsing.enabled', s.reputation.safeBrowsing.enabled, 'checkbox'),
     field('SB key env var', 'reputation.safeBrowsing.apiKeyEnv', s.reputation.safeBrowsing.apiKeyEnv)));
   $('s-msg').textContent = '';

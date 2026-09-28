@@ -106,3 +106,46 @@ describe('egress content filter (webRequest layer logic)', () => {
     expect(ctl.checkRequest(`${fx.attacker}/x?q=WINTER-SALE-7731`, 'GET').unconfirmed).toHaveLength(0);
   });
 });
+
+describe('proxy robustness (review: profiles round)', () => {
+  const raw = (port: number, payload: string) =>
+    new Promise<string>((resolve) => {
+      const s = net.connect(port, '127.0.0.1', () => s.write(payload));
+      let out = '';
+      s.on('data', (d) => (out += d.toString()));
+      s.on('close', () => resolve(out));
+      s.on('error', () => resolve(out));
+      setTimeout(() => s.destroy(), 1500);
+    });
+
+  it('origin-form upgrade requests and malformed lines get a 400, and the proxy keeps serving', async () => {
+    const c = new EgressController([], () => undefined);
+    const p = await startProxy(c);
+    const bad = [
+      'GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n',
+      'GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n',
+      'CONNECT /x HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n',
+      'CONNECT :::: HTTP/1.1\r\n\r\n',
+      'GARBAGE\r\n\r\n',
+      'GET http://[::1 HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n',
+    ];
+    for (const b of bad) expect(await raw(p.port, b), JSON.stringify(b)).toMatch(/^HTTP\/1\.1 (400|403)/);
+    // still alive
+    expect(await raw(p.port, `GET ${fx.site}/shop.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)).toMatch(/^HTTP\/1\.1 200/);
+    await p.close();
+  });
+
+  it("refuses other profiles' proxy ports (and its own) as destinations, in any mode", async () => {
+    const c = new EgressController([], () => undefined);
+    const p = await startProxy(c);
+    const other = await startProxy(new EgressController([], () => undefined));
+    c.setRefusedPorts([p.port, other.port]);
+    for (const host of [`127.0.0.1:${other.port}`, `localhost:${other.port}`, `127.0.0.1:${p.port}`]) {
+      expect(await raw(p.port, `GET http://${host}/ HTTP/1.1\r\nHost: ${host}\r\n\r\n`), host).toMatch(/^HTTP\/1\.1 403/);
+      expect(await raw(p.port, `CONNECT ${host} HTTP/1.1\r\n\r\n`), host).toMatch(/^HTTP\/1\.1 403/);
+      expect(await raw(p.port, `GET http://${host}/ws HTTP/1.1\r\nHost: ${host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n`), host).toMatch(/^HTTP\/1\.1 403/);
+    }
+    await p.close();
+    await other.close();
+  });
+});

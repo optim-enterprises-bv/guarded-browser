@@ -14,6 +14,8 @@ export interface LaunchOpts {
   confirmTimeoutMs?: number;
   guard?: boolean;
   policyDisabled?: boolean;
+  /** test only: delay (ms) between starting a profile and creating its window */
+  openDelayMs?: number;
   /** reuse this userData directory as it is (no settings written) */
   userData?: string;
   /** keep the userData directory on close */
@@ -60,6 +62,10 @@ export async function launch(o: LaunchOpts): Promise<App> {
     env.GUARDED_TEST_KEEP_SW = '1';
     env.GUARDED_TEST = '1';
   }
+  if (o.openDelayMs) {
+    env.GUARDED_TEST_OPEN_DELAY_MS = String(o.openDelayMs);
+    env.GUARDED_TEST = '1';
+  }
   env.GUARDED_DOWNLOAD_DIR = join(userData, 'downloads');
   mkdirSync(env.GUARDED_DOWNLOAD_DIR, { recursive: true });
   delete env.ELECTRON_RUN_AS_NODE;
@@ -84,8 +90,11 @@ export async function launch(o: LaunchOpts): Promise<App> {
     audit: (n = 0) => {
       const auditDir = join(profileDir(n), 'audit');
       if (!existsSync(auditDir)) return [];
-      const f = readdirSync(auditDir).find((x) => x.endsWith('.jsonl'));
-      return f ? readFileSync(join(auditDir, f), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+      // every session file of this profile, oldest first
+      return readdirSync(auditDir)
+        .filter((x) => x.endsWith('.jsonl'))
+        .sort()
+        .flatMap((f) => readFileSync(join(auditDir, f), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)));
     },
     close: async () => {
       await app.close();

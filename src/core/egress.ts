@@ -226,15 +226,38 @@ export class EgressController {
 
   /** Would the proxy let this host through right now? (no side effects, no audit) */
   hostPasses(key: string): boolean {
+    if (this.refusedLoopback(key)) return false;
     if (this.reputationCheck(key.slice(0, key.lastIndexOf(':')))) return false;
     if (this.denied(key)) return false;
     return this.mode === 'manual' || this.allow.has(key);
+  }
+
+  private refusedPorts = new Set<number>();
+
+  /**
+   * Loopback ports that are never a valid destination: every profile's egress proxy (its own
+   * included), so a page in one profile cannot reach into another profile's proxy.
+   */
+  setRefusedPorts(ports: number[]) {
+    this.refusedPorts = new Set(ports);
+  }
+
+  private refusedLoopback(key: string): boolean {
+    const i = key.lastIndexOf(':');
+    const host = key.slice(0, i).replace(/^\[|\]$/g, '');
+    const port = Number(key.slice(i + 1));
+    if (!this.refusedPorts.has(port)) return false;
+    return host === 'localhost' || host.endsWith('.localhost') || host === '::1' || /^127\./.test(host) || host === '0.0.0.0' || host === '0';
   }
 
   /** Host-level decision used by the proxy. */
   decideHost(key: string, method: string, url?: string): boolean {
     let ok: boolean;
     let reason: string;
+    if (this.refusedLoopback(key)) {
+      this.audit({ layer: 'proxy', decision: 'block', host: key, method, url: url?.slice(0, 500), reason: 'destination is a browser egress proxy port (never allowed)' });
+      return false;
+    }
     const rep = this.reputationCheck(key.slice(0, key.lastIndexOf(':')));
     if (rep) {
       this.auditReputation(rep, method, url, 'proxy', 'blocked');
@@ -341,39 +364,65 @@ export interface ProxyHandle {
 }
 
 /** Start the forward proxy on 127.0.0.1 with an ephemeral port. */
+/** Only absolute-form http URLs are proxied (http://host[:port]/path). */
+function absoluteHttp(url: string): URL | null {
+  if (!/^http:\/\/[^/?#]/i.test(url)) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' && u.hostname ? u : null;
+  } catch {
+    return null;
+  }
+}
+
 export function startProxy(ctl: EgressController): Promise<ProxyHandle> {
   const sockets = new Set<net.Socket>();
+  const reject = (client: net.Socket, code: 400 | 403, text: string) => {
+    try {
+      client.end(`HTTP/1.1 ${code} ${text}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
+    } catch {
+      client.destroy();
+    }
+  };
+  // Every handler is wrapped: a malformed request must never throw inside the server
+  // (an uncaught exception here would take the whole main process down).
   const server = http.createServer((req, res) => {
-    const url = req.url ?? '';
-    const key = hostKey(url);
-    if (!key || !/^http:\/\//i.test(url)) {
-      res.writeHead(400).end('guarded-browser proxy: absolute http URL required');
-      return;
-    }
-    if (!ctl.decideHost(key, req.method ?? 'GET', url)) {
-      res.writeHead(403, { 'content-type': 'text/plain' }).end(`guarded-browser: blocked host ${key}`);
-      return;
-    }
-    const u = new URL(url);
-    const headers = { ...req.headers };
-    delete headers['proxy-connection'];
-    delete headers['proxy-authorization'];
-    const up = http.request(
-      { host: u.hostname, port: u.port || 80, path: u.pathname + u.search, method: req.method, headers, autoSelectFamily: true } as http.RequestOptions,
-      (upRes) => {
-        res.writeHead(upRes.statusCode ?? 502, upRes.headers);
-        upRes.pipe(res);
-      },
-    );
-    up.on('error', (e) => {
-      if (!res.headersSent) res.writeHead(502).end(`guarded-browser proxy: upstream error ${e.message}`);
+    try {
+      const url = req.url ?? '';
+      const u = absoluteHttp(url);
+      const key = u ? hostKey(url) : null;
+      if (!u || !key) {
+        res.writeHead(400).end('guarded-browser proxy: absolute http URL required');
+        return;
+      }
+      if (!ctl.decideHost(key, req.method ?? 'GET', url)) {
+        res.writeHead(403, { 'content-type': 'text/plain' }).end(`guarded-browser: blocked host ${key}`);
+        return;
+      }
+      const headers = { ...req.headers };
+      delete headers['proxy-connection'];
+      delete headers['proxy-authorization'];
+      const up = http.request(
+        { host: u.hostname, port: u.port || 80, path: u.pathname + u.search, method: req.method, headers, autoSelectFamily: true } as http.RequestOptions,
+        (upRes) => {
+          res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+          upRes.pipe(res);
+        },
+      );
+      up.on('error', (e) => {
+        if (!res.headersSent) res.writeHead(502).end(`guarded-browser proxy: upstream error ${e.message}`);
+        else res.destroy();
+      });
+      req.pipe(up);
+    } catch {
+      if (!res.headersSent) res.writeHead(400).end('guarded-browser proxy: bad request');
       else res.destroy();
-    });
-    req.pipe(up);
+    }
   });
 
   const tunnel = (client: net.Socket, key: string, head: Buffer, preface?: string) => {
     const [host, port] = [key.slice(0, key.lastIndexOf(':')), Number(key.slice(key.lastIndexOf(':') + 1))];
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return reject(client, 400, 'Bad Request');
     const upstream = net.connect({ host, port, autoSelectFamily: true });
     upstream.on('connect', () => {
       if (preface) upstream.write(preface);
@@ -387,28 +436,41 @@ export function startProxy(ctl: EgressController): Promise<ProxyHandle> {
   };
 
   server.on('connect', (req, client: net.Socket, head: Buffer) => {
-    const key = hostKey(req.url ?? '');
-    if (!key || !ctl.decideHost(key, 'CONNECT')) {
-      client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
-      return;
+    try {
+      const target = req.url ?? '';
+      // authority-form only: host:port
+      if (!/^(\[[0-9a-f:.]+\]|[a-z0-9.-]+):\d{1,5}$/i.test(target)) return reject(client, 400, 'Bad Request');
+      const key = hostKey(target);
+      if (!key) return reject(client, 400, 'Bad Request');
+      if (!ctl.decideHost(key, 'CONNECT')) return reject(client, 403, 'Forbidden');
+      tunnel(client, key, head);
+    } catch {
+      reject(client, 400, 'Bad Request');
     }
-    tunnel(client, key, head);
   });
 
-  // plain-http websocket upgrades
+  // plain-http websocket upgrades (absolute-form only)
   server.on('upgrade', (req, client: net.Socket, head: Buffer) => {
-    const url = req.url ?? '';
-    const key = hostKey(url);
-    if (!key || !ctl.decideHost(key, 'UPGRADE', url)) {
-      client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
-      return;
+    try {
+      const url = req.url ?? '';
+      const u = absoluteHttp(url);
+      const key = u ? hostKey(url) : null;
+      if (!u || !key) return reject(client, 400, 'Bad Request');
+      if (!ctl.decideHost(key, 'UPGRADE', url)) return reject(client, 403, 'Forbidden');
+      const lines = [`${req.method} ${u.pathname}${u.search} HTTP/1.1`];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        if (!/^proxy-/i.test(req.rawHeaders[i])) lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      }
+      tunnel(client, key, head, lines.join('\r\n') + '\r\n\r\n');
+    } catch {
+      reject(client, 400, 'Bad Request');
     }
-    const u = new URL(url);
-    const lines = [`${req.method} ${u.pathname}${u.search} HTTP/1.1`];
-    for (let i = 0; i < req.rawHeaders.length; i += 2) {
-      if (!/^proxy-/i.test(req.rawHeaders[i])) lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
-    }
-    tunnel(client, key, head, lines.join('\r\n') + '\r\n\r\n');
+  });
+
+  // unparseable request lines / headers
+  server.on('clientError', (_err, socket: net.Socket) => {
+    if (socket.writable) reject(socket, 400, 'Bad Request');
+    else socket.destroy();
   });
 
   server.on('connection', (s) => {

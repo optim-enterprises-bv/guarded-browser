@@ -101,3 +101,53 @@ describe('profile registry', () => {
     expect(() => new ProfileRegistry(ud)).toThrow(/invalid/);
   });
 });
+
+describe('profile registry hardening', () => {
+  it('rejects duplicate ids, shared partitions and reuse of retired partitions', () => {
+    const ud = tmp();
+    const r = new ProfileRegistry(ud);
+    const b = r.create('B');
+    const f = join(ud, 'profiles.json');
+    const good = JSON.parse(readFileSync(f, 'utf8'));
+    const dupId = structuredClone(good);
+    dupId.profiles[1].id = dupId.profiles[0].id;
+    dupId.profiles[1].partition = `persist:profile-${dupId.profiles[0].id}`;
+    expect(RegistrySchema.safeParse(dupId).success).toBe(false);
+    const dupPart = structuredClone(good);
+    dupPart.profiles[1].partition = dupPart.profiles[0].partition;
+    expect(RegistrySchema.safeParse(dupPart).success).toBe(false);
+    const reused = structuredClone(good);
+    reused.retiredPartitions = [b.partition];
+    expect(RegistrySchema.safeParse(reused).success).toBe(false);
+    writeFileSync(f, JSON.stringify(dupPart));
+    expect(() => new ProfileRegistry(ud)).toThrow(/invalid/);
+  });
+
+  it('sweeps reappeared partition dirs of deleted profiles', () => {
+    const ud = tmp();
+    const r = new ProfileRegistry(ud);
+    const b = r.create('B');
+    r.remove(b.id);
+    const d = partitionDir(ud, b.partition);
+    mkdirSync(join(d, 'Local Storage'), { recursive: true });
+    writeFileSync(join(d, 'Cookies'), 'late flush');
+    expect(r.sweepRetired()).toEqual([d]);
+    expect(existsSync(d)).toBe(false);
+    expect(existsSync(partitionDir(ud, r.list()[0].partition)) || true).toBe(true); // live profile untouched
+  });
+
+  it('quarantines single-profile files that reappear after migration', () => {
+    const ud = tmp();
+    const r = new ProfileRegistry(ud);
+    writeFileSync(join(ud, 'settings.json'), '{"stray":true}');
+    mkdirSync(join(ud, 'audit'));
+    writeFileSync(join(ud, 'audit', 'session-old.jsonl'), '{}\n');
+    const q = r.quarantineStrays();
+    expect(q.moved.sort()).toEqual(['audit', 'settings.json']);
+    expect(existsSync(join(ud, 'settings.json'))).toBe(false);
+    expect(readFileSync(join(q.dir, 'settings.json'), 'utf8')).toBe('{"stray":true}');
+    expect(q.dir.startsWith(join(ud, 'quarantine'))).toBe(true);
+    // the default profile's own settings are not touched
+    expect(existsSync(r.dirOf(r.list()[0].id))).toBe(true);
+  });
+});

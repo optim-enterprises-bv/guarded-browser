@@ -30,9 +30,16 @@ export const RegistrySchema = z
     version: z.literal(1),
     profiles: z.array(ProfileSchema).min(1).max(100),
     /** partitions ever used (deleted ones stay listed so their names are never reused) */
-    retiredPartitions: z.array(z.string().max(80)).max(1000),
+    retiredPartitions: z.array(z.string().regex(/^persist:(guarded|profile-[0-9a-f-]{36})$/)).max(1000),
   })
-  .strict();
+  .strict()
+  .superRefine((r, ctx) => {
+    const ids = r.profiles.map((p) => p.id);
+    const parts = r.profiles.map((p) => p.partition);
+    if (new Set(ids).size !== ids.length) ctx.addIssue({ code: 'custom', path: ['profiles'], message: 'duplicate profile id' });
+    if (new Set(parts).size !== parts.length) ctx.addIssue({ code: 'custom', path: ['profiles'], message: 'two profiles share a partition' });
+    if (parts.some((p) => r.retiredPartitions.includes(p))) ctx.addIssue({ code: 'custom', path: ['retiredPartitions'], message: 'an active profile uses a retired partition' });
+  });
 
 export type Registry = z.infer<typeof RegistrySchema>;
 
@@ -146,6 +153,38 @@ export class ProfileRegistry {
     this.reg.profiles[i] = next;
     this.save();
     return { ...next };
+  }
+
+  /** Remove directories of retired (deleted) partitions that reappeared, e.g. a late Chromium flush. */
+  sweepRetired(): string[] {
+    const removed: string[] = [];
+    for (const part of this.reg.retiredPartitions) {
+      const d = partitionDir(this.userData, part);
+      if (existsSync(d)) {
+        rmSync(d, { recursive: true, force: true });
+        removed.push(d);
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Single-profile files that reappear at the top level after migration (an old build, a restore
+   * from backup, ...) are never silently ignored or silently used: they are moved to
+   * userData/quarantine/<timestamp>/ and reported.
+   */
+  quarantineStrays(): { dir: string; moved: string[] } {
+    const moved: string[] = [];
+    const dir = join(this.userData, 'quarantine', new Date().toISOString().replace(/[:.]/g, '-'));
+    for (const entry of MIGRATED_ENTRIES) {
+      const from = join(this.userData, entry);
+      if (!existsSync(from)) continue;
+      const to = join(dir, entry);
+      mkdirSync(join(to, '..'), { recursive: true, mode: 0o700 });
+      renameSync(from, to);
+      moved.push(entry);
+    }
+    return { dir, moved };
   }
 
   /** Remove from the registry (the caller wipes the session and directories first). */

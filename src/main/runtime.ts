@@ -28,11 +28,16 @@ export type Handler = (e: any, ...args: any[]) => unknown;
 
 export interface RuntimeContext {
   profile: () => Profile;
+  /** false once the profile has been deleted (e.g. while its window was being created) */
+  exists: () => boolean;
   dir: string;
   guard: Guard;
   feeds: ReputationDb;
   sharedFeeds: () => FeedConfig[];
   setSharedFeeds: (f: FeedConfig[]) => void;
+  /** guard model settings: app-wide, not per profile */
+  sharedGuard: () => Settings['guard'];
+  setSharedGuard: (g: unknown) => void;
   onFeedsChange: (fn: () => void) => () => void;
   startUrl?: string;
   onClosed: () => void;
@@ -47,9 +52,12 @@ const handlers: Record<string, Handler> = {};
 const POLICY_DISABLED = process.env.GUARDED_UNSAFE_DISABLE_POLICY === '1' && process.env.GUARDED_TEST === '1' && !app.isPackaged;
 
 const { profile, dir: profileDir, guard, feeds } = ctx;
+// read synchronously, before any await: this runtime only ever uses ITS profile's partition
+const partition = profile().partition;
 const settingsFile = join(profileDir, 'settings.json');
 let settings: Settings = loadSettings(settingsFile);
 settings.reputation.feeds = ctx.sharedFeeds();
+settings.guard = { ...ctx.sharedGuard() };
 if (process.env.GUARDED_CONFIRM_TIMEOUT_MS) settings.agent.confirmTimeoutMs = Number(process.env.GUARDED_CONFIRM_TIMEOUT_MS);
 let audit: AuditLog;
 let egress: EgressController;
@@ -758,7 +766,7 @@ function registerIpc() {
     egress.allowHost(host);
     audit.write('egress', { taskId: current.task.id, layer: 'proxy', decision: 'allow', host, method: '-', reason: 'user allowed host for this task' });
   });
-  on('settings:get', () => settings);
+  on('settings:get', () => ({ ...settings, guard: { ...ctx.sharedGuard() }, reputation: { ...settings.reputation, feeds: ctx.sharedFeeds() } }));
   on('settings:save', (_e, s: Settings) => {
     // appearance has its own validated path; never take it from the generic settings form
     s = { ...s, appearance: settings.appearance };
@@ -766,8 +774,9 @@ function registerIpc() {
     saveSettings(settingsFile, s);
     egress.setDenylist(s.egress.denylist);
     egress.reputation = s.reputation.enabled ? reputation : null;
-    // the feed LIST is shared by all profiles (public data); saving it here updates it for everyone
+    // app-wide values: the feed LIST (public data) and the guard model settings apply to every profile
     ctx.setSharedFeeds(s.reputation.feeds);
+    ctx.setSharedGuard(s.guard);
     return true;
   });
   // ---------- appearance (themes for the chrome UI only) ----------
@@ -813,10 +822,19 @@ egress = new EgressController(settings.egress.denylist, (e) => audit.write('egre
 egress.onChange(() => sendUI('egress', egressState()));
 // one proxy per profile: its own port, its own task-mode allowlist
 proxy = await startProxy(egress);
+const abortIfDeleted = async () => {
+  if (ctx.exists()) return;
+  await proxy.close();
+  throw new Error('profile was deleted while its window was being created');
+};
+// TEST ONLY: widen the gap between starting and creating the window
+const openDelay = process.env.GUARDED_TEST === '1' && !app.isPackaged ? Number(process.env.GUARDED_TEST_OPEN_DELAY_MS ?? 0) : 0;
+if (openDelay > 0) await new Promise((r) => setTimeout(r, openDelay));
+await abortIfDeleted();
 if (settings.reputation.enabled) egress.reputation = reputation;
 const unsubscribeFeeds = ctx.onFeedsChange(() => sendUI('reputation', reputationState()));
 
-const ses = session.fromPartition(profile().partition);
+const ses = session.fromPartition(partition);
 // Everything from this profile's session goes through ITS proxy, loopback included.
 await ses.setProxy({ proxyRules: `127.0.0.1:${proxy.port}`, proxyBypassRules: '<-loopback>' });
 setupEgress(ses);
@@ -826,6 +844,7 @@ broker = new ConfirmBroker(sendUI, () => settings.agent.confirmTimeoutMs);
 registerIpc();
 
 const size = /^(\d{3,5})x(\d{3,5})$/.exec(process.env.GUARDED_WINDOW_SIZE ?? '');
+await abortIfDeleted();
 win = new BrowserWindow({
   width: size ? Number(size[1]) : 1440,
   height: size ? Number(size[2]) : 920,
@@ -833,6 +852,8 @@ win = new BrowserWindow({
   webPreferences: { preload: join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false },
 });
 const api = {
+  proxyPort: proxy.port,
+  setRefusedPorts: (ports: number[]) => egress.setRefusedPorts(ports),
   get win() {
     return win;
   },

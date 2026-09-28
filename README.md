@@ -306,13 +306,13 @@ recolour, **open in a new window** and delete profiles.
 
 | per profile | shared by all profiles |
 |---|---|
-| Chromium session partition `persist:profile-<uuid>` (cookies, localStorage / IndexedDB, cache, service workers, permissions, history, downloads) | the guard model (holds no user data; its enable / threshold settings come from the first profile) |
+| Chromium session partition `persist:profile-<uuid>` (cookies, localStorage / IndexedDB, cache, service workers, permissions, history, downloads) | the guard model (holds no user data) and its settings (enable, threshold, threads: `userData/shared.json`, editable from any profile's Settings, labelled "applies to ALL profiles") |
 | `userData/profiles/<uuid>/`: settings incl. model endpoints and cloud fallback, themes + schedule, egress denylist, reputation local block / allow lists, audit logs (0700 / 0600), downloads staging | the downloaded reputation **feed cache** and the feed list (public data; `userData/shared.json`) |
 | agent runtime: task, taint registry, one-shot approvals, post-task guards, pre-flight allowlist, confirmation queue | the Electron process itself |
 | egress proxy: **one proxy instance per profile** on its own port, with its own task-mode allowlist | |
 
-* **Registry**: `userData/profiles.json`, validated with zod, written atomically (temp file +
-  rename, mode 0600). Partition names of deleted profiles are kept in `retiredPartitions` and never
+* **Registry**: `userData/profiles.json`, validated with zod (unique ids, unique partitions, no
+  active profile on a retired partition), written atomically (temp file + rename, mode 0600). Partition names of deleted profiles are kept in `retiredPartitions` and never
   reused.
 * **First run / migration**: a `Default` profile is created. An install from before profiles is
   migrated into it without data loss: `settings.json`, `audit/`, `downloads-pending/` and the local
@@ -330,6 +330,22 @@ recolour, **open in a new window** and delete profiles.
 * **Isolation of the agent**: an agent task in profile A does not gate B's POSTs, B's requests are
   not matched against A's taint registry, A's task allowlist does not restrict B, and A's
   confirmations only appear in A's window (tested with two windows).
+* **Proxies**: each profile's proxy refuses every profile's proxy port (its own included) as a
+  destination, so a page in one profile cannot relay through another profile's proxy; malformed or
+  origin-form requests get `400`, and every proxy handler is exception-safe. Main additionally
+  logs any uncaught exception / unhandled rejection (stderr + each open profile's audit log) instead
+  of exiting. A per-profile Proxy-Authorization secret was **not** added: Chromium only sends proxy
+  credentials after a 407 challenge through `app.on('login')`, which is not reliable for every
+  request type (e.g. service workers); the loopback bind + port refusal is the control.
+* **Opening and deleting**: a profile's window always uses the partition read from its own record
+  before any await; if the profile is deleted while its window is being created, creation is
+  aborted (never falls back to another session). At startup (and again at quit) directories of
+  deleted profiles' partitions that reappeared are removed. Single-profile files that reappear at
+  the top level after migration (`settings.json`, `audit/`, ...) are moved to
+  `userData/quarantine/<time>/` and reported in the audit log.
+* **App-wide files**: Chromium's crash dumps (Crashpad), GPU / shader caches and some top-level
+  Chromium files in `userData` are shared by the whole app and may contain fragments of any
+  profile's data; deleting a profile does not touch them.
 * **Limits**: this is the same model as Chromium / Vivaldi profiles: separate sessions and app state
   inside **one process**. A bug in Electron / Chromium or in this app's main process could still let
   one profile affect another; stronger isolation would need one OS process per profile (not

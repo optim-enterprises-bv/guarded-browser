@@ -16,12 +16,29 @@ import { createRuntime, type Runtime } from './runtime';
 
 if (process.env.GUARDED_USER_DATA) app.setPath('userData', process.env.GUARDED_USER_DATA);
 
+// A bug in one handler must not take every profile's window down: log it (stderr + every open
+// profile's audit log) and keep running.
+function logProcessError(kind: string, err: unknown) {
+  const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  process.stderr.write(`[guarded-browser] ${kind}: ${msg}\n${err instanceof Error ? err.stack ?? '' : ''}\n`);
+  for (const r of runtimes.values()) {
+    try {
+      r.audit('error', { where: kind, error: msg.slice(0, 500) });
+    } catch {
+      /* the audit log itself failed */
+    }
+  }
+}
+process.on('uncaughtException', (e) => logProcessError('uncaughtException', e));
+process.on('unhandledRejection', (e) => logProcessError('unhandledRejection', e));
+
 // No speculative DNS / connections: with a proxy configured these are the remaining ways a page
 // could make the network layer touch a host it names.
 app.commandLine.appendSwitch('dns-prefetch-disable');
 app.commandLine.appendSwitch('disable-features', 'Prerender2,SpeculationRulesPrefetchFuture,NoStatePrefetchHoldback,PreconnectToSearch,LoadingPredictorPrefetch');
 
 /** profile id -> its open runtime (window) */
+// (declared before use by the process-level error handler above)
 const runtimes = new Map<string, Runtime>();
 const opening = new Map<string, Promise<Runtime>>();
 let registry: ProfileRegistry;
@@ -31,6 +48,10 @@ let quitting = false;
 
 // ---------- shared, public / read-only data ----------
 
+const GuardSharedSchema = z.object({ enabled: z.boolean(), model: z.string().max(200), threshold: z.number().min(0).max(1), threads: z.number().int().min(1).max(16) }).strict();
+type GuardShared = z.infer<typeof GuardSharedSchema>;
+let sharedGuard: GuardShared;
+
 const FeedListSchema = z.array(
   z.object({ name: z.string().max(80), url: z.string().max(2000), format: z.enum(['domains', 'hosts', 'urls']), enabled: z.boolean() }).strict(),
 ).max(50);
@@ -38,25 +59,47 @@ let sharedFile = '';
 let sharedFeeds: FeedConfig[] = DEFAULT_FEEDS;
 const feedListeners = new Set<() => void>();
 
-function loadSharedFeeds(ud: string, fallback: FeedConfig[]): FeedConfig[] {
+/**
+ * App-wide settings (userData/shared.json): the reputation feed list and the guard model settings.
+ * They apply to ALL profiles; every profile's Settings shows and edits the same values.
+ */
+function loadShared(ud: string, fallbackFeeds: FeedConfig[], fallbackGuard: GuardShared) {
   sharedFile = join(ud, 'shared.json');
+  let raw: { reputationFeeds?: unknown; guard?: unknown } = {};
   if (existsSync(sharedFile)) {
-    const r = FeedListSchema.safeParse((JSON.parse(readFileSync(sharedFile, 'utf8')) as { reputationFeeds?: unknown }).reputationFeeds);
-    if (r.success) return r.data;
+    try {
+      raw = JSON.parse(readFileSync(sharedFile, 'utf8'));
+    } catch {
+      raw = {};
+    }
   }
-  saveSharedFeeds(fallback);
-  return fallback;
+  const f = FeedListSchema.safeParse(raw.reputationFeeds);
+  const g = GuardSharedSchema.safeParse(raw.guard);
+  sharedFeeds = f.success ? f.data : fallbackFeeds;
+  sharedGuard = g.success ? g.data : fallbackGuard;
+  writeShared();
+}
+
+function writeShared() {
+  const tmp = `${sharedFile}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ reputationFeeds: sharedFeeds, guard: sharedGuard }, null, 2) + '\n');
+  renameSync(tmp, sharedFile);
 }
 
 function saveSharedFeeds(f: FeedConfig[]) {
   const r = FeedListSchema.safeParse(f);
   if (!r.success) return;
   sharedFeeds = r.data;
-  const tmp = `${sharedFile}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ reputationFeeds: sharedFeeds }, null, 2) + '\n');
-  renameSync(tmp, sharedFile);
+  writeShared();
   feeds?.setFeeds(sharedFeeds);
   void feeds?.refresh();
+}
+
+function saveSharedGuard(g: unknown) {
+  const r = GuardSharedSchema.safeParse(g);
+  if (!r.success) return;
+  sharedGuard = r.data;
+  writeShared(); // model changes take effect after a restart (one model for all profiles)
 }
 
 // ---------- profiles ----------
@@ -67,6 +110,12 @@ function runtimeOfUi(wc: WebContents): Runtime | undefined {
 
 function profilesState() {
   return registry.list().map((p) => ({ id: p.id, name: p.name, color: p.color, open: runtimes.has(p.id) }));
+}
+
+/** Every profile's proxy refuses every profile's proxy port (its own included) as a destination. */
+function refreshRefusedPorts() {
+  const ports = [...runtimes.values()].map((r) => r.proxyPort);
+  for (const r of runtimes.values()) r.setRefusedPorts(ports);
 }
 
 function broadcastProfiles() {
@@ -86,23 +135,33 @@ async function openProfile(id: string, startUrl?: string): Promise<Runtime> {
   }
   const pending = opening.get(id);
   if (pending) return pending;
-  if (!registry.get(id)) throw new Error('no such profile');
+  const initial = registry.get(id);
+  if (!initial) throw new Error('no such profile');
+  // the LAST known record of THIS profile: never another profile's partition as a fallback
+  let last: Profile = initial;
   const p = (async () => {
     const rt = await createRuntime({
-      profile: () => registry.get(id) ?? ({ id, name: '(deleted)', color: '#888888', partition: 'persist:guarded', createdAt: '' } as Profile),
+      profile: () => (last = registry.get(id) ?? last),
+      exists: () => !!registry.get(id),
       dir: registry.dirOf(id),
       guard,
       feeds,
       sharedFeeds: () => sharedFeeds,
       setSharedFeeds: saveSharedFeeds,
+      sharedGuard: () => sharedGuard,
+      setSharedGuard: saveSharedGuard,
       onFeedsChange: (fn) => {
         feedListeners.add(fn);
         return () => feedListeners.delete(fn);
       },
       startUrl,
-      register: (rt) => runtimes.set(id, rt),
+      register: (rt) => {
+        runtimes.set(id, rt);
+        refreshRefusedPorts();
+      },
       onClosed: () => {
         runtimes.delete(id);
+        refreshRefusedPorts();
         if (!quitting) broadcastProfiles();
       },
     });
@@ -248,10 +307,16 @@ function buildMenu() {
 
 app.whenReady().then(async () => {
   const ud = app.getPath('userData');
+  const freshMigration = !existsSync(join(ud, 'profiles.json'));
   registry = new ProfileRegistry(ud); // first run: creates the default profile, migrating old data
   const first = registry.list()[0];
-  // the feed LIST is shared; on migration it comes from the old single-profile settings
-  sharedFeeds = loadSharedFeeds(ud, loadSettings(join(registry.dirOf(first.id), 'settings.json')).reputation.feeds);
+  // stray single-profile files after migration are quarantined, never ignored or used
+  const strays = freshMigration ? { dir: '', moved: [] as string[] } : registry.quarantineStrays();
+  // deleted profiles' partition directories that reappeared (late Chromium flush) are removed
+  const swept = registry.sweepRetired();
+  // app-wide settings; on migration they come from the old single-profile settings
+  const firstSettings = loadSettings(join(registry.dirOf(first.id), 'settings.json'));
+  loadShared(ud, firstSettings.reputation.feeds, firstSettings.guard);
 
   const workerBuilder: FeedBuilder = (file, format) =>
     new Promise((resolve, reject) => {
@@ -274,8 +339,8 @@ app.whenReady().then(async () => {
   });
   setImmediate(() => feeds.start());
 
-  // the guard model holds no user data: one instance for all profiles
-  const guardSettings = loadSettings(join(registry.dirOf(first.id), 'settings.json')).guard;
+  // the guard model holds no user data: one instance for all profiles, app-wide settings
+  const guardSettings = sharedGuard;
   if (process.env.GUARDED_GUARD === 'off' || !guardSettings.enabled) {
     guard = new NullGuard(process.env.GUARDED_GUARD === 'off' ? 'guard unavailable: disabled by GUARDED_GUARD=off' : 'guard unavailable: disabled in settings');
   } else {
@@ -291,11 +356,25 @@ app.whenReady().then(async () => {
 
   registerIpc();
   buildMenu();
-  await openProfile(first.id, process.env.GUARDED_START_URL || 'about:blank');
+  const rt = await openProfile(first.id, process.env.GUARDED_START_URL || 'about:blank');
+  if (strays.moved.length) {
+    process.stderr.write(`[guarded-browser] quarantined stray single-profile files: ${strays.moved.join(', ')} -> ${strays.dir}\n`);
+    rt.audit('error', { where: 'migration', error: 'single-profile files reappeared after migration and were quarantined', moved: strays.moved, quarantine: strays.dir });
+  }
+  if (swept.length) rt.audit('egress', { layer: 'webrequest', decision: 'block', host: '-', method: '-', reason: `removed ${swept.length} reappeared partition dir(s) of deleted profiles` });
 });
 
 app.on('before-quit', () => {
   quitting = true;
+});
+
+// last sweep of deleted profiles' partitions, after the sessions have flushed
+app.on('will-quit', () => {
+  try {
+    registry?.sweepRetired();
+  } catch {
+    /* best effort; the startup sweep catches the rest */
+  }
 });
 
 app.on('window-all-closed', () => {
