@@ -14,6 +14,10 @@ export interface LaunchOpts {
   confirmTimeoutMs?: number;
   guard?: boolean;
   policyDisabled?: boolean;
+  /** reuse this userData directory as it is (no settings written) */
+  userData?: string;
+  /** keep the userData directory on close */
+  keepUserData?: boolean;
   /** test only: do not unregister service workers at task end */
   keepServiceWorkers?: boolean;
   feeds?: FeedConfig[];
@@ -32,7 +36,7 @@ export interface App {
 }
 
 export async function launch(o: LaunchOpts): Promise<App> {
-  const userData = mkdtempSync(join(tmpdir(), 'gb-e2e-'));
+  const userData = o.userData ?? mkdtempSync(join(tmpdir(), 'gb-e2e-'));
   const s = defaultSettings();
   for (const role of ['planner', 'reader', 'judge'] as const) {
     s.models[role].primary = { baseURL: o.llmUrl, model: 'default', extraBody: { enable_thinking: false }, timeoutMs: 10_000 };
@@ -41,7 +45,7 @@ export async function launch(o: LaunchOpts): Promise<App> {
   s.agent.confirmTimeoutMs = o.confirmTimeoutMs ?? 30_000;
   s.reputation.feeds = o.feeds ?? []; // never touch the network in tests
   mkdirSync(userData, { recursive: true });
-  writeFileSync(join(userData, 'settings.json'), JSON.stringify(s, null, 2));
+  if (!o.userData) writeFileSync(join(userData, 'settings.json'), JSON.stringify(s, null, 2));
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     GUARDED_USER_DATA: userData,
@@ -85,7 +89,7 @@ export async function launch(o: LaunchOpts): Promise<App> {
     },
     close: async () => {
       await app.close();
-      rmSync(userData, { recursive: true, force: true });
+      if (!o.keepUserData) rmSync(userData, { recursive: true, force: true });
     },
   };
 }
@@ -108,4 +112,22 @@ export async function waitDone(ui: Page, timeout = 90_000): Promise<string> {
 
 export async function waitForUrl(ui: Page, pattern: RegExp) {
   await expect(ui.locator('[data-testid=address]')).toHaveValue(pattern, { timeout: 20_000 });
+}
+
+/** The chrome UI page (index.html) of every open profile window, in opening order. */
+export function uiWindows(app: ElectronApplication): Page[] {
+  return app.windows().filter((w) => w.url().includes('/renderer/index.html'));
+}
+
+/** Create a profile from `ui` and open it in its own window; returns the new window's UI page and id. */
+export async function openNewProfile(a: App, name: string): Promise<{ ui: Page; id: string }> {
+  const before = uiWindows(a.app).length;
+  const r = await a.ui.evaluate((n) => (window as any).gb.invoke('profiles:create', n, '#7c3aed'), name);
+  if (!r.ok) throw new Error(r.error);
+  await a.ui.evaluate((id) => (window as any).gb.invoke('profiles:open', id), r.id);
+  await expect.poll(() => uiWindows(a.app).length).toBe(before + 1);
+  const ui = uiWindows(a.app).at(-1)!;
+  await ui.waitForSelector('[data-testid=task-input]');
+  await expect(ui.locator('[data-testid=profile-button]')).toHaveAttribute('data-profile-id', r.id);
+  return { ui, id: r.id };
 }

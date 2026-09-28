@@ -322,6 +322,7 @@ function showConfirm() {
   }
   box.classList.remove('hidden');
   box.setAttribute('data-kind', c.kind);
+  box.setAttribute('data-request-id', c.id);
   // which tab / pane asks: browser-generated label; the tab title is page text, so it is quoted
   const src = $('c-source');
   src.replaceChildren(el('strong', {}, c.source?.label ?? 'unknown'), ...(c.source?.title ? [' ', el('q', { class: 'small' }, c.source.title)] : []));
