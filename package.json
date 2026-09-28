@@ -2,7 +2,7 @@
   "name": "guarded-browser",
   "version": "0.1.0",
   "private": true,
-  "description": "Desktop browser with a prompt-injection-hardened AI agent (planner / quarantined reader / taint policy / guard / judge / human confirmation)",
+  "description": "Desktop web browser with an AI agent that is architecturally defended against prompt injection",
   "main": "dist/main/main.js",
   "license": "Apache-2.0",
   "scripts": {
@@ -14,7 +14,11 @@
     "test:e2e": "npm run build && node scripts/run-e2e.mjs",
     "guard:report": "vitest run test/unit/guard.test.ts",
     "smoke:local": "node scripts/smoke-local.mjs",
-    "postinstall": "node node_modules/electron/install.js"
+    "postinstall": "node node_modules/electron/install.js",
+    "dist": "node scripts/dist.mjs",
+    "dist:offline": "node scripts/dist.mjs --offline",
+    "test:packaged": "node scripts/run-e2e.mjs test/e2e/packaged.spec.ts",
+    "verify:package": "node scripts/verify-package.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",
@@ -35,5 +39,70 @@
     "onnxruntime-node": false,
     "protobufjs": false,
     "electron-winstaller": false
+  },
+  "author": {
+    "name": "Optim Enterprises B.V."
+  },
+  "homepage": "https://localhost/guarded-browser",
+  "build": {
+    "appId": "io.guardedbrowser.app",
+    "productName": "Guarded Browser",
+    "executableName": "guarded-browser",
+    "directories": {
+      "output": "dist-pkg",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "!dist/**/*.map",
+      "!dist/smoke-local.js",
+      "package.json",
+      "!node_modules/onnxruntime-web/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/linux/arm64/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime_providers_cuda.so",
+      "!node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime_providers_tensorrt.so",
+      "!**/*.ts",
+      "!**/*.map",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/__tests__/**"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node",
+      "**/onnxruntime-node/bin/**",
+      "**/@img/**"
+    ],
+    "npmRebuild": false,
+    "electronLanguages": [
+      "en-US"
+    ],
+    "linux": {
+      "target": [
+        "dir",
+        "AppImage"
+      ],
+      "category": "Network",
+      "icon": "build/icons",
+      "executableName": "guarded-browser",
+      "synopsis": "Browser with a prompt-injection-hardened AI agent",
+      "maintainer": "Optim Enterprises B.V.",
+      "vendor": "Optim Enterprises B.V.",
+      "desktop": {
+        "entry": {
+          "Name": "Guarded Browser",
+          "GenericName": "Web Browser",
+          "Comment": "Web browser with a prompt-injection-hardened AI agent",
+          "Categories": "Network;WebBrowser;",
+          "MimeType": "text/html;x-scheme-handler/http;x-scheme-handler/https;",
+          "StartupWMClass": "guarded-browser"
+        }
+      }
+    },
+    "appImage": {
+      "artifactName": "guarded-browser-${version}.${arch}.AppImage"
+    }
   }
 }

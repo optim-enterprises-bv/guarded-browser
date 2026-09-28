@@ -20,6 +20,23 @@ import { testEnv } from './test-hooks';
 // "~/.config/Guarded Browser"); GUARDED_USER_DATA picks another directory
 app.setPath('userData', process.env.GUARDED_USER_DATA || join(app.getPath('appData'), 'guarded-browser'));
 
+// one instance per user-data directory; a second launch (e.g. a link opened from another app)
+// hands its http(s) URL to the running instance
+const urlArg = (argv: string[]) => argv.slice(1).find((a) => /^https?:\/\/\S+$/i.test(a) && a.length < 4096);
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0);
+}
+app.on('second-instance', (_e, argv) => {
+  const rt = runtimeOfUi(BrowserWindow.getFocusedWindow()?.webContents as WebContents) ?? [...runtimes.values()][0];
+  if (!rt) return;
+  const u = urlArg(argv);
+  if (u) rt.openUrl(u);
+  if (!rt.win.isDestroyed()) {
+    if (rt.win.isMinimized()) rt.win.restore();
+    rt.win.focus();
+  }
+});
+
 // A bug in one handler must not take every profile's window down: log it (stderr + every open
 // profile's audit log) and keep running.
 function logProcessError(kind: string, err: unknown) {
@@ -385,7 +402,7 @@ app.whenReady().then(async () => {
 
   registerIpc();
   buildMenu();
-  const rt = await openProfile(first.id, process.env.GUARDED_START_URL || 'about:blank');
+  const rt = await openProfile(first.id, urlArg(process.argv) || process.env.GUARDED_START_URL || 'about:blank');
   if (strays.moved.length) {
     process.stderr.write(`[guarded-browser] quarantined stray single-profile files: ${strays.moved.join(', ')} -> ${strays.dir}\n`);
     rt.audit('error', { where: 'migration', error: 'single-profile files reappeared after migration and were quarantined', moved: strays.moved, quarantine: strays.dir });

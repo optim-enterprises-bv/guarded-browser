@@ -225,6 +225,8 @@ function state() {
     fallback: fallbackActive,
     confirmations: broker.list(),
     policyDisabled: POLICY_DISABLED,
+    // a packaged build started with --no-sandbox (Chromium's OS sandbox off) says so, loudly
+    sandboxDisabled: app.isPackaged && app.commandLine.hasSwitch('no-sandbox'),
     reputation: reputationState(),
     auditFile: audit.file,
     settingsFile,
@@ -1032,6 +1034,12 @@ win = new BrowserWindow({
   webPreferences: { preload: join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: !app.isPackaged },
 });
 const api = {
+  /** a URL handed over by the OS (desktop entry / second instance): a new tab, normal navigation path */
+  openUrl: (url: string) => {
+    if (!/^https?:\/\//i.test(url)) return;
+    const t = tabs.create(url);
+    t.navSource = 'user';
+  },
   proxyPort: proxy.port,
   setRefusedPorts: (ports: number[]) => egress.setRefusedPorts(ports),
   get win() {

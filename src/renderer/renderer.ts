@@ -202,6 +202,7 @@ function renderState(s: any) {
   renderFallback(s.fallback);
   renderReputation(s.reputation);
   $('banner-policy').classList.toggle('hidden', !s.policyDisabled);
+  $('banner-sandbox').classList.toggle('hidden', !s.sandboxDisabled);
   setRunning(!!s.task);
   for (const c of s.confirmations ?? []) queueConfirm(c);
 }

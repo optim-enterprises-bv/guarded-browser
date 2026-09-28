@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Guarded Browser
+GenericName=Web Browser
+Comment=Web browser with a prompt-injection-hardened AI agent
+Exec=/usr/bin/guarded-browser %U
+Icon=guarded-browser
+Terminal=false
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+StartupWMClass=guarded-browser
+StartupNotify=true

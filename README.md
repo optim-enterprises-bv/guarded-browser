@@ -57,6 +57,46 @@ npm run smoke:local  # one tiny real task against http://127.0.0.1:1234/v1, skip
 * `npm test` never talks to a real LLM: every test uses the scripted mock in `test/helpers/mock-llm.ts`.
   The guard test runs the real classifier on CPU (set `GUARDED_SKIP_GUARD_TEST=1` to skip it).
 
+## Install on Fedora
+
+Build the packages (x86_64; needs `rpm-build`, uses at most 2 parallel jobs):
+
+```sh
+npm install
+npm run dist            # dist-pkg/guarded-browser-<ver>-1.fc44.x86_64.rpm  (+ an AppImage)
+npm run verify:package  # extracts the RPM without installing it and checks it (see below)
+npm run test:packaged   # the packaged app ignores every test-only hook
+```
+
+Install / uninstall:
+
+```sh
+sudo dnf install ./dist-pkg/guarded-browser-0.1.0-1.fc44.x86_64.rpm
+guarded-browser                         # or "Guarded Browser" in the application menu
+sudo dnf remove guarded-browser
+```
+
+* The app goes to `/opt/guarded-browser`, with `/usr/bin/guarded-browser` (symlink), a desktop entry
+  and icons. The desktop entry declares `text/html`, `http` and `https`, so Guarded Browser can be
+  *chosen* as a browser, but installing it does **not** make it the default.
+* **User data** lives in `~/.config/guarded-browser/` (profiles, settings, audit logs, history,
+  bookmarks, partitions) and the guard model in `~/.local/share/guarded-browser/models/`. Removing
+  the package leaves both; delete them by hand to remove all data.
+* **First run: guard model.** The package does not contain the ~740 MB guard model. On first start
+  it is copied from `~/.cache/guarded-browser/models` if a development build already downloaded it,
+  otherwise downloaded from Hugging Face at a **pinned revision**; every file is checked against a
+  **pinned sha256** (`src/main/model-store.ts`) before it is loaded, and re-checked when it changes.
+  The agent panel shows `guard model downloading 42%`; on a checksum mismatch the guard stays in
+  its "guard unavailable" state. `npm run dist:offline` builds an RPM that bundles the model.
+* **Sandbox.** Chromium's sandbox is on: on Fedora it uses unprivileged user namespaces; the RPM
+  also installs `chrome-sandbox` root-owned with mode 4755 as the fallback. Nothing passes
+  `--no-sandbox`; if someone starts the packaged app with it, a red banner says the OS sandbox is off.
+* **Packaged builds ignore every test hook** (`GUARDED_UNSAFE_DISABLE_POLICY`, `GUARDED_TEST_*`,
+  download / model / confirm-timeout overrides) because `app.isPackaged` is true, and the chrome UI
+  has no devtools. The package contains no tests, fixtures, TypeScript sources or source maps.
+* License: the app is Apache-2.0; Electron / Chromium and the npm modules keep their own licenses
+  (included in `/opt/guarded-browser`).
+
 ## Architecture
 
 ```
