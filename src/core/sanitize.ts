@@ -55,7 +55,7 @@ export function urlParts(url: string): { origin: string; path: string; withheld:
   try {
     const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return { origin: `${u.protocol}`, path: '', withheld: false };
-    const host = u.hostname;
+    const host = u.hostname.replace(/\.+$/, ''); // "example.com." is example.com
     const domain = getDomain(host, { allowPrivateDomains: true }) ?? host;
     let path = decodeURIComponentSafe(u.pathname);
     if (path.length > MAX_PATH) path = `${path.slice(0, MAX_PATH)}…`;

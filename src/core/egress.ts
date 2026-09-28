@@ -23,28 +23,67 @@ import type { FormField } from './types';
 export interface ApprovedRequest {
   method: string;
   url: string;
+  /** the form fields shown in the dialog plus, if a named submit button was clicked, that one pair */
   fields: FormField[];
+  /** the form's encoding; the request must use it (checked on the body and on the Content-Type header) */
+  enctype?: string;
 }
 
 const norm = (v: string) => v.replace(/\r\n/g, '\n');
+const URLENC = /^[A-Za-z0-9*\-._+%]*=[A-Za-z0-9*\-._+%]*(?:&[A-Za-z0-9*\-._+%]*=[A-Za-z0-9*\-._+%]*)*$/;
+const PART = /^Content-Disposition: form-data; name="([^"\r\n]*)"(?:; filename="[^"\r\n]*")?\r\n(?:Content-Type: [^\r\n]+\r\n)?\r\n([\s\S]*)\r\n$/;
 
-/** Parse a form body (urlencoded or multipart). null = not a form body (JSON, binary, ...). */
-export function parseBody(body: string): Array<[string, string]> | null {
+/** Strict urlencoded parse (the exact form Chromium produces). null = anything else. */
+export function parseUrlencoded(body: string): Array<[string, string]> | null {
   if (body === '') return [];
-  const mp = /^--([^\r\n]+)\r\n/.exec(body);
-  if (mp) {
-    const out: Array<[string, string]> = [];
-    for (const part of body.split(`--${mp[1]}`)) {
-      const m = /^\r\nContent-Disposition: form-data; name="([^"]*)"(?:; filename="[^"]*")?\r\n(?:[^\r\n]+\r\n)*\r\n([\s\S]*)\r\n$/i.exec(part);
-      if (m) out.push([m[1], m[2]]);
-    }
-    return out;
+  if (!URLENC.test(body)) return null;
+  try {
+    return body.split('&').map((p) => {
+      const i = p.indexOf('=');
+      const dec = (x: string) => decodeURIComponent(x.replace(/\+/g, ' '));
+      return [dec(p.slice(0, i)), dec(p.slice(i + 1))] as [string, string];
+    });
+  } catch {
+    return null;
   }
-  if (/^[^=&\s{[]*=[^&]*(&[^=&]*=[^&]*)*$/.test(body)) return [...new URLSearchParams(body)];
-  return null;
 }
 
-/** Same keys and values (order-insensitive, multiset); extra pairs only for named submit buttons. */
+/**
+ * Strict multipart parse: empty preamble, every part exactly `Content-Disposition: form-data;
+ * name="..."` (+ optional filename / Content-Type), CRLF line ends, closing delimiter, no epilogue.
+ * Any part or byte that does not parse makes the whole body unparseable (null => mismatch).
+ */
+export function parseMultipart(body: string): { pairs: Array<[string, string]>; boundary: string } | null {
+  const m = /^--([A-Za-z0-9'()+_,\-./:=?]{1,70})\r\n/.exec(body);
+  if (!m) return null;
+  const delim = `--${m[1]}`;
+  const close = `${delim}--\r\n`;
+  if (!body.endsWith(close)) return null;
+  const parts = body.slice(0, body.length - close.length).split(`${delim}\r\n`);
+  if (parts[0] !== '' || parts.length < 2) return null;
+  const pairs: Array<[string, string]> = [];
+  for (const part of parts.slice(1)) {
+    const p = PART.exec(part);
+    if (!p || p[2].includes(delim)) return null;
+    pairs.push([p[1], p[2]]);
+  }
+  return { pairs, boundary: m[1] };
+}
+
+/** Parse a form body for display / matching. With an enctype, only that encoding is accepted. */
+export function parseBody(body: string, enctype?: string): Array<[string, string]> | null {
+  const e = (enctype ?? '').toLowerCase();
+  if (e === 'multipart/form-data') return parseMultipart(body)?.pairs ?? null;
+  if (e === 'application/x-www-form-urlencoded') return parseUrlencoded(body);
+  if (e) return null; // text/plain and anything else: never auto-matched
+  if (body.startsWith('--')) return parseMultipart(body)?.pairs ?? null;
+  return parseUrlencoded(body);
+}
+
+/**
+ * Same keys and values (order-insensitive, multiset). The only extra pair allowed is the clicked
+ * submit button recorded at approval time (and shown in the dialog), at most once.
+ */
 export function fieldsMatch(expected: FormField[], actual: Array<[string, string]>): boolean {
   const rest = actual.map(([k, v]) => `${k}\u0000${norm(v)}`);
   for (const f of expected.filter((x) => !x.submitter)) {
@@ -53,7 +92,7 @@ export function fieldsMatch(expected: FormField[], actual: Array<[string, string
     rest.splice(i, 1);
   }
   const submitters = expected.filter((x) => x.submitter).map((f) => `${f.name}\u0000${norm(f.value)}`);
-  return rest.length <= 1 && rest.every((r) => submitters.includes(r));
+  return rest.length === 0 || (rest.length === 1 && submitters.length === 1 && rest[0] === submitters[0]);
 }
 
 export type EgressMode = 'manual' | 'agent';
@@ -228,18 +267,19 @@ export class EgressController {
    * Does a state-changing request match a one-shot approval? 'match' consumes it. 'mismatch' means an
    * approval exists for this method + URL but the body differs (re-confirm with the real body).
    */
-  matchApproval(method: string, url: string, body: string): 'match' | 'mismatch' | 'none' {
+  matchApproval(method: string, url: string, body: string): { result: 'match' | 'mismatch' | 'none'; enctype?: string; boundary?: string } {
     const u = url.split('#')[0];
     const cands = this.approvals.filter((a) => a.method === method.toUpperCase() && a.url === u);
-    if (!cands.length) return 'none';
-    const pairs = parseBody(body);
+    if (!cands.length) return { result: 'none' };
     for (const a of cands) {
+      const enctype = (a.enctype || 'application/x-www-form-urlencoded').toLowerCase();
+      const pairs = parseBody(body, enctype);
       if (pairs && fieldsMatch(a.fields, pairs)) {
         this.approvals.splice(this.approvals.indexOf(a), 1);
-        return 'match';
+        return { result: 'match', enctype, boundary: enctype === 'multipart/form-data' ? parseMultipart(body)?.boundary : undefined };
       }
     }
-    return 'mismatch';
+    return { result: 'mismatch' };
   }
 
   /** Mark registry values as approved for sending to a host (after a user confirmation). */

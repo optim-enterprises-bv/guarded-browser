@@ -111,16 +111,17 @@ describe('HIGH-2: submit wording', () => {
     const e = new EgressController([], () => undefined);
     const fields = [{ name: 'amount', value: '10' }, { name: 'to', value: 'alice-shop' }, { name: 'go', value: 'Pay', submitter: true }];
     e.approveRequest({ method: 'POST', url: `${SITE}/pay#x`, fields });
-    expect(e.matchApproval('POST', `${SITE}/other`, 'amount=10&to=alice-shop')).toBe('none');
-    expect(e.matchApproval('PUT', `${SITE}/pay`, 'amount=10&to=alice-shop')).toBe('none');
-    expect(e.matchApproval('POST', `${SITE}/pay`, 'amount=9999&to=mallory')).toBe('mismatch');
-    expect(e.matchApproval('POST', `${SITE}/pay`, 'amount=10&to=alice-shop&extra=1')).toBe('mismatch');
-    expect(e.matchApproval('POST', `${SITE}/pay`, '{"amount":10}')).toBe('mismatch');
-    expect(e.matchApproval('POST', `${SITE}/pay`, 'to=alice-shop&go=Pay&amount=10')).toBe('match'); // order-insensitive, submitter ok
-    expect(e.matchApproval('POST', `${SITE}/pay`, 'to=alice-shop&amount=10')).toBe('none'); // consumed
+    const r = (m: string, u: string, b: string) => e.matchApproval(m, u, b).result;
+    expect(r('POST', `${SITE}/other`, 'amount=10&to=alice-shop')).toBe('none');
+    expect(r('PUT', `${SITE}/pay`, 'amount=10&to=alice-shop')).toBe('none');
+    expect(r('POST', `${SITE}/pay`, 'amount=9999&to=mallory')).toBe('mismatch');
+    expect(r('POST', `${SITE}/pay`, 'amount=10&to=alice-shop&extra=1')).toBe('mismatch');
+    expect(r('POST', `${SITE}/pay`, '{"amount":10}')).toBe('mismatch');
+    expect(r('POST', `${SITE}/pay`, 'to=alice-shop&go=Pay&amount=10')).toBe('match'); // order-insensitive, recorded submitter ok
+    expect(r('POST', `${SITE}/pay`, 'to=alice-shop&amount=10')).toBe('none'); // consumed
     e.approveRequest({ method: 'POST', url: `${SITE}/pay`, fields });
     e.clearApprovals();
-    expect(e.matchApproval('POST', `${SITE}/pay`, 'amount=10&to=alice-shop')).toBe('none');
+    expect(r('POST', `${SITE}/pay`, 'amount=10&to=alice-shop')).toBe('none');
   });
   it('parses urlencoded and multipart bodies; normalises CRLF', () => {
     const b = '--XyZ\r\nContent-Disposition: form-data; name="msg"\r\n\r\nline1\r\nline2\r\n--XyZ\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n--XyZ--\r\n';
@@ -128,6 +129,62 @@ describe('HIGH-2: submit wording', () => {
     expect(fieldsMatch([{ name: 'a', value: '1' }, { name: 'msg', value: 'line1\nline2' }], parseBody(b)!)).toBe(true);
     expect(parseBody('a=1&b=x+y')).toEqual([['a', '1'], ['b', 'x y']]);
     expect(parseBody('{"a":1}')).toBeNull();
+  });
+});
+
+describe('round 3: submitter binding and strict body parsing', () => {
+  const exp = [{ name: 'amount', value: '10' }, { name: 'to', value: 'alice-shop' }];
+  const mp = (parts: string[], tail = '--B--\r\n') => parts.map((p) => `--B\r\n${p}\r\n`).join('') + tail;
+  const ok = (n: string, v: string) => `Content-Disposition: form-data; name="${n}"\r\n\r\n${v}`;
+
+  it('I: only the clicked, recorded submitter pair may be added; other named buttons may not', () => {
+    expect(fieldsMatch(exp, parseBody('amount=10&to=alice-shop&to=mallory')!)).toBe(false);
+    expect(fieldsMatch([...exp, { name: 'to', value: 'mallory', submitter: true }], parseBody('amount=10&to=alice-shop&to=mallory')!)).toBe(true);
+    expect(fieldsMatch([...exp, { name: 'go', value: 'Pay', submitter: true }], parseBody('amount=10&to=alice-shop&to=mallory')!)).toBe(false);
+    expect(fieldsMatch([...exp, { name: 'go', value: 'Pay', submitter: true }], parseBody('amount=10&to=alice-shop&go=Pay&go=Pay')!)).toBe(false);
+  });
+
+  it('I: the clicked submitter is shown in the confirmation values', () => {
+    const taint = new TaintRegistry('pay');
+    const el = { ref: 'e3', role: 'button', name: 'Pay', isSubmit: true, inForm: true, formAction: `${SITE}/pay`, formMethod: 'post' };
+    const r = evaluatePolicy({ name: 'click', args: { ref: 'e3' } }, {
+      currentUrl: `${SITE}/p`, allowedOrigins: new Set([SITE]), taint, contextOrigins: [SITE], element: el,
+      formFields: [...exp, { name: 'note', value: '' }, { name: 'to', value: 'mallory', submitter: true }],
+    });
+    expect(r.values.map((v) => [v.field, v.value])).toEqual([['amount', '10'], ['to', 'alice-shop'], ['note', ''], ['(sent by the clicked button) to', 'mallory']]);
+  });
+
+  it('J: any multipart part or byte that does not parse strictly means mismatch', () => {
+    expect(parseBody(mp([ok('amount', '10'), ok('to', 'alice-shop')]), 'multipart/form-data')).toEqual([['amount', '10'], ['to', 'alice-shop']]);
+    const bad: Record<string, string> = {
+      'no space after ;': mp([ok('amount', '10'), ok('to', 'alice-shop'), 'Content-Disposition: form-data;name="to"\r\n\r\nmallory']),
+      'single quotes': mp([ok('amount', '10'), ok('to', 'alice-shop'), "Content-Disposition: form-data; name='to'\r\n\r\nmallory"]),
+      'LF-only part': mp([ok('amount', '10'), ok('to', 'alice-shop'), 'Content-Disposition: form-data; name="to"\n\nmallory']),
+      'RFC 5987 name*=': mp([ok('amount', '10'), ok('to', 'alice-shop'), "Content-Disposition: form-data; name*=UTF-8''to\r\n\r\nmallory"]),
+      'preamble': 'junk\r\n' + mp([ok('amount', '10'), ok('to', 'alice-shop')]),
+      'epilogue': mp([ok('amount', '10'), ok('to', 'alice-shop')]) + 'to=mallory',
+      'no closing delimiter': mp([ok('amount', '10'), ok('to', 'alice-shop')], ''),
+      'extra header': mp([ok('amount', '10'), 'Content-Disposition: form-data; name="to"\r\nX-Evil: 1\r\n\r\nalice-shop']),
+    };
+    for (const [k, b] of Object.entries(bad)) expect(parseBody(b, 'multipart/form-data'), k).toBeNull();
+    // an empty approved set no longer matches a body whose parts do not parse
+    expect(parseBody(mp(['Content-Disposition: form-data;name="to"\r\n\r\nmallory']), 'multipart/form-data')).toBeNull();
+  });
+
+  it('J: the body must use the approved enctype', () => {
+    const e = new EgressController([], () => undefined);
+    e.approveRequest({ method: 'POST', url: `${SITE}/pay`, fields: exp, enctype: 'application/x-www-form-urlencoded' });
+    expect(e.matchApproval('POST', `${SITE}/pay`, mp([ok('amount', '10'), ok('to', 'alice-shop')])).result).toBe('mismatch');
+    expect(e.matchApproval('POST', `${SITE}/pay`, '{"amount":"10","to":"alice-shop"}').result).toBe('mismatch');
+    expect(e.matchApproval('POST', `${SITE}/pay`, 'amount=10&to=alice-shop').result).toBe('match');
+    e.approveRequest({ method: 'POST', url: `${SITE}/pay`, fields: exp, enctype: 'multipart/form-data' });
+    expect(e.matchApproval('POST', `${SITE}/pay`, 'amount=10&to=alice-shop').result).toBe('mismatch');
+    expect(e.matchApproval('POST', `${SITE}/pay`, mp([ok('amount', '10'), ok('to', 'alice-shop')]))).toEqual({ result: 'match', enctype: 'multipart/form-data', boundary: 'B' });
+  });
+
+  it('a trailing-dot host is the same registrable domain', () => {
+    expect(urlParts('http://example.com./x')!.origin).toBe('http://example.com');
+    expect(urlParts('http://a.example.com./x')!.origin).toBe('http://*.example.com');
   });
 });
 

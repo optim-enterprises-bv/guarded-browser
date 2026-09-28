@@ -57,11 +57,12 @@ function escalate(r: PolicyResult, reason: string, extra: Partial<PolicyResult> 
 
 function formValues(ctx: PolicyContext): PolicyResult['values'] {
   return (ctx.formFields ?? [])
-    .filter((f) => f.value !== '' && !f.submitter)
+    // every field that will be sent is shown, empty ones included: the approval is bound to this exact set
     .map((f) => {
       const l = ctx.taint.labelPlannerText(f.value, ctx.contextOrigins);
       const value = f.password ? `${'•'.repeat(f.value.length)} (password)` : f.value;
-      return { field: `${f.hidden ? '(hidden) ' : ''}${f.name}`, value, masked: !!f.password, label: l.label, provenance: l.provenance, taintIds: l.taintIds };
+      const prefix = f.submitter ? '(sent by the clicked button) ' : f.hidden ? '(hidden) ' : '';
+      return { field: `${prefix}${f.name}`, value, masked: !!f.password, label: l.label, provenance: l.provenance, taintIds: l.taintIds };
     });
 }
 

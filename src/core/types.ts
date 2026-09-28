@@ -39,6 +39,7 @@ export interface SnapshotElement {
   href?: string;
   formAction?: string;
   formMethod?: string;
+  formEnctype?: string;
   inForm?: boolean;
   formHasPassword?: boolean;
   isSubmit?: boolean;

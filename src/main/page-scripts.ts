@@ -68,7 +68,8 @@ for (const el of document.querySelectorAll(SEL)) {
     e.inForm = true;
     // el.formAction falls back to the document URL when the attribute is absent, so check the attribute
     e.formAction = (isSubmit && el.hasAttribute('formaction') ? el.formAction : form.action) || location.href;
-    e.formMethod = (form.method || 'get').toLowerCase();
+    e.formMethod = (isSubmit && el.hasAttribute('formmethod') ? el.formMethod : form.method || 'get').toLowerCase();
+    e.formEnctype = (isSubmit && el.hasAttribute('formenctype') ? el.formEnctype : form.enctype || 'application/x-www-form-urlencoded').toLowerCase();
     e.formHasPassword = !!form.querySelector('input[type=password]');
   }
   if (isSubmit) e.isSubmit = true;
@@ -94,7 +95,8 @@ if (kind === 'formFields') {
   const fields = [];
   for (const f of form.elements) {
     if (!f.name || f.disabled) continue;
-    if (['submit','image'].includes(f.type) || (f.tagName === 'BUTTON' && f.type === 'submit')) { fields.push({ name: f.name, value: String(f.value), submitter: true }); continue; }
+    // submit buttons: only the one actually being clicked (el) is sent, and only it is reported
+    if (['submit','image'].includes(f.type) || (f.tagName === 'BUTTON' && f.type === 'submit')) { if (f === el) fields.push({ name: f.name, value: String(f.value), submitter: true }); continue; }
     if (['button','reset','file'].includes(f.type)) continue;
     if (['checkbox','radio'].includes(f.type) && !f.checked) continue;
     if (f.tagName === 'SELECT' && f.multiple) { for (const o of f.selectedOptions) fields.push({ name: f.name, value: o.value }); continue; }

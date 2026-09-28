@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
 import { loadSettings, saveSettings, type Role, type Settings } from '../core/config';
-import { EgressController, hostKey, startProxy, type ProxyHandle } from '../core/egress';
+import { EgressController, hostKey, parseBody, startProxy, type ProxyHandle } from '../core/egress';
 import { NullGuard, TransformersGuard } from '../core/guard';
 import { LlmClient } from '../core/llm';
 import { originOf, originsInTask } from '../core/policy';
@@ -223,13 +223,16 @@ function setupEgress(ses: Session) {
     });
   }
 
-  function formValues(body: string): PolicyResult['values'] {
+  /** Body for the dialog: strictly parsed fields, or the raw body when it does not parse strictly. */
+  function formValues(body: string, forceRaw = false): PolicyResult['values'] {
     const now = new Date().toISOString();
     const prov = [{ source: 'snapshot' as const, timestamp: now, note: 'request body built by the page' }];
-    if (/^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$/.test(body)) {
-      return [...new URLSearchParams(body)].slice(0, 20).map(([k, v]) => ({ field: k.slice(0, 60), value: /pass|pwd/i.test(k) ? '•••• (password)' : v.slice(0, 300), masked: /pass|pwd/i.test(k), label: 'untrusted' as const, provenance: prov, taintIds: egress.idsIn(v) }));
+    const pairs = parseBody(body);
+    const out: PolicyResult['values'] = (pairs ?? []).slice(0, 30).map(([k, v]) => ({ field: k.slice(0, 60), value: /pass|pwd/i.test(k) ? '•••• (password)' : v.slice(0, 300), masked: /pass|pwd/i.test(k), label: 'untrusted' as const, provenance: prov, taintIds: egress.idsIn(v) }));
+    if (body && (!pairs || forceRaw)) {
+      out.push({ field: pairs ? 'raw body' : 'raw body (not a well-formed form body)', value: body.length > 2000 ? `${body.slice(0, 2000)}… (${body.length} bytes)` : body, label: 'untrusted', provenance: prov, taintIds: egress.idsIn(body) });
     }
-    return body ? [{ field: 'body', value: body.slice(0, 300), label: 'untrusted' as const, provenance: prov, taintIds: egress.idsIn(body) }] : [];
+    return out;
   }
 
   /** Layers after reputation. Resolves true = cancel the request. */
@@ -237,6 +240,14 @@ function setupEgress(ses: Session) {
     const inTask = !!current && egress.mode === 'agent';
     const host = hostKey(d.url) ?? '?';
     const base = { host, method: d.method, url: d.url.slice(0, 500) };
+    const gated = inTask || (d.webContentsId !== undefined && postTaskGuard.has(d.webContentsId));
+
+    // hosts the proxy refuses anyway are cancelled here first: no pointless prompts, and a prompt
+    // can never reveal to the page whether a host is on the allowlist
+    if (inTask && !egress.hostPasses(host)) {
+      egress.decideHost(host, d.method, d.url);
+      return true;
+    }
     const { text: body, unreadable } = await readBody(d);
 
     // (a) bodies we cannot inspect never leave silently during a task
@@ -255,22 +266,19 @@ function setupEgress(ses: Session) {
     // (b) every state-changing request during a task (any tab of this session, any resource type:
     //     form POST, fetch, XHR, beacon, ping, ...) needs a matching one-shot approval or a confirmation.
     //     After the task, the tab it drove stays gated until the user navigates it.
-    const gated = inTask || (d.webContentsId !== undefined && postTaskGuard.has(d.webContentsId));
     if (gated && !['GET', 'HEAD', 'OPTIONS'].includes(d.method)) {
-      if (!egress.hostPasses(host)) {
-        // the proxy would refuse this host anyway: no prompt, just cancel (the proxy layer counts it)
-        egress.decideHost(host, d.method, d.url);
-        return true;
-      }
-      const m = egress.matchApproval(d.method, d.url, body);
+      const mr = egress.matchApproval(d.method, d.url, body);
+      const m = mr.result;
       if (m === 'match') {
+        // the Content-Type header is only visible in onBeforeSendHeaders: check it there
+        pendingContentType.set(d.id, { enctype: mr.enctype!, boundary: mr.boundary });
         egress.auditWebRequest({ ...base, decision: 'allow', reason: 'matches the submission confirmed at the action layer (method, URL, fields)' });
       } else {
         const ok = await askEgress(`write|${d.method}|${d.url}|${createHash('sha256').update(body).digest('hex')}`, {
           action: `${d.method} ${d.resourceType} request that was not confirmed`,
           target: host,
           destination: d.url,
-          values: formValues(body),
+          values: formValues(body, m === 'mismatch'),
           reasons: [
             !inTask
               ? 'the page the agent was operating is sending data after the task ended (the tab stays guarded until you navigate it yourself)'
@@ -300,6 +308,23 @@ function setupEgress(ses: Session) {
     egress.auditWebRequest({ ...base, taintIds: ids, decision: ok ? 'allow' : 'block', reason: ok ? 'user confirmed this flow' : 'tainted value in request, not confirmed' });
     return !ok;
   }
+
+  // An approved submission must also be SENT with the approved form's encoding.
+  const pendingContentType = new Map<number, { enctype: string; boundary?: string }>();
+  ses.webRequest.onBeforeSendHeaders({ urls: ['<all_urls>'] }, (d, cb) => {
+    const want = pendingContentType.get(d.id);
+    if (!want) return cb({ requestHeaders: d.requestHeaders });
+    pendingContentType.delete(d.id);
+    const ct = Object.entries(d.requestHeaders).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? '';
+    const media = ct.split(';')[0].trim().toLowerCase();
+    const boundary = /boundary=("?)([^";]+)\1/i.exec(ct)?.[2];
+    const ok = media === want.enctype && (want.enctype !== 'multipart/form-data' || boundary === want.boundary);
+    if (!ok) {
+      egress.auditWebRequest({ host: hostKey(d.url) ?? '?', method: d.method, url: d.url.slice(0, 500), decision: 'block', reason: `approved submission sent with Content-Type "${ct.slice(0, 100)}" instead of ${want.enctype}` });
+      return cb({ cancel: true });
+    }
+    cb({ requestHeaders: d.requestHeaders });
+  });
 
   ses.on('will-download', (_e, item) => {
     if (!current) {
@@ -358,6 +383,9 @@ function setupTab(tab: Tab) {
   wc.setWindowOpenHandler(({ url }) => {
     if (current?.tab === tab) {
       audit.write('navigation', { url, by: 'page', blocked: true, reason: 'popup during agent task' });
+    } else if (postTaskGuard.has(wc.id)) {
+      // a new tab would escape the post-task gate: refuse until the user navigates this tab themselves
+      audit.write('navigation', { url, by: 'page', blocked: true, reason: 'popup from a tab under the post-task gate (navigate the tab yourself to lift it)' });
     } else if (originOf(url)) {
       tabs.create(url);
     }

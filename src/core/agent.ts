@@ -309,7 +309,11 @@ export class AgentTask {
     const { resolved, used } = this.resolveHandles(action);
     const el = this.element(resolved.args.ref);
     const ref = String(resolved.args.ref ?? '');
-    const formFields = el && (resolved.name === 'submit' || (resolved.name === 'click' && el.isSubmit)) ? await driver.formFields(el.ref) : undefined;
+    // click on a submit button: that button is the submitter; submit(): requestSubmit() with none
+    const formFields =
+      el && (resolved.name === 'submit' || (resolved.name === 'click' && el.isSubmit))
+        ? (await driver.formFields(el.ref)).filter((f) => resolved.name === 'click' || !f.submitter)
+        : undefined;
     const target = el ? this.describeTarget(ref) : undefined;
 
     // 1. rule-based policy (code), 2. judge (LLM, can only escalate)
@@ -384,7 +388,7 @@ export class AgentTask {
     if (policy.newOrigin) this.approveOrigin(policy.newOrigin);
     // an approved form submission lets through ONE request with this method, URL and exactly these fields
     if (el && fields && policy.destination && (action.name === 'submit' || (action.name === 'click' && el.isSubmit))) {
-      this.deps.egress?.approveRequest({ method: el.formMethod === 'post' ? 'POST' : 'GET', url: policy.destination, fields });
+      this.deps.egress?.approveRequest({ method: el.formMethod === 'post' ? 'POST' : 'GET', url: policy.destination, fields, enctype: el.formEnctype });
     }
     if (policy.destination && this.deps.egress) {
       const text = [policy.destination, ...policy.values.map((v) => v.value)].join('\n');
