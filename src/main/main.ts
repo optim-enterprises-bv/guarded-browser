@@ -536,9 +536,9 @@ function setupTab(tab: Tab) {
       // another pane / tab opens a popup during a task: open it in the background so split view and
       // the AGENT ACTIVE frame stay on screen
       audit.write('navigation', { url, by: 'page', tab: tab.id, reason: 'popup opened in the background (agent task running)' });
-      tabs.create(url, { background: true });
+      tabs.create(url, { background: true }).navSource = 'page';
     } else if (originOf(url)) {
-      tabs.create(url);
+      tabs.create(url).navSource = 'page';
     }
     return { action: 'deny' };
   });
@@ -587,9 +587,9 @@ function setupTab(tab: Tab) {
       const o = originOf(url);
       if (o) guardedOrigins.add(o);
     }
-    // who started it: 'user' (address bar / back / forward / reload), 'agent' (the driver's navigate),
-    // 'page' (renderer-initiated or anything else, e.g. redirects of a page navigation)
-    const by = tab.navSource ?? 'page';
+    // who started it: 'page' (renderer-initiated: will-navigate fired, or a popup tab), 'agent' (the
+    // driver's navigate), otherwise 'user' (address bar, new tab, back / forward / reload)
+    const by = tab.navSource ?? 'user';
     tab.navSource = undefined;
     audit.write('navigation', { url, tab: tab.id, by, agentTab: current?.tab === tab });
   });

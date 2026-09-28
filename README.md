@@ -305,7 +305,7 @@ drop-down), the tab **context menu** (right-click), or **Ctrl+Shift+S**; **Ctrl+
 **Untile** returns to a single view. The shortcuts also work while a page has focus. Dividers between
 panes can be dragged (panes stop at 240 x 160 px); while you drag, the pages are hidden behind
 placeholders so the browser gets the pointer. Clicking into a pane (or its header) focuses it: the
-address bar and the accent-coloured focus frame follow. Activating a tab that is not part of the
+address bar and the focus frame (a fixed blue, never the theme or site accent) follow. Activating a tab that is not part of the
 tile set returns to a single view. Layout is recalculated on window resize and always leaves the
 agent panel its width: in a window too small for the chosen layout, panes (and the gaps between
 them) shrink below their minimum instead of overflowing into the agent panel or each other, a pane
@@ -319,7 +319,10 @@ Security with split view:
   appears in any planner, reader or judge request.
 * That pane gets an **AGENT ACTIVE** frame and header (black / yellow), also in single view, and the
   tab strip shows an `AGENT` chip. Both are drawn by the browser chrome *around* the page's view; the
-  page's pixels end at its view bounds, so a page cannot draw or fake them.
+  page's pixels end at its view bounds, so a page cannot draw them. What a page *does* control is its
+  title, which the chrome shows in pane headers and tabs: pane headers therefore show it quoted and
+  labelled (`page title: "..."`) on a fixed grey header that looks nothing like the black / yellow
+  agent header, so a page titled "AGENT ACTIVE" cannot pass for the real frame (tested).
 * **Every confirmation names its source**: "Tab 2, pane 1 of 2 (AGENT pane)", "pane 2 of 2 (not the
   agent pane)", a background tab, or "a background worker ... (no tab)". The tab title is shown
   quoted because it is page text.
@@ -329,7 +332,14 @@ Security with split view:
   unchanged. **The proxy's task allowlist is session-wide**: while a task runs, all tiled panes (and
   background tabs) share it, so sites in the other panes may partially break until the task ends or
   you allow their hosts.
-* Closing the agent's tab stops its task.
+* Closing the agent's tab stops its task. Popups opened by *other* panes during a task open as
+  background tabs (split view and the AGENT frame stay on screen); popups from the agent's own tab
+  are refused.
+* The audit log records who started each navigation: `user` (address bar, new tab, back / forward /
+  reload), `agent` (the agent's navigate) or `page` (renderer-initiated: links, forms, script,
+  popups).
+* "Proceed anyway" on a reputation interstitial only ever loads the page in the tab that showed that
+  interstitial, and the confirmation names that tab / pane.
 
 ### Themes
 Built-in themes **Light**, **Dark**, **Light Violet** and **Dark Teal**; the default **System**
@@ -342,7 +352,11 @@ the system's light / dark setting.
 Theme files are untrusted input. Main validates every import and save with zod
 (`src/core/theme.ts`): colours only as `#rgb`, `#rrggbb` or `rgb(r, g, b)` (0-255) and re-serialised
 to `#rrggbb`; radius an integer 0-16; enumerated base / density; name limited to letters, digits,
-space, `_ . -`; unknown keys rejected; 64 KB cap; built-in names cannot be overwritten. The renderer
+space, `_ . -`; unknown keys rejected; 64 KB cap; built-in names cannot be overwritten; and the
+theme must be **readable**: foreground vs background, vs the derived card / input colour and vs the
+highlight colour each need at least 4.5:1, so a shared theme cannot hide the address bar, task
+status or timeline. All other text colours the chrome derives (muted text, accent used as text,
+danger / warning / ok) are adjusted to at least 4.5:1 on the background and cards. The renderer
 only ever writes those normalised hex values and numbers it formatted into CSS custom properties on
 the chrome's `:root`, so a theme cannot inject CSS. Themes style the browser chrome only: web pages
 are separate views and are never themed (tested).
@@ -350,17 +364,25 @@ are separate views and are never themed (tested).
 **Accent from site** (off by default): the active page's `<meta name="theme-color">`, else the
 dominant colour of its favicon, is blended into the theme accent (60 %) and darkened / lightened
 until text on it has at least **4.5:1** contrast (WCAG AA). It is page-controlled, so it is parsed
-with the same strict colour parser (anything else is ignored), and it only feeds `--accent`. No
-favicon is fetched while an agent task runs; favicons are fetched through the guarded session (so
-proxy, reputation and webRequest rules apply).
+with the same strict colour parser (anything else is ignored), and it only feeds `--accent`, which
+is also kept at a minimum colour distance from the locked AGENT yellow (theme accents too). No
+favicon is fetched while an agent task runs. Favicons are fetched through the guarded session (so
+proxy, reputation and webRequest rules apply) with a hard 256 KB limit (Content-Length checked
+first, the body streamed and aborted as soon as it exceeds the limit, only `image/*` raster types).
+The main process never decodes them: the bytes go to the sandboxed chrome renderer, which decodes
+them with `createImageBitmap` and samples a 16x16 canvas.
 
 **Locked security styling.** The confirmation dialog, the allowlist editor, the blocked-host notice,
-the guard warning badge / tab flag and the AGENT ACTIVE frame use fixed, high-contrast colours
+the guard warning badge / tab flag, the guard status chip (all states, including "loading"), the
+address bar, the task status, non-agent pane headers and the AGENT ACTIVE frame use fixed,
+high-contrast colours (the address bar and task status have a fixed light and a fixed dark variant)
 declared with `!important` and never reference theme variables; the reputation interstitial is a
 browser-generated page with its own inline style that themes cannot reach. A test applies a theme
 whose background, foreground, accent and highlight are all the warning yellow, turns on a site
 accent, and checks the dialog, buttons, preflight, AGENT ACTIVE frame and interstitial still render
-with their locked colours and size.
+with their locked colours and size, and that the address bar, task status and guard chip keep at
+least 4.5:1 contrast. (Such a theme is refused at import; the test forces the variables directly to
+model one that slipped through.)
 
 ## Threat model
 

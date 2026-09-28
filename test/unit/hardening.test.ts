@@ -338,3 +338,11 @@ describe('LOW: audit hygiene', () => {
     expect(confirmations[0].values[0].masked).toBe(true);
   });
 });
+
+describe('round 5: no image decoding in the main process', () => {
+  it('src/main never uses nativeImage (favicons are decoded in the sandboxed chrome renderer)', () => {
+    for (const f of ['main.ts', 'tabs.ts', 'confirm.ts']) {
+      expect(readFileSync(join(process.cwd(), 'src', 'main', f), 'utf8'), f).not.toMatch(/nativeImage/);
+    }
+  });
+});
