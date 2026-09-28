@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DEFAULT_FEEDS, type FeedConfig } from './reputation';
+import { AppearanceSchema, defaultAppearance, type Appearance } from './theme';
 
 export interface Endpoint {
   baseURL: string;
@@ -43,6 +44,8 @@ export interface Settings {
     /** optional provider, off by default; the key is read only from this env var */
     safeBrowsing: { enabled: boolean; apiKeyEnv: string };
   };
+  /** chrome themes; validated with AppearanceSchema on load and on every save */
+  appearance: Appearance;
 }
 
 const localEndpoint = (): Endpoint => ({
@@ -72,6 +75,7 @@ export function defaultSettings(): Settings {
       feeds: DEFAULT_FEEDS.map((f) => ({ ...f })),
       safeBrowsing: { enabled: false, apiKeyEnv: 'GOOGLE_SAFE_BROWSING_API_KEY' },
     },
+    appearance: defaultAppearance(),
   };
 }
 
@@ -92,7 +96,11 @@ export function loadSettings(file: string): Settings {
     return s;
   }
   try {
-    return merge(defaultSettings(), JSON.parse(readFileSync(file, 'utf8')));
+    const s = merge(defaultSettings(), JSON.parse(readFileSync(file, 'utf8')));
+    // a hand-edited settings file must not smuggle an invalid theme into the UI
+    const a = AppearanceSchema.safeParse(s.appearance);
+    s.appearance = a.success ? a.data : defaultAppearance();
+    return s;
   } catch {
     return defaultSettings();
   }
