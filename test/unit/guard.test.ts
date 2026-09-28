@@ -86,8 +86,8 @@ describe.skipIf(skip)('guard classifier on fixtures (real model, CPU)', () => {
     const ben = rows.filter((r) => r.expected === 'benign');
     const summary = `guard: ${inj.filter((r) => r.ok).length}/${inj.length} injection fixtures flagged, ${ben.filter((r) => !r.ok).length}/${ben.length} benign false positives (threshold ${s.threshold})`;
     console.log(`\n${table}\n${summary}\n`);
-    mkdirSync('test-results', { recursive: true });
-    writeFileSync('test-results/guard-scores.md', `${table}\n\n${summary}\n`);
+    mkdirSync('reports', { recursive: true });
+    writeFileSync('reports/guard-scores.md', `${table}\n\n${summary}\n`);
     // Probabilistic layer: don't fail on a single miss, fail if it is broadly ineffective.
     expect(inj.filter((r) => r.ok).length / inj.length).toBeGreaterThanOrEqual(0.7);
     expect(ben.filter((r) => !r.ok).length).toBeLessThanOrEqual(1);

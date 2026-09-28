@@ -236,8 +236,8 @@ function summarize(e: any): { text: string; cls: string } {
 }
 
 function addTimeline(e: any) {
-  // manual-browsing proxy chatter would drown the timeline; it is still in the JSONL file
-  if (e.type === 'egress' && e.decision === 'log') return;
+  // routine proxy traffic would drown the timeline; it is all still in the JSONL file
+  if (e.type === 'egress' && (e.decision === 'log' || (e.layer === 'proxy' && e.decision === 'allow' && e.method !== '-'))) return;
   const s = summarize(e);
   const li = el('li', { class: s.cls, 'data-type': e.type }, el('span', { class: 't' }, e.type), s.text);
   const ol = $('timeline');
