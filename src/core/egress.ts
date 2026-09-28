@@ -172,6 +172,13 @@ export class EgressController {
     this.audit({ layer: 'reputation', decision: 'block', host: hit.host, method, url: url?.slice(0, 500), reason: `${action}: listed as malicious by ${hit.feed} (matched ${hit.matched}) [via ${layer}]`, feed: hit.feed, matched: hit.matched });
   }
 
+  /** Would the proxy let this host through right now? (no side effects, no audit) */
+  hostPasses(key: string): boolean {
+    if (this.reputationCheck(key.slice(0, key.lastIndexOf(':')))) return false;
+    if (this.denied(key)) return false;
+    return this.mode === 'manual' || this.allow.has(key);
+  }
+
   /** Host-level decision used by the proxy. */
   decideHost(key: string, method: string, url?: string): boolean {
     let ok: boolean;

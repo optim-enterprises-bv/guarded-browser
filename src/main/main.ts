@@ -249,6 +249,11 @@ function setupEgress(ses: Session) {
     // (b) every state-changing request during a task (any tab of this session, any resource type:
     //     form POST, fetch, XHR, beacon, ping, ...) needs a matching one-shot approval or a confirmation.
     if (inTask && !['GET', 'HEAD', 'OPTIONS'].includes(d.method)) {
+      if (!egress.hostPasses(host)) {
+        // the proxy would refuse this host anyway: no prompt, just cancel (the proxy layer counts it)
+        egress.decideHost(host, d.method, d.url);
+        return true;
+      }
       const m = egress.matchApproval(d.method, d.url, body);
       if (m === 'match') {
         egress.auditWebRequest({ ...base, decision: 'allow', reason: 'matches the submission confirmed at the action layer (method, URL, fields)' });

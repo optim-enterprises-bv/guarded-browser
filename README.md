@@ -36,7 +36,7 @@ npm run smoke:local  # one tiny real task against http://127.0.0.1:1234/v1, skip
  ┌───────────────── PLANNER (privileged LLM, tools) ─────────────────┐             │
  │ sees: task, its own actions, reader numbers + string HANDLES,    │             │
  │ sanitised snapshot: fixed-vocab roles, capped + guarded names,    │             │
- │ origin+path URLs. No page body text; see "What the planner sees". │             │
+ │ registrable-domain+path URLs. No body text; "What the planner sees"│            │
  └──────────────┬──────────────────────────────▲─────────────────────┘             │
    proposed     │                              │ numbers / booleans + handles;     │
    action       ▼                              │ strings stay in code (untrusted)  │
@@ -61,7 +61,7 @@ npm run smoke:local  # one tiny real task against http://127.0.0.1:1234/v1, skip
  │ webRequest: reputation → uninspectable bodies → unconfirmed form POSTs →       ││
  │             taint values in URL/body (each needs confirmation during a task)    ││
  │ forward proxy 127.0.0.1:<ephemeral>: reputation → denylist → task allowlist     ││
- │ WebRTC: disable_non_proxied_udp always; RTCPeerConnection removed in agent mode ││
+ │ WebRTC: disable_non_proxied_udp on every tab, all frames (the real control)     ││
  └────────────────────────────────────────────────────────────────────────────────┘│
 ```
 
@@ -92,9 +92,9 @@ strings. Every page-derived string in its prompt is listed here, with how it is 
 | input type / form method | fixed lists (`text`, `email`, ... / `get`, `post`) |
 | element name (label, aria-label, alt, text) | whitespace-collapsed, capped at 80 chars, guard-screened |
 | page title | capped at 80, guard-screened |
-| page URL, link target, form action | **origin + path only** (query string and fragment dropped), path capped at 40 chars and guard-screened |
+| page URL, link target, form action | scheme + **registrable domain** (eTLD+1 via the public-suffix list; subdomains shown as `*.`) + port + path; query string and fragment dropped; path capped at 40 chars; the whole URL is guard-screened and withheld as `[site withheld]` if flagged or if the domain is longer than 40 chars. The domain itself is still attacker-chosen text (≤40 chars). |
 | action results | fixed strings; driver errors reduced to a Chromium error code (`ERR_ABORTED`); blocked / denied results carry no reasons |
-| reader output | numbers and booleans only; strings are handles (next section) |
+| reader output | scalar numbers, booleans and null only; strings and arrays are handles (next section) |
 
 So names, titles and paths are still attacker text (≤80 / ≤40 chars each, guarded, labelled
 untrusted). A short injection that the guard misses can still reach the planner through them;
@@ -113,8 +113,11 @@ registered in the taint registry as `untrusted` with `{source: reader, url, time
 the value after the planner decided, the policy engine evaluates the substituted (untrusted) value,
 and the confirmation dialog shows it. The judge's history shows handles, never values. Limitation:
 the planner cannot reason about string contents (compare two names, pick the cheaper of two
-products by name) — only numbers and booleans are visible to it. Reader validation errors are
-reported to the planner generically.
+products by name) — only scalar numbers and booleans are visible to it. Arrays (including number
+arrays, which could spell text as char codes) are handles too. A scalar number is still
+page-influenced: it can carry up to ~15 significant digits, i.e. a few characters of encoded data,
+not a usable instruction but not zero information. Reader validation errors are reported to the
+planner generically.
 
 ### 3. Taint / data-flow policy (code)
 * **Task allowlist.** Before a task starts the agent panel shows the seed allowlist for editing:
@@ -190,19 +193,30 @@ The agent panel shows it as a timeline (manual-browsing proxy chatter is only in
   order, during a task:
   1. *Uninspectable bodies.* Blob parts are read with `session.getBlobData`; parts that still cannot
      be read (file uploads, failed blobs) need confirmation.
-  2. *Form submissions.* A POST / PUT / PATCH / DELETE top-level (main- or sub-frame) request from the
-     agent's tab passes only if the action layer confirmed exactly that submission (single use, 30 s);
-     otherwise it needs its own confirmation showing the body fields. This catches `form.submit()`
-     from page JS and anything the snapshot heuristics mislabel.
+  2. *State-changing requests.* During a task, **every** POST / PUT / PATCH / DELETE (any tab of the
+     guarded session, any resource type: form navigation, `fetch`, XHR, `sendBeacon`, ping) needs
+     either a matching one-shot approval or its own confirmation showing method, URL and body.
+     A one-shot approval is created only when you approve a form submission in the action dialog; it
+     is bound to method + URL + the exact field set the dialog showed (order-insensitive, encoding
+     normalised, urlencoded or multipart; only a named submit button may be added) and is dropped as
+     soon as that action finishes. If the page changes the fields after your approval (submit
+     handler rewrites, a different hidden form, JSON instead of form data), the request is held again
+     and the dialog says the page changed what is sent and shows the **actual** body. GET / HEAD /
+     OPTIONS are not gated, so ordinary browsing stays unprompted. Consequences: sites that fire
+     analytics or telemetry POSTs during a task will prompt (acceptable in v1); an approved click on a
+     button whose script then POSTs in the background prompts a second time with the real request.
   3. *Tracked values.* A request containing a taint-registry value (reader output, task secrets,
      values the agent typed — registered *before* they are typed) needs confirmation unless that flow
      (value id → host) was confirmed. Matching: case, URL-encoding (`%20` / `+`, double), and base64
      at all three byte alignments (std and url-safe); values shorter than 6 chars are not matched.
   Denied / timed-out flows are cancelled and not asked again in that task. Manual browsing: tracked
-  values are only logged. JS `fetch`/XHR POSTs are *not* covered by step 2 (only by 1 and 3).
-* **WebRTC.** Every tab uses `setWebRTCIPHandlingPolicy('disable_non_proxied_udp')` (no direct UDP,
-  in any mode). During a task a sandboxed tab preload also removes `RTCPeerConnection` from the
-  page's main frame before page scripts run.
+  values are only logged; state-changing requests are not gated outside a task.
+* **WebRTC.** Every tab uses `setWebRTCIPHandlingPolicy('disable_non_proxied_udp')`: no direct UDP,
+  in any mode and any frame. This is the real control; tests show 0 packets for a page loaded before
+  the task and for a constructor taken from an iframe. As a best-effort extra, a sandboxed tab
+  preload removes `RTCPeerConnection` from the main frame of documents that are *loaded while a task
+  runs*; it does not cover documents loaded before the task started, iframes, or a constructor
+  obtained from a fresh iframe.
 * **Speculative network.** `--dns-prefetch-disable` and prerender/prefetch features are switched
   off. With a fixed proxy, Chromium sends host names to the proxy instead of resolving them.
 * **Downloads.** Manual browsing: Electron's save dialog. During a task: the transfer is paused and
@@ -265,13 +279,14 @@ requests to listed hosts are dropped silently. Every hit is audited with the fee
 * **Short page-derived strings still reach the planner** (names ≤80, titles ≤80, paths ≤40 chars),
   guard-screened but not eliminated; a planner can be steered by them. That is why the policy and
   egress layers exist.
-* **Page-JS exfiltration to an allowed host is only partly covered.** Data the page already has
-  (its own content, cookies, anything the user typed there) can be sent anywhere on the allowlist;
-  the content filter only recognises values in the taint registry, and JS `fetch` POSTs are not
-  subject to the form-submission check.
+* **Page-JS exfiltration to an allowed host is only partly covered.** During a task every
+  state-changing request is confirmed, but **GET requests are not**: a page can put data it already
+  has (its own content, cookies, anything the user typed there) into GET URLs to any host on the
+  allowlist; the content filter only recognises values in the taint registry. Outside a task nothing
+  is gated except the denylist and reputation lists.
 * **iframes.** Snapshots and page text cover the main frame only, so the agent cannot read or operate
   inside iframes; the RTCPeerConnection removal applies to the main frame only. Network rules (proxy,
-  webRequest, WebRTC IP policy, reputation) apply to all frames.
+  webRequest incl. the state-change gate, WebRTC IP policy, reputation) apply to all frames.
 * **The planner's answer** is based on untrusted data and can be wrong or manipulated (it is only
   displayed, labelled as such).
 * **HTTPS is only filtered by host** (`CONNECT host:port`); no TLS interception. The content filter
@@ -280,8 +295,10 @@ requests to listed hosts are dropped silently. Every hit is audited with the fee
   encrypted, compressed or otherwise transformed data (hex, base32, reversed, ...) and anything
   shorter than 6 chars is not recognised. Snapshot names are not in the registry. Page JS that
   reads a typed value and sends it *after* the task ends (manual mode = log-only) is not blocked.
-* **User-sensitive detection is pattern-based**: only emails, phone/card-like numbers and values
-  written after a keyword (`password: ...`) are recognised as task secrets. Other personal data
+* **User-sensitive detection is pattern-based**: emails, phone/card-like numbers, values after a
+  keyword (`password: "a b c"` quoted values are taken whole) and keyword-less machine-looking
+  tokens (10+ chars with letters and digits) are recognised as task secrets; registered secrets are
+  matched in requests down to 4 chars (PINs), other values down to 6. Other personal data
   in the task (a home address, a name) is trusted and can be typed on task-named origins without
   a confirmation.
 * **Same-origin writes are allowed** (except when they carry registered values): a malicious site on
@@ -389,7 +406,12 @@ What the attack tests assert (planner, reader and judge scripted to be compromis
 | parent-domain listing, allowlist override, corrupt/failed feed download | reputation db | allowlist | yes |
 | judge fooled / judge says allow on a code-confirm | judge can only escalate | - | yes |
 | injected text in reviews / hidden text | guard withholds chunks; planner gets no body text, reader strings only as handles | guard on | yes |
-| injection in `role=`, URL fragment, link / form-action query (review A) | fixed ARIA roles; URLs shown as origin + path only | yes | yes |
+| injection in `role=`, URL fragment, link / form-action query (review A) | fixed ARIA roles; query + fragment dropped | yes | yes |
+| injection in a hostname (review H) | registrable domain only, capped at 40, withheld when flagged | yes (real guard) | yes |
+| click → `fetch` POST state change (review F) | every non-GET during a task confirmed; denied → nothing sent, approved → sent | yes | - |
+| submit handler rewrites approved fields (review G) | approval bound to exact fields → re-confirm shows actual body | yes | yes |
+| approval reused by a different POST later (review G2) | approvals are single-use and die with the action | yes | yes |
+| WebRTC from a page loaded before the task / via iframe (review C2, C3) | IP handling policy: 0 UDP packets | yes | - |
 | typing race, Blob body, base64 at offset 1 and 2 (review B) | register-before-type; `getBlobData`; 3-alignment base64 | yes | yes |
 | WebRTC UDP with base64 email in ICE ufrag (review C) | `disable_non_proxied_udp` (0 packets, also in manual mode); no RTCPeerConnection in agent mode | yes | - |
 | `<button type="go">` checkout / "Complete my order" (review D, E) | `.type === 'submit'`, wider label list, network submission check | yes | yes |

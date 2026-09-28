@@ -34,6 +34,13 @@ async function feedsLoaded(ui: Page) {
   await expect(ui.locator('[data-testid=reputation-status]')).toContainText('reputation: 1 hosts', { timeout: 20_000 });
 }
 
+async function openSettings(ui: Page) {
+  await expect(async () => {
+    await ui.click('[data-testid=open-settings]');
+    await expect(ui.locator('[data-testid=settings-panel]')).toBeVisible({ timeout: 3000 });
+  }).toPass({ timeout: 20_000 });
+}
+
 async function tabPage(a: App, pattern: RegExp): Promise<Page | undefined> {
   for (let i = 0; i < 40; i++) {
     const p = a.app.windows().find((w) => pattern.test(w.url()));
@@ -122,7 +129,7 @@ test('(d) local allowlist overrides the feed', async () => {
   a = await launch({ llmUrl: mock.url, feeds: feeds() });
   await feedsLoaded(a.ui);
   appendFileSync(join(a.userData, 'reputation', 'local-allowlist.txt'), 'localhost\n');
-  await a.ui.click('[data-testid=open-settings]');
+  await openSettings(a.ui);
   await a.ui.click('[data-testid=reputation-refresh]');
   await a.ui.fill('[data-testid=address]', `${fx.attacker}/allowed`);
   await a.ui.click('#s-close');
@@ -133,7 +140,7 @@ test('(d) local allowlist overrides the feed', async () => {
 test('settings UI shows feed status and saves changes', async () => {
   a = await launch({ llmUrl: mock.url, feeds: feeds() });
   await feedsLoaded(a.ui);
-  await a.ui.click('[data-testid=open-settings]');
+  await openSettings(a.ui);
   await expect(a.ui.locator('[data-testid=reputation-table]')).toContainText('fixture-threat-feed');
   await a.ui.fill('input[data-path="agent.maxSteps"]', '7');
   await a.ui.click('[data-testid=settings-save]');
