@@ -218,7 +218,9 @@ test('a window too small for the split view: panes shrink, never overlap each ot
   for (const i of [0, 1, 2]) await tabs.nth(i).click({ modifiers: ['Control'] });
   await a.ui.click('[data-testid=tile]');
   await expect(a.ui.locator('[data-testid=pane]')).toHaveCount(3);
-  await expect(a.ui.locator('[data-testid=tile-notice]')).toBeHidden();
+  // on a big enough screen the 3-pane layout fits and no notice is shown
+  const roomy = async () => (await a!.ui.evaluate(() => window.innerWidth)) >= 440 + 3 * 240 + 16;
+  if (await roomy()) await expect(a.ui.locator('[data-testid=tile-notice]')).toBeHidden();
   for (const [w, h] of [[800, 600], [500, 480], [300, 300]]) {
     await a.app.evaluate(({ BrowserWindow }, [ww, hh]) => BrowserWindow.getAllWindows()[0].setContentSize(ww, hh), [w, h]);
     await expect.poll(() => a!.ui.evaluate(() => window.innerWidth)).toBe(w);
@@ -233,5 +235,6 @@ test('a window too small for the split view: panes shrink, never overlap each ot
       }
   }
   await a.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1440, 920));
-  await expect(a.ui.locator('[data-testid=tile-notice]')).toBeHidden();
+  await a.ui.waitForTimeout(300);
+  if (await roomy()) await expect(a.ui.locator('[data-testid=tile-notice]')).toBeHidden(); // the screen may cap the size
 });

@@ -50,7 +50,9 @@ npm run smoke:local  # one tiny real task against http://127.0.0.1:1234/v1, skip
   the profile. Until they arrive the UI shows `guard: loading` / the feed status; nothing blocks
   startup.
 * The e2e tests run under `xvfb-run` when it is installed (no window on your desktop, works
-  headless). Without xvfb they use `$DISPLAY`; with neither they fail with an explanation
+  headless). The harness forces X11 (`--ozone-platform=x11`, `WAYLAND_DISPLAY` removed) and a fixed
+  1440x920 window, so results do not depend on the host display; the suite also passes when run
+  directly on small xvfb screens (800x600, 640x480). Without xvfb they use `$DISPLAY`; with neither they fail with an explanation
   (Fedora: `dnf install xorg-x11-server-Xvfb`).
 * `npm test` never talks to a real LLM: every test uses the scripted mock in `test/helpers/mock-llm.ts`.
   The guard test runs the real classifier on CPU (set `GUARDED_SKIP_GUARD_TEST=1` to skip it).
@@ -305,7 +307,10 @@ panes can be dragged (panes stop at 240 x 160 px); while you drag, the pages are
 placeholders so the browser gets the pointer. Clicking into a pane (or its header) focuses it: the
 address bar and the accent-coloured focus frame follow. Activating a tab that is not part of the
 tile set returns to a single view. Layout is recalculated on window resize and always leaves the
-agent panel its width. Geometry is a pure module (`src/main/tile-layout.ts`, unit-tested).
+agent panel its width: in a window too small for the chosen layout, panes (and the gaps between
+them) shrink below their minimum instead of overflowing into the agent panel or each other, a pane
+squeezed to nothing hides its page, and a notice suggests enlarging the window, using fewer panes or
+untiling. Geometry is a pure module (`src/main/tile-layout.ts`, unit-tested down to 0-px windows).
 
 Security with split view:
 * **The agent operates exactly one pane**: the tab that was focused when the task started. Its
@@ -491,16 +496,16 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/taint.test.ts` | 4 | pass |
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
-| unit | `test/unit/tile-layout.test.ts` (split-view geometry) | 5 | pass |
+| unit | `test/unit/tile-layout.test.ts` (split-view geometry, incl. tiny windows 0-1440 px) | 27 | pass |
 | unit | `test/unit/theme.test.ts` (colour parsing, schema, contrast, schedule) | 11 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
 | e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-4, ported, plus controls) | 30 | pass |
 | e2e | `test/e2e/benign.spec.ts` | 3 | pass |
 | e2e | `test/e2e/reputation.spec.ts` | 5 | pass |
 | e2e | `test/e2e/guard.spec.ts` | 2 | pass |
-| e2e | `test/e2e/splitview.spec.ts` (tiling + agent confined to its pane) | 4 | pass |
+| e2e | `test/e2e/splitview.spec.ts` (tiling + agent confined to its pane + small windows) | 5 | pass |
 | e2e | `test/e2e/themes.spec.ts` (themes + locked security styling) | 5 | pass |
-| **total** | | **165** (106 unit + 59 e2e) | **all pass** |
+| **total** | | **188** (128 unit + 60 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 
