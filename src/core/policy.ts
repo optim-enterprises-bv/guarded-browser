@@ -60,9 +60,9 @@ function formValues(ctx: PolicyContext): PolicyResult['values'] {
     // every field that will be sent is shown, empty ones included: the approval is bound to this exact set
     .map((f) => {
       const l = ctx.taint.labelPlannerText(f.value, ctx.contextOrigins);
-      const value = f.password ? `${'•'.repeat(f.value.length)} (password)` : f.value;
+      const value = f.image ? '(click coordinates: two small numbers)' : f.password ? `${'•'.repeat(f.value.length)} (password)` : f.value;
       const prefix = f.submitter ? '(sent by the clicked button) ' : f.hidden ? '(hidden) ' : '';
-      return { field: `${prefix}${f.name}`, value, masked: !!f.password, label: l.label, provenance: l.provenance, taintIds: l.taintIds };
+      return { field: `${prefix}${f.image ? `${f.name}.x / ${f.name}.y` : f.name}`, value, masked: !!f.password, label: l.label, provenance: l.provenance, taintIds: l.taintIds };
     });
 }
 

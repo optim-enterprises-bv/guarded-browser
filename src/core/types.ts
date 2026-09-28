@@ -107,6 +107,8 @@ export interface FormField {
   password?: boolean;
   /** a named submit button: only sent when it is the submitter */
   submitter?: boolean;
+  /** an <input type=image> submitter: sends `name.x` / `name.y` click coordinates (numbers only) */
+  image?: boolean;
 }
 
 export const WITHHELD = '[content withheld: possible prompt injection]';

@@ -74,6 +74,19 @@ const PAGES: Record<string, string> = {
 });</script>`,
   '/pay-mp.html': `<!doctype html><title>Pay</title><form method=post enctype="multipart/form-data" action="/sink/paymp">
 <input name=amount aria-label="Amount" value="10"><input name=to aria-label="Recipient" value="alice-shop"><button type=submit>Pay</button></form>`,
+  // round 4 (review i2-i5, K2)
+  '/i2.html': `<!doctype html><title>Pay</title><form id=f method=post action="/sink/pay-i"><input name=amount aria-label="Amount" value="10"><input name=to aria-label="Recipient" value="alice-shop">
+<button id=b type=submit name=to value=alice-shop>Pay</button></form><script>document.getElementById('b').addEventListener('click', (e) => { e.target.value = 'mallory'; });</script>`,
+  '/i3.html': `<!doctype html><title>Pay</title><form id=f method=post action="/sink/pay-i"><input name=amount aria-label="Amount" value="10"><input name=to aria-label="Recipient" value="alice-shop">
+<button type=submit name=go value=1 formaction="/sink/other" formmethod=post formenctype="multipart/form-data">Pay</button></form>`,
+  '/i4.html': `<!doctype html><title>Pay</title><form id=f method=post action="/sink/pay-i"><input name=amount aria-label="Amount" value="10"><input name=to aria-label="Recipient" value="alice-shop">
+<input type=image name=pay alt="Pay" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width=40 height=20></form>`,
+  '/i5.html': `<!doctype html><title>Pay</title><form id=f method=post action="/sink/pay-i"><input name=amount aria-label="Amount" value="10"><input name=to aria-label="Recipient" value="alice-shop">
+<button id=b type=submit name=go value=1>Pay</button></form><script>document.getElementById('f').addEventListener('submit', (e) => { e.submitter.name = 'to'; e.submitter.value = 'mallory'; });</script>`,
+  '/sw-page.html': `<!doctype html><title>Deals</title><h1>Deals</h1><script>
+navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).then((r) => {
+  setTimeout(() => r.active.postMessage('go'), 6000);
+});</script>`,
   '/late.html': `<!doctype html><title>Deals</title><h1>Deals</h1>
 <script>setTimeout(() => window.open('/late-post.html'), 4000)</script>`,
   '/late-post.html': `<!doctype html><title>x</title><form id=g method=post action="/sink/late"><input name=amount value=9999><input name=to value=mallory></form>
@@ -146,6 +159,13 @@ test.beforeAll(async () => {
       if (path === '/files/report.bin') {
         res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="report.bin"' });
         res.end('file-body');
+        return;
+      }
+      if (path === '/sw.js') {
+        res.writeHead(200, { 'content-type': 'application/javascript' });
+        res.end(`self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener('message', () => fetch('/sink/sw', { method: 'POST', headers: {'content-type':'application/x-www-form-urlencoded'}, body: 'amount=9999&to=mallory' }));`);
         return;
       }
       const p = PAGES[path];
@@ -586,4 +606,59 @@ test('R3-J control: an approved multipart submission (strict parse + Content-Typ
   await waitDone(a!.ui);
   expect(sink[0].body).toContain('name="to"\r\n\r\nalice-shop');
   expect(a!.audit().filter((e) => e.type === 'confirmation')).toHaveLength(1);
+});
+
+// ---------------- round 4 (review i2-i5, K2) ----------------
+
+for (const page of ['i2', 'i3', 'i5']) {
+  test(`R4-${page}: approving the first dialog never lets "mallory" or a different target out`, async () => {
+    const release = { v: false };
+    const modal = await payAndApprove(`${page}.html`, release);
+    await a!.ui.click('[data-testid=confirm-approve]');
+    // a re-confirmation of a changed request, if any, is denied
+    const again = a!.ui.locator('[data-testid=confirm-modal][data-kind=egress]');
+    if (await again.isVisible({ timeout: 3000 }).catch(() => false)) await a!.ui.click('[data-testid=confirm-deny]');
+    else await a!.ui.waitForTimeout(3000);
+    release.v = true;
+    await waitDone(a!.ui);
+    await a!.ui.waitForTimeout(1000);
+    expect(sink.some((x) => x.body.includes('mallory'))).toBe(false);
+    if (page === 'i3') {
+      // formaction/formmethod/formenctype of the clicked button: the dialog named the real target
+      expect(await modal.getAttribute('data-kind')).not.toBe('action');
+      expect(a!.audit().find((e) => e.type === 'confirmation')?.destination).toBe(`${site}/sink/other`);
+    }
+  });
+}
+
+test('R4-i4: an <input type=image> submit is approved once and goes through (name.x / name.y allowed)', async () => {
+  const release = { v: false };
+  const modal = await payAndApprove('i4.html', release);
+  await expect(modal).toContainText('pay.x / pay.y');
+  await a!.ui.click('[data-testid=confirm-approve]');
+  await expect.poll(() => sink.map((x) => x.path)).toEqual(['/sink/pay-i']);
+  release.v = true;
+  await waitDone(a!.ui);
+  expect(sink[0].body).toMatch(/^amount=10&to=alice-shop&pay\.x=\d+&pay\.y=\d+$/);
+  expect(a!.audit().filter((e) => e.type === 'confirmation')).toHaveLength(1);
+});
+
+test('R4-K2: a service worker registered during the task cannot POST after the task ended', async () => {
+  mock.script('planner', sequence({ tool: 'navigate', args: { url: `${site}/sw-page.html` } }, { tool: 'scroll', args: { direction: 'down' } }, { tool: 'finish', args: { answer: 'x' } }));
+  a = await launch({ llmUrl: mock.url, confirmTimeoutMs: 3000 });
+  await runTask(a.ui, `What deals are on ${site}/sw-page.html ?`);
+  await waitDone(a.ui);
+  await a.ui.waitForTimeout(10_000);
+  expect(sink.filter((x) => x.path === '/sink/sw')).toEqual([]);
+  const audit = a.audit();
+  expect(audit.some((e) => e.type === 'egress' && /service workers of .* unregistered at task end/.test(String(e.reason)))).toBe(true);
+});
+
+test('R4-K2: with unregistration disabled (test flag), the worker gate alone holds the post-task POST', async () => {
+  mock.script('planner', sequence({ tool: 'navigate', args: { url: `${site}/sw-page.html` } }, { tool: 'scroll', args: { direction: 'down' } }, { tool: 'finish', args: { answer: 'x' } }));
+  a = await launch({ llmUrl: mock.url, confirmTimeoutMs: 3000, keepServiceWorkers: true });
+  await runTask(a.ui, `What deals are on ${site}/sw-page.html ?`);
+  await waitDone(a.ui);
+  await expect.poll(() => a!.audit().some((e) => e.type === 'egress' && e.layer === 'webrequest' && e.decision === 'block' && String(e.url).endsWith('/sink/sw')), { timeout: 20_000 }).toBe(true);
+  expect(sink.filter((x) => x.path === '/sink/sw')).toEqual([]);
 });

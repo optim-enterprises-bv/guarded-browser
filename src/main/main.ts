@@ -52,6 +52,16 @@ let deniedFlows = new Set<string>();
  * user navigates the tab themselves or closes it.
  */
 const postTaskGuard = new Set<number>();
+/**
+ * Origins the agent's tab visited during tasks. Requests that belong to no tab (service workers,
+ * shared workers) to one of these origins are gated while any tab is under the post-task gate.
+ */
+const guardedOrigins = new Set<string>();
+let guardedSession: Session | null = null;
+
+function isTabRequest(id: number | undefined): boolean {
+  return id !== undefined && tabs.list().some((t) => tabs.byId(t.id)?.wc.id === id);
+}
 const inflightFlows = new Map<string, Promise<ConfirmOutcome>>();
 
 function sendUI(channel: string, payload: unknown) {
@@ -240,7 +250,8 @@ function setupEgress(ses: Session) {
     const inTask = !!current && egress.mode === 'agent';
     const host = hostKey(d.url) ?? '?';
     const base = { host, method: d.method, url: d.url.slice(0, 500) };
-    const gated = inTask || (d.webContentsId !== undefined && postTaskGuard.has(d.webContentsId));
+    const workerOfGuardedOrigin = postTaskGuard.size > 0 && !isTabRequest(d.webContentsId) && guardedOrigins.has(originOf(d.url) ?? '');
+    const gated = inTask || (d.webContentsId !== undefined && postTaskGuard.has(d.webContentsId)) || workerOfGuardedOrigin;
 
     // hosts the proxy refuses anyway are cancelled here first: no pointless prompts, and a prompt
     // can never reveal to the page whether a host is on the allowlist
@@ -281,7 +292,9 @@ function setupEgress(ses: Session) {
           values: formValues(body, m === 'mismatch'),
           reasons: [
             !inTask
-              ? 'the page the agent was operating is sending data after the task ended (the tab stays guarded until you navigate it yourself)'
+              ? workerOfGuardedOrigin
+                ? 'a background worker (no tab) of a site the agent visited is sending data after the task ended'
+                : 'the page the agent was operating is sending data after the task ended (the tab stays guarded until you navigate it yourself)'
               : m === 'mismatch'
               ? 'the page changed what is sent after you approved it: this is the ACTUAL request body'
               : `a state-changing ${d.method} request (${d.resourceType}) during the task, not covered by an approval`,
@@ -318,7 +331,8 @@ function setupEgress(ses: Session) {
     const ct = Object.entries(d.requestHeaders).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? '';
     const media = ct.split(';')[0].trim().toLowerCase();
     const boundary = /boundary=("?)([^";]+)\1/i.exec(ct)?.[2];
-    const ok = media === want.enctype && (want.enctype !== 'multipart/form-data' || boundary === want.boundary);
+    const boundaries = (ct.match(/(^|;)\s*boundary\s*=/gi) ?? []).length;
+    const ok = media === want.enctype && boundaries <= 1 && (want.enctype !== 'multipart/form-data' || (boundaries === 1 && boundary === want.boundary));
     if (!ok) {
       egress.auditWebRequest({ host: hostKey(d.url) ?? '?', method: d.method, url: d.url.slice(0, 500), decision: 'block', reason: `approved submission sent with Content-Type "${ct.slice(0, 100)}" instead of ${want.enctype}` });
       return cb({ cancel: true });
@@ -430,6 +444,10 @@ function setupTab(tab: Tab) {
   });
   wc.on('will-redirect', (e) => guardNav(e, 'redirect'));
   wc.on('did-navigate', (_e, url) => {
+    if (current?.tab === tab) {
+      const o = originOf(url);
+      if (o) guardedOrigins.add(o);
+    }
     audit.write('navigation', { url, tab: tab.id, by: current?.tab === tab ? 'agent-task' : 'user' });
   });
 }
@@ -490,6 +508,16 @@ async function startTask(text: string, origins?: string[]) {
     .finally(() => {
       broker.denyAll('deny');
       current = null;
+      // Service workers registered by pages the agent visited would outlive the task and act
+      // without a tab: unregister them for every origin the agent's tab visited.
+      // (TEST ONLY: GUARDED_TEST_KEEP_SW=1 skips this to show the worker gate holds on its own)
+      const keepSw = process.env.GUARDED_TEST_KEEP_SW === '1' && process.env.GUARDED_TEST === '1' && !app.isPackaged;
+      for (const origin of keepSw ? [] : guardedOrigins) {
+        void guardedSession
+          ?.clearStorageData({ origin, storages: ['serviceworkers'] })
+          .then(() => audit.write('egress', { layer: 'webrequest', decision: 'block', host: hostKey(origin) ?? origin, method: '-', reason: `service workers of ${origin} unregistered at task end` }))
+          .catch(() => undefined);
+      }
       sendUI('state', state());
     });
   return task.id;
@@ -501,6 +529,7 @@ function registerIpc() {
   ipcMain.handle('tabs:close', (_e, id: number) => {
     const t = tabs.byId(id);
     if (t) postTaskGuard.delete(t.wc.id);
+    if (!postTaskGuard.size) guardedOrigins.clear();
     tabs.close(id);
   });
   ipcMain.handle('tabs:activate', (_e, id: number) => tabs.activate(id));
@@ -508,6 +537,7 @@ function registerIpc() {
     const t = tabs.active();
     if (!t) return;
     if (!current) postTaskGuard.delete(t.wc.id); // the user took the tab back
+    if (!postTaskGuard.size) guardedOrigins.clear();
     let url = input.trim();
     if (!/^[a-z]+:/i.test(url)) url = /^[\w.-]+(:\d+)?(\/|$)/.test(url) ? `http://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
     void t.wc.loadURL(url).catch(() => undefined);
@@ -516,6 +546,7 @@ function registerIpc() {
     const t = tabs.active();
     if (!t) return;
     if (!current) postTaskGuard.delete(t.wc.id);
+    if (!postTaskGuard.size) guardedOrigins.clear();
     fn(t.wc);
   };
   ipcMain.handle('nav:back', () => userNav((wc) => wc.navigationHistory.goBack()));
@@ -594,6 +625,7 @@ app.whenReady().then(async () => {
   // Everything from the guarded profile goes through the proxy, loopback included.
   await ses.setProxy({ proxyRules: `127.0.0.1:${proxy.port}`, proxyBypassRules: '<-loopback>' });
   setupEgress(ses);
+  guardedSession = ses;
 
   const guardOff = process.env.GUARDED_GUARD === 'off' || !settings.guard.enabled;
   if (guardOff) {

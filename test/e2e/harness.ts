@@ -14,6 +14,8 @@ export interface LaunchOpts {
   confirmTimeoutMs?: number;
   guard?: boolean;
   policyDisabled?: boolean;
+  /** test only: do not unregister service workers at task end */
+  keepServiceWorkers?: boolean;
   feeds?: FeedConfig[];
   maxSteps?: number;
 }
@@ -45,6 +47,10 @@ export async function launch(o: LaunchOpts): Promise<App> {
   if (!o.guard) env.GUARDED_GUARD = 'off';
   if (o.policyDisabled) {
     env.GUARDED_UNSAFE_DISABLE_POLICY = '1';
+    env.GUARDED_TEST = '1';
+  }
+  if (o.keepServiceWorkers) {
+    env.GUARDED_TEST_KEEP_SW = '1';
     env.GUARDED_TEST = '1';
   }
   env.GUARDED_DOWNLOAD_DIR = join(userData, 'downloads');

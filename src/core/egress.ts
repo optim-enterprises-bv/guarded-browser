@@ -91,8 +91,21 @@ export function fieldsMatch(expected: FormField[], actual: Array<[string, string
     if (i < 0) return false;
     rest.splice(i, 1);
   }
-  const submitters = expected.filter((x) => x.submitter).map((f) => `${f.name}\u0000${norm(f.value)}`);
-  return rest.length === 0 || (rest.length === 1 && submitters.length === 1 && rest[0] === submitters[0]);
+  const subs = expected.filter((x) => x.submitter);
+  if (rest.length === 0) return true;
+  if (subs.length !== 1) return false;
+  const sub = subs[0];
+  if (sub.image) {
+    // an image button sends exactly name.x and name.y, both non-negative integers
+    const pre = sub.name ? `${sub.name}.` : '';
+    const keys = rest.map((r) => r.split('\u0000'));
+    return (
+      keys.length === 2 &&
+      keys.every(([, v]) => /^\d{1,5}$/.test(v)) &&
+      keys.map(([k]) => k).sort().join('|') === [`${pre}x`, `${pre}y`].join('|')
+    );
+  }
+  return rest.length === 1 && rest[0] === `${sub.name}\u0000${norm(sub.value)}`;
 }
 
 export type EgressMode = 'manual' | 'agent';

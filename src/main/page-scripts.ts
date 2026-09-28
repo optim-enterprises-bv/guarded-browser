@@ -28,6 +28,7 @@ const labelOf = (el) => {
   if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) return l.innerText; }
   const wrap = el.closest('label'); if (wrap) return wrap.innerText;
   if (el.tagName === 'INPUT' && ['submit','button','reset'].includes(el.type)) return el.value;
+  if (el.tagName === 'INPUT' && el.type === 'image') return el.alt || el.name || '';
   const txt = el.innerText; if (txt && txt.trim()) return txt;
   const img = el.querySelector && el.querySelector('img[alt]'); if (img) return img.alt;
   return el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('name') || '';
@@ -96,12 +97,15 @@ if (kind === 'formFields') {
   for (const f of form.elements) {
     if (!f.name || f.disabled) continue;
     // submit buttons: only the one actually being clicked (el) is sent, and only it is reported
-    if (['submit','image'].includes(f.type) || (f.tagName === 'BUTTON' && f.type === 'submit')) { if (f === el) fields.push({ name: f.name, value: String(f.value), submitter: true }); continue; }
+    if (f.type === 'image') { if (f === el) fields.push({ name: f.name, value: '', submitter: true, image: true }); continue; }
+    if (f.type === 'submit' || (f.tagName === 'BUTTON' && f.type === 'submit')) { if (f === el) fields.push({ name: f.name, value: String(f.value), submitter: true }); continue; }
     if (['button','reset','file'].includes(f.type)) continue;
     if (['checkbox','radio'].includes(f.type) && !f.checked) continue;
     if (f.tagName === 'SELECT' && f.multiple) { for (const o of f.selectedOptions) fields.push({ name: f.name, value: o.value }); continue; }
     fields.push({ name: f.name, value: String(f.value), hidden: f.type === 'hidden' || undefined, password: f.type === 'password' || undefined });
   }
+  // form.elements never lists <input type=image>, so the clicked image button is added here
+  if (el.tagName === 'INPUT' && el.type === 'image' && el.form === form) fields.push({ name: el.name, value: '', submitter: true, image: true });
   return { ok: true, fields };
 }
 el.scrollIntoView({ block: 'center' });

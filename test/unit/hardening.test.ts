@@ -154,6 +154,18 @@ describe('round 3: submitter binding and strict body parsing', () => {
     expect(r.values.map((v) => [v.field, v.value])).toEqual([['amount', '10'], ['to', 'alice-shop'], ['note', ''], ['(sent by the clicked button) to', 'mallory']]);
   });
 
+  it('round 4: an image submitter allows exactly name.x / name.y with small integer values', () => {
+    const img = [...exp, { name: 'pay', value: '', submitter: true, image: true }];
+    expect(fieldsMatch(img, parseBody('amount=10&to=alice-shop&pay.x=12&pay.y=7')!)).toBe(true);
+    expect(fieldsMatch(img, parseBody('pay.y=7&amount=10&pay.x=12&to=alice-shop')!)).toBe(true);
+    expect(fieldsMatch(img, parseBody('amount=10&to=alice-shop')!)).toBe(true);
+    expect(fieldsMatch(img, parseBody('amount=10&to=alice-shop&pay.x=12')!)).toBe(false);
+    expect(fieldsMatch(img, parseBody('amount=10&to=alice-shop&pay.x=12&pay.y=mallory')!)).toBe(false);
+    expect(fieldsMatch(img, parseBody('amount=10&to=alice-shop&to.x=1&to.y=2')!)).toBe(false);
+    expect(fieldsMatch(img, parseBody('amount=10&to=alice-shop&pay.x=1&pay.y=2&pay.x=3')!)).toBe(false);
+    expect(fieldsMatch(exp, parseBody('amount=10&to=alice-shop&pay.x=12&pay.y=7')!)).toBe(false);
+  });
+
   it('J: any multipart part or byte that does not parse strictly means mismatch', () => {
     expect(parseBody(mp([ok('amount', '10'), ok('to', 'alice-shop')]), 'multipart/form-data')).toEqual([['amount', '10'], ['to', 'alice-shop']]);
     const bad: Record<string, string> = {
