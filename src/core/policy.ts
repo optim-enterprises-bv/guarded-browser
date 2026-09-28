@@ -72,7 +72,6 @@ function checkFormOrigin(r: PolicyResult, el: SnapshotElement, ctx: PolicyContex
 
 export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): PolicyResult {
   const a = action.args;
-  const currentOrigin = originOf(ctx.currentUrl);
   switch (action.name) {
     case 'navigate': {
       const url = String(a.url ?? '');
@@ -84,8 +83,10 @@ export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): Polic
         r = escalate(r, `navigation to a new origin not mentioned in the task: ${origin}`, { newOrigin: origin });
       }
       const l = ctx.taint.labelPlannerText(url, ctx.contextOrigins);
-      if (l.label === 'untrusted' && origin !== currentOrigin) {
-        r = escalate(r, 'URL was not given by the user and leads to a different origin (possible data exfiltration)');
+      // Untrusted URL + the planner has seen content from some OTHER origin = possible cross-origin flow.
+      const foreign = ctx.contextOrigins.filter((o) => o !== origin);
+      if (l.label === 'untrusted' && foreign.length > 0) {
+        r = escalate(r, `URL was not given by the user and leads to a different origin than the pages it read (${foreign.join(', ')}): possible data exfiltration`);
       }
       r.values = [{ field: 'url', value: url, ...l }];
       return r;
