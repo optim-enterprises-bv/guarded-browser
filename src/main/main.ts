@@ -1,7 +1,8 @@
 // Electron main process: window, tabs, agent wiring, egress layers, confirmation broker, IPC.
 
-import { app, BrowserWindow, ipcMain, session, type Session } from 'electron';
+import { app, BrowserWindow, ipcMain, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
@@ -10,6 +11,7 @@ import { EgressController, hostKey, startProxy, type ProxyHandle } from '../core
 import { NullGuard, TransformersGuard } from '../core/guard';
 import { LlmClient } from '../core/llm';
 import { originOf } from '../core/policy';
+import { ReputationDb, normalizeHost, safeBrowsingLookup } from '../core/reputation';
 import type { ConfirmOutcome, Guard } from '../core/types';
 import { ConfirmBroker } from './confirm';
 import { ElectronDriver, TabManager, type Tab } from './tabs';
@@ -28,7 +30,12 @@ let guard: Guard;
 let broker: ConfirmBroker;
 let tabs: TabManager;
 let win: BrowserWindow;
+let reputation: ReputationDb;
 let current: { task: AgentTask; tab: Tab } | null = null;
+/** reputation interstitials waiting for Go back / Proceed anyway */
+const interstitials = new Map<string, { url: string; host: string; feed: string }>();
+const PROCEED_PREFIX = 'https://guarded-browser.invalid/proceed?t=';
+const sbCache = new Map<string, { verdict: string | null; at: number }>();
 const fallbackActive: Partial<Record<Role, string>> = {};
 /** webRequest-layer flows the user denied during the current task (not asked again) */
 let deniedFlows = new Set<string>();
@@ -51,9 +58,87 @@ function state() {
     fallback: fallbackActive,
     confirmations: broker.list(),
     policyDisabled: POLICY_DISABLED,
+    reputation: reputationState(),
     auditFile: audit.file,
     settingsFile,
   };
+}
+
+function reputationState() {
+  return {
+    enabled: settings.reputation.enabled,
+    total: reputation.totalEntries(),
+    feeds: reputation.status(),
+    localBlockFile: reputation.localBlockFile,
+    localAllowFile: reputation.localAllowFile,
+    safeBrowsing: settings.reputation.safeBrowsing.enabled,
+  };
+}
+
+const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** Full-page interstitial for a listed host. Proceed goes through a browser-chrome confirmation. */
+function showInterstitial(wc: WebContents, url: string, host: string, feed: string, matched: string) {
+  const token = randomBytes(16).toString('hex');
+  interstitials.set(token, { url, host, feed });
+  const agent = !!current;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Blocked: ${esc(host)}</title>
+<style>body{font-family:system-ui,sans-serif;background:#7f1d1d;color:#fff;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center}
+.box{max-width:640px;padding:32px}code{background:rgba(0,0,0,.3);padding:2px 6px;border-radius:4px;word-break:break-all}
+button{font:inherit;padding:8px 16px;margin-right:8px;border-radius:6px;border:0;cursor:pointer}button:disabled{opacity:.5;cursor:default}</style></head>
+<body><div class="box"><h1>Dangerous site blocked</h1>
+<p><code>${esc(host)}</code> is listed as malicious by <b>${esc(feed)}</b> (matched <code>${esc(matched)}</code>).</p>
+<p>Requested URL: <code>${esc(url.slice(0, 300))}</code></p>
+<p>Threat feeds list phishing and malware hosts. A listing can be wrong, but visiting is risky.</p>
+${agent ? '<p><b>An agent task is running: the agent can never override a reputation block.</b></p>' : ''}
+<button onclick="history.back()">Go back</button>
+<button id="proceed" ${agent ? 'disabled' : ''} onclick="location.href='${PROCEED_PREFIX}${token}'">Proceed anyway (asks for confirmation)</button>
+</div></body></html>`;
+  setImmediate(() => void wc.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => undefined));
+}
+
+function handleProceed(token: string) {
+  const it = interstitials.get(token);
+  if (!it) return;
+  if (current) {
+    audit.write('egress', { taskId: current.task.id, layer: 'reputation', decision: 'block', host: it.host, method: 'GET', url: it.url, reason: 'proceed refused: an agent task is running (the agent can never override a reputation block)', feed: it.feed });
+    return;
+  }
+  void broker
+    .request({
+      id: `r${Date.now().toString(36)}`,
+      kind: 'reputation',
+      action: 'visit a host listed as malicious',
+      target: it.host,
+      destination: it.url,
+      values: [],
+      reasons: [`${it.host} is listed by ${it.feed}`, 'you chose Proceed anyway on the interstitial'],
+    })
+    .then((o) => {
+      audit.write('egress', { layer: 'reputation', decision: o === 'approve' ? 'allow' : 'block', host: it.host, method: 'GET', url: it.url, reason: `user override via interstitial: ${o}`, feed: it.feed });
+      if (o !== 'approve') return;
+      egress.overrideReputation(it.host);
+      interstitials.delete(token);
+      const t = tabs.active();
+      void t?.wc.loadURL(it.url).catch(() => undefined);
+    });
+}
+
+async function safeBrowsingVerdict(url: string): Promise<string | null> {
+  const sb = settings.reputation.safeBrowsing;
+  const key = sb.enabled ? process.env[sb.apiKeyEnv] : undefined;
+  if (!key) return null;
+  const host = normalizeHost(url);
+  const c = sbCache.get(host);
+  if (c && Date.now() - c.at < 30 * 60_000) return c.verdict;
+  try {
+    const verdict = await safeBrowsingLookup(url, key);
+    sbCache.set(host, { verdict, at: Date.now() });
+    return verdict;
+  } catch (e) {
+    audit.write('error', { where: 'safe-browsing', error: (e as Error).message });
+    return null;
+  }
 }
 
 const llm = (role: Role) =>
@@ -71,6 +156,28 @@ function setupEgress(ses: Session) {
   // Layer 2: content filter on full URL + body. Blocks tainted values leaving without a confirmed flow.
   ses.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (d, cb) => {
     if (!/^(https?|wss?):/i.test(d.url)) return cb({});
+    // Reputation first: top-level navigations get an interstitial, subresources are dropped silently.
+    const rep = egress.reputationCheck(d.url);
+    if (rep) {
+      const top = d.resourceType === 'mainFrame';
+      egress.auditReputation(rep, d.method, d.url, 'webrequest', top ? 'interstitial' : 'blocked subresource');
+      if (top && d.webContents) showInterstitial(d.webContents, d.url, rep.host, rep.feed ?? '?', rep.matched ?? rep.host);
+      return cb({ cancel: true });
+    }
+    if (d.resourceType === 'mainFrame' && settings.reputation.safeBrowsing.enabled) {
+      void safeBrowsingVerdict(d.url).then((v) => {
+        if (!v) return contentCheck(d, cb);
+        const host = normalizeHost(d.url);
+        audit.write('egress', { layer: 'reputation', decision: 'block', host, method: d.method, url: d.url, reason: `interstitial: google safe browsing ${v}`, feed: 'google-safe-browsing' });
+        if (d.webContents) showInterstitial(d.webContents, d.url, host, `google-safe-browsing (${v})`, host);
+        cb({ cancel: true });
+      });
+      return;
+    }
+    contentCheck(d, cb);
+  });
+
+  function contentCheck(d: Electron.OnBeforeRequestListenerDetails, cb: (r: Electron.CallbackResponse) => void) {
     const body = (d.uploadData ?? []).map((u) => (u.bytes ? Buffer.from(u.bytes).toString('utf8') : '')).join('');
     const { unconfirmed, host } = egress.checkRequest(d.url, d.method, body);
     if (!unconfirmed.length) return cb({});
@@ -107,7 +214,7 @@ function setupEgress(ses: Session) {
         cb({ cancel: true });
       }
     });
-  });
+  }
 
   ses.on('will-download', (_e, item) => {
     item.setSavePath(join(app.getPath('downloads'), item.getFilename()));
@@ -168,7 +275,14 @@ function setupTab(tab: Tab) {
         } else if (o === 'stop') stopTask();
       });
   };
-  wc.on('will-navigate', (e) => guardNav(e, 'navigation'));
+  wc.on('will-navigate', (e) => {
+    if (e.url.startsWith(PROCEED_PREFIX)) {
+      e.preventDefault();
+      handleProceed(e.url.slice(PROCEED_PREFIX.length));
+      return;
+    }
+    guardNav(e, 'navigation');
+  });
   wc.on('will-redirect', (e) => guardNav(e, 'redirect'));
   wc.on('did-navigate', (_e, url) => {
     audit.write('navigation', { url, tab: tab.id, by: current?.tab === tab ? 'agent-task' : 'user' });
@@ -248,7 +362,15 @@ function registerIpc() {
     settings = s;
     saveSettings(settingsFile, s);
     egress.setDenylist(s.egress.denylist);
+    egress.reputation = s.reputation.enabled ? reputation : null;
+    reputation.setFeeds(s.reputation.feeds);
+    void reputation.refresh();
     return true;
+  });
+  ipcMain.handle('reputation:refresh', async () => {
+    reputation.reloadLocalLists();
+    await reputation.refresh(true);
+    return reputationState();
   });
   ipcMain.handle('audit:recent', () => audit.read().slice(-400));
 }
@@ -263,6 +385,20 @@ app.whenReady().then(async () => {
   egress = new EgressController(settings.egress.denylist, (e) => audit.write('egress', { taskId: current?.task.id, ...e }));
   egress.onChange(() => sendUI('egress', egressState()));
   proxy = await startProxy(egress);
+
+  // Reputation: cached feeds load now, downloads happen in the background (never blocks startup).
+  reputation = new ReputationDb(join(ud, 'reputation'), settings.reputation.feeds);
+  let repTimer: NodeJS.Timeout | null = null;
+  reputation.onChange(() => {
+    repTimer ??= setTimeout(() => {
+      repTimer = null;
+      sendUI('reputation', reputationState());
+    }, 250);
+  });
+  if (settings.reputation.enabled) {
+    egress.reputation = reputation;
+    setImmediate(() => reputation.start());
+  }
 
   const ses = session.fromPartition('persist:guarded');
   // Everything from the guarded profile goes through the proxy, loopback included.

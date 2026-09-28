@@ -2,6 +2,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { DEFAULT_FEEDS, type FeedConfig } from './reputation';
 
 export interface Endpoint {
   baseURL: string;
@@ -36,6 +37,12 @@ export interface Settings {
     /** hosts (host or host:port) always blocked, also during manual browsing */
     denylist: string[];
   };
+  reputation: {
+    enabled: boolean;
+    feeds: FeedConfig[];
+    /** optional provider, off by default; the key is read only from this env var */
+    safeBrowsing: { enabled: boolean; apiKeyEnv: string };
+  };
 }
 
 const localEndpoint = (): Endpoint => ({
@@ -60,6 +67,11 @@ export function defaultSettings(): Settings {
     agent: { maxSteps: 20, taskTimeoutMs: 10 * 60_000, confirmTimeoutMs: 120_000 },
     guard: { enabled: true, model: 'protectai/deberta-v3-base-prompt-injection-v2', threshold: 0.5, threads: 2 },
     egress: { denylist: ['doubleclick.net', 'google-analytics.com', 'googletagmanager.com'] },
+    reputation: {
+      enabled: true,
+      feeds: DEFAULT_FEEDS.map((f) => ({ ...f })),
+      safeBrowsing: { enabled: false, apiKeyEnv: 'GOOGLE_SAFE_BROWSING_API_KEY' },
+    },
   };
 }
 

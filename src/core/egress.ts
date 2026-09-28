@@ -17,17 +17,20 @@ import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import type { RegisteredValue, TaintRegistry } from './taint';
+import type { ReputationDb, ReputationHit } from './reputation';
 
 export type EgressMode = 'manual' | 'agent';
 
 export interface EgressAuditEntry {
-  layer: 'proxy' | 'webrequest';
+  layer: 'proxy' | 'webrequest' | 'reputation';
   decision: 'allow' | 'block' | 'confirm-requested' | 'log';
   host: string;
   method: string;
   url?: string;
   reason: string;
   taintIds?: string[];
+  feed?: string;
+  matched?: string;
 }
 
 export function hostKey(input: string): string | null {
@@ -46,6 +49,9 @@ export class EgressController {
   private blocked = new Map<string, number>();
   private confirmedFlows = new Set<string>();
   taint: TaintRegistry | null = null;
+  reputation: ReputationDb | null = null;
+  /** hosts the user chose to visit despite a reputation listing (manual browsing only) */
+  private reputationOverrides = new Set<string>();
   private listeners: Array<() => void> = [];
 
   constructor(
@@ -108,10 +114,34 @@ export class EgressController {
     });
   }
 
+  /**
+   * Reputation verdict for a host. User overrides only count during manual browsing:
+   * nothing the agent does can get past a reputation listing.
+   */
+  reputationCheck(hostOrUrl: string): ReputationHit | null {
+    const hit = this.reputation?.check(hostOrUrl);
+    if (!hit?.listed) return null;
+    if (this.mode === 'manual' && this.reputationOverrides.has(hit.host)) return null;
+    return hit;
+  }
+
+  overrideReputation(host: string) {
+    this.reputationOverrides.add(host);
+  }
+
+  auditReputation(hit: ReputationHit, method: string, url: string | undefined, layer: 'proxy' | 'webrequest', action: string) {
+    this.audit({ layer: 'reputation', decision: 'block', host: hit.host, method, url: url?.slice(0, 500), reason: `${action}: listed as malicious by ${hit.feed} (matched ${hit.matched}) [via ${layer}]`, feed: hit.feed, matched: hit.matched });
+  }
+
   /** Host-level decision used by the proxy. */
   decideHost(key: string, method: string, url?: string): boolean {
     let ok: boolean;
     let reason: string;
+    const rep = this.reputationCheck(key.slice(0, key.lastIndexOf(':')));
+    if (rep) {
+      this.auditReputation(rep, method, url, 'proxy', 'blocked');
+      return false;
+    }
     if (this.denied(key)) {
       ok = false;
       reason = 'host on denylist';

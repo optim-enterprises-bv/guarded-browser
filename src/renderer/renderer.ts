@@ -73,6 +73,7 @@ function renderState(s: any) {
   g.className = `chip ${s.guard.status === 'ready' ? 'ok' : s.guard.status === 'loading' ? '' : 'bad'}`;
   renderEgress(s.egress);
   renderFallback(s.fallback);
+  renderReputation(s.reputation);
   $('banner-policy').classList.toggle('hidden', !s.policyDisabled);
   setRunning(!!s.task);
   for (const c of s.confirmations ?? []) queueConfirm(c);
@@ -92,6 +93,30 @@ function renderEgress(e: { mode: string; allowed: string[]; blocked: Array<{ hos
   }
   box.classList.toggle('hidden', e.blocked.length === 0);
 }
+
+function renderReputation(r: any) {
+  if (!r) return;
+  const chip = $('chip-rep');
+  const failing = r.feeds.filter((f: any) => f.enabled && f.lastError).length;
+  chip.textContent = r.enabled ? `reputation: ${r.total.toLocaleString()} hosts${failing ? `, ${failing} feed error(s)` : ''}` : 'reputation: off';
+  chip.className = `chip ${!r.enabled || r.total === 0 ? 'bad' : failing ? '' : 'ok'}`;
+  chip.title = r.feeds.map((f: any) => `${f.name}: ${f.entries} entries, age ${f.ageHours ?? '-'} h, failures ${f.failures}${f.lastError ? ` (${f.lastError})` : ''}`).join('\n');
+  const table = $('rep-table');
+  table.replaceChildren(el('tr', {}, el('th', {}, 'feed'), el('th', {}, 'entries'), el('th', {}, 'age (h)'), el('th', {}, 'source'), el('th', {}, 'failures / last error')));
+  for (const f of r.feeds) {
+    table.append(el('tr', {}, el('td', { title: f.url }, `${f.name}${f.enabled ? '' : ' (disabled)'}`), el('td', {}, String(f.entries)), el('td', {}, String(f.ageHours ?? '-')), el('td', {}, f.source), el('td', { class: 'small' }, `${f.failures}${f.lastError ? `: ${f.lastError}` : ''}`)));
+  }
+  $('rep-files').textContent = `Local lists (one host per line, allowlist wins): ${r.localBlockFile} , ${r.localAllowFile}. Google Safe Browsing: ${r.safeBrowsing ? 'enabled' : 'disabled'}.`;
+}
+
+$('rep-refresh').onclick = async () => {
+  $('rep-refresh').setAttribute('disabled', '');
+  try {
+    renderReputation(await gb.invoke('reputation:refresh'));
+  } finally {
+    $('rep-refresh').removeAttribute('disabled');
+  }
+};
 
 function renderFallback(f: Record<string, string>) {
   const roles = Object.keys(f);
@@ -202,7 +227,8 @@ function summarize(e: any): { text: string; cls: string } {
     case 'reader': return { text: e.ok ? `${e.query} -> ${JSON.stringify(e.output).slice(0, 160)} [untrusted]` : `failed: ${e.error}`, cls: e.ok ? '' : 'deny' };
     case 'snapshot': return { text: `${e.url} (${e.elements} elements, #${e.hash})`, cls: '' };
     case 'navigation': return { text: `${e.by ?? ''} ${e.url}${e.blocked ? ' (blocked)' : ''}`, cls: e.blocked ? 'block' : '' };
-    case 'egress': return { text: `${e.layer} ${e.decision} ${e.method} ${e.host}: ${e.reason}${e.taintIds ? ` [${e.taintIds.join(',')}]` : ''}`, cls: e.decision === 'block' ? 'block' : '' };
+    case 'egress': if (e.layer === 'reputation') return { text: `REPUTATION ${e.decision} ${e.host}: ${e.reason}`, cls: e.decision === 'block' ? 'block' : '' };
+      return { text: `${e.layer} ${e.decision} ${e.method} ${e.host}: ${e.reason}${e.taintIds ? ` [${e.taintIds.join(',')}]` : ''}`, cls: e.decision === 'block' ? 'block' : '' };
     case 'action-result': return { text: `${e.action} ${e.ok ? 'ok' : `failed ${e.detail ?? ''}`}`, cls: e.ok ? '' : 'deny' };
     default: return { text: JSON.stringify(e).slice(0, 200), cls: '' };
   }
@@ -258,6 +284,11 @@ async function openSettings() {
     field('CPU threads', 'guard.threads', s.guard.threads, 'number')));
   form.append(el('fieldset', {}, el('legend', {}, 'egress'),
     field('denylist (comma)', 'egress.denylist', s.egress.denylist.join(', '))));
+  form.append(el('fieldset', {}, el('legend', {}, 'reputation'),
+    field('enabled', 'reputation.enabled', s.reputation.enabled, 'checkbox'),
+    field('feeds (JSON)', 'reputation.feeds', s.reputation.feeds),
+    field('Safe Browsing', 'reputation.safeBrowsing.enabled', s.reputation.safeBrowsing.enabled, 'checkbox'),
+    field('SB key env var', 'reputation.safeBrowsing.apiKeyEnv', s.reputation.safeBrowsing.apiKeyEnv)));
   $('s-msg').textContent = '';
   $('settings').classList.remove('hidden');
 }
@@ -280,6 +311,7 @@ $('s-save').onclick = async () => {
       let v: unknown = input.type === 'checkbox' ? input.checked : input.value;
       if (input.type === 'number') v = Number(input.value);
       if (path.endsWith('extraBody')) v = input.value.trim() ? JSON.parse(input.value) : {};
+      if (path === 'reputation.feeds') v = JSON.parse(input.value);
       if (path === 'egress.denylist') v = input.value.split(',').map((x) => x.trim()).filter(Boolean);
       if (path.endsWith('apiKeyEnv') && v === '') v = undefined;
       setPath(s, path, v);
@@ -297,5 +329,6 @@ gb.on('state', renderState);
 gb.on('tabs', renderTabs);
 gb.on('egress', renderEgress);
 gb.on('fallback', renderFallback);
+gb.on('reputation', renderReputation);
 void gb.invoke('state:get').then(renderState);
 void gb.invoke('audit:recent').then((events: any[]) => events.forEach(addTimeline));
