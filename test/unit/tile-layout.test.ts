@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FRAME, GAP, HEADER, MIN_H, MIN_W, clampRatios, computeTiles, dragDivider } from '../../src/main/tile-layout';
+import { FRAME, GAP, HEADER, MIN_H, MIN_W, clampRatios, computeTiles, contentArea, dragDivider, tooSmall, type Rect } from '../../src/main/tile-layout';
 
 const area = { x: 0, y: 84, width: 1000, height: 800 };
 const noOverlap = (rs: Array<{ x: number; y: number; width: number; height: number }>) => {
@@ -57,5 +57,42 @@ describe('tile layout', () => {
     const r = clampRatios([Number.NaN, -1, 5], 1000, 100);
     expect(r.reduce((a, b) => a + b, 0)).toBeCloseTo(1);
     expect(Math.min(...r)).toBeGreaterThan(0);
+  });
+});
+
+describe('tiny windows: panes never overlap each other or the agent panel', () => {
+  const within = (r: Rect, o: Rect) => r.width >= 0 && r.height >= 0 && r.x >= o.x && r.y >= o.y && r.x + r.width <= o.x + o.width && r.y + r.height <= o.y + o.height;
+  const disjoint = (rs: Rect[]) => rs.every((p, i) => rs.every((q, j) => i >= j || !(p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height)));
+
+  for (const winW of [1440, 800, 640, 500, 300, 100, 0]) {
+    for (const winH of [920, 480, 120]) {
+      it(`window ${winW}x${winH}`, () => {
+        const area = contentArea(winW, winH, 84, 440);
+        expect(area.x + area.width).toBeLessThanOrEqual(Math.max(0, winW - 440)); // left of the agent panel
+        for (const [layout, n] of [['columns', 2], ['columns', 4], ['rows', 3], ['grid', 3], ['grid', 4]] as const) {
+          const t = { ids: [1, 2, 3, 4].slice(0, n), layout, ratios: [] as number[] };
+          const { panes, dividers } = computeTiles(area, t);
+          expect(panes).toHaveLength(n);
+          for (const p of panes) {
+            expect(within(p.outer, area), `${layout} ${n} outer ${JSON.stringify(p.outer)} in ${JSON.stringify(area)}`).toBe(true);
+            expect(within(p.view, p.outer), `${layout} ${n} view`).toBe(true);
+          }
+          for (const d of dividers) expect(within(d.rect, area)).toBe(true);
+          expect(disjoint(panes.map((p) => p.outer))).toBe(true);
+          // dragging in a tiny window keeps everything inside too
+          const r = dragDivider(area, t, layout === 'grid' ? 'col' : layout === 'rows' ? 'r0' : 'c0', area.x + area.width * 2);
+          const after = computeTiles(area, { ...t, ratios: r }).panes;
+          expect(after.every((p) => within(p.outer, area))).toBe(true);
+          expect(disjoint(after.map((p) => p.outer))).toBe(true);
+        }
+      });
+    }
+  }
+
+  it('flags layouts that cannot give panes their minimum size', () => {
+    expect(tooSmall(contentArea(1440, 920, 84, 440), { ids: [1, 2], layout: 'columns', ratios: [] })).toBe(false);
+    expect(tooSmall(contentArea(800, 600, 84, 440), { ids: [1, 2], layout: 'columns', ratios: [] })).toBe(true);
+    expect(tooSmall(contentArea(1440, 400, 84, 440), { ids: [1, 2, 3], layout: 'rows', ratios: [] })).toBe(true);
+    expect(tooSmall(contentArea(500, 920, 84, 440), { ids: [1, 2, 3, 4], layout: 'grid', ratios: [] })).toBe(true);
   });
 });

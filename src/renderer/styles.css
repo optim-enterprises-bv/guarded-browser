@@ -122,3 +122,4 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 #settings-form fieldset, [data-testid=appearance], #theme-editor { border-radius: var(--radius); }
 #theme-editor textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 11px; }
 [data-testid=appearance] label, #theme-editor label { display: grid; grid-template-columns: 120px 1fr; gap: 6px; margin: 3px 0; align-items: center; }
+.tile-notice { position: fixed; left: 8px; bottom: 8px; max-width: 360px; z-index: 5; background: var(--highlight); color: var(--fg); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; font-size: 12px; }

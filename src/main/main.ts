@@ -795,9 +795,10 @@ app.whenReady().then(async () => {
   broker = new ConfirmBroker(sendUI, () => settings.agent.confirmTimeoutMs);
   registerIpc();
 
+  const size = /^(\d{3,5})x(\d{3,5})$/.exec(process.env.GUARDED_WINDOW_SIZE ?? '');
   win = new BrowserWindow({
-    width: 1440,
-    height: 920,
+    width: size ? Number(size[1]) : 1440,
+    height: size ? Number(size[2]) : 920,
     title: 'Guarded Browser',
     webPreferences: { preload: join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false },
   });

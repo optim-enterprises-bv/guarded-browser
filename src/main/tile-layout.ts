@@ -45,20 +45,33 @@ export function defaultRatios(n: number, layout: TileLayout): number[] {
   return Array.from({ length: n }, () => 1 / n);
 }
 
+/** The page view inside a pane. Always contained in `outer` (0-sized when the pane is too small). */
 export function innerRect(outer: Rect, chrome: boolean): Rect {
   if (!chrome) return { ...outer };
+  const width = Math.max(0, outer.width - 2 * FRAME);
+  const height = Math.max(0, outer.height - 2 * FRAME - HEADER);
   return {
-    x: outer.x + FRAME,
-    y: outer.y + FRAME + HEADER,
-    width: Math.max(1, outer.width - 2 * FRAME),
-    height: Math.max(1, outer.height - 2 * FRAME - HEADER),
+    x: outer.x + Math.min(FRAME, outer.width),
+    y: outer.y + Math.min(FRAME + HEADER, outer.height),
+    width,
+    height,
   };
+}
+
+/** Page area of the window: right of nothing, left of the agent panel, below the top bar. Never negative. */
+export function contentArea(winWidth: number, winHeight: number, topBar: number, panel: number): Rect {
+  return { x: 0, y: topBar, width: Math.max(0, Math.floor(winWidth) - panel), height: Math.max(0, Math.floor(winHeight) - topBar) };
+}
+
+/** Gap between panes: shrinks (down to 0) when the area is too small for full gaps. */
+export function gapFor(total: number, n: number): number {
+  return n > 1 ? Math.max(0, Math.min(GAP, Math.floor(Math.max(0, total) / (4 * (n - 1))))) : 0;
 }
 
 /** Clamp a list of fractions so every pane is at least `min` px out of `total`, then renormalise. */
 export function clampRatios(ratios: number[], total: number, min: number): number[] {
   const n = ratios.length;
-  const usable = total - GAP * (n - 1);
+  const usable = Math.max(0, total - gapFor(total, n) * (n - 1));
   const minF = Math.min(1 / n, min / Math.max(1, usable));
   let r = ratios.map((x) => (Number.isFinite(x) && x > 0 ? x : minF));
   const sum = r.reduce((a, b) => a + b, 0);
@@ -73,20 +86,37 @@ export function clampRatios(ratios: number[], total: number, min: number): numbe
   return r;
 }
 
+/**
+ * Split [start, start+total) into consecutive segments separated by gaps. Every segment has a
+ * non-negative size and lies inside the range, whatever the area size (panes shrink below the
+ * minimum rather than overflow into the agent panel or each other).
+ */
 function split(start: number, total: number, fractions: number[]): Array<[number, number]> {
-  const usable = total - GAP * (fractions.length - 1);
+  const n = fractions.length;
+  const t = Math.max(0, Math.floor(total));
+  const gap = gapFor(t, n);
+  const usable = Math.max(0, t - gap * (n - 1));
   const out: Array<[number, number]> = [];
-  let pos = start;
+  let used = 0;
   fractions.forEach((f, i) => {
-    const size = i === fractions.length - 1 ? start + total - pos : Math.round(usable * f);
-    out.push([pos, size]);
-    pos += size + GAP;
+    const size = i === n - 1 ? usable - used : Math.max(0, Math.min(usable - used, Math.floor(usable * f)));
+    out.push([start + used + gap * i, size]);
+    used += size;
   });
   return out;
 }
 
 /** Compute pane and divider rects for a tile state inside `area`. */
+/** True when the area cannot give every pane its minimum size (the UI shows a notice). */
+export function tooSmall(area: Rect, t: TileState): boolean {
+  const n = Math.min(t.ids.length, MAX_TILES);
+  if (t.layout === 'grid' && n >= 3) return area.width < 2 * MIN_W + GAP || area.height < 2 * MIN_H + GAP;
+  if (t.layout === 'rows') return area.height < n * MIN_H + (n - 1) * GAP;
+  return area.width < n * MIN_W + (n - 1) * GAP;
+}
+
 export function computeTiles(area: Rect, t: TileState): { panes: PaneGeometry[]; dividers: DividerGeometry[]; ratios: number[] } {
+  area = { ...area, width: Math.max(0, Math.floor(area.width)), height: Math.max(0, Math.floor(area.height)) };
   const ids = t.ids.slice(0, MAX_TILES);
   const panes: PaneGeometry[] = [];
   const dividers: DividerGeometry[] = [];
@@ -102,8 +132,8 @@ export function computeTiles(area: Rect, t: TileState): { panes: PaneGeometry[];
       pane(ids[2], { x: cols[0][0], y: rows[1][0], width: cols[0][1], height: rows[1][1] });
       pane(ids[3], { x: cols[1][0], y: rows[1][0], width: cols[1][1], height: rows[1][1] });
     }
-    dividers.push({ key: 'col', orientation: 'vertical', rect: { x: cols[0][0] + cols[0][1], y: area.y, width: GAP, height: ids.length === 3 ? rows[0][1] : area.height } });
-    dividers.push({ key: 'row', orientation: 'horizontal', rect: { x: area.x, y: rows[0][0] + rows[0][1], width: area.width, height: GAP } });
+    dividers.push({ key: 'col', orientation: 'vertical', rect: { x: cols[0][0] + cols[0][1], y: area.y, width: cols[1][0] - cols[0][0] - cols[0][1], height: ids.length === 3 ? rows[0][1] : area.height } });
+    dividers.push({ key: 'row', orientation: 'horizontal', rect: { x: area.x, y: rows[0][0] + rows[0][1], width: area.width, height: rows[1][0] - rows[0][0] - rows[0][1] } });
     return { panes, dividers, ratios: [c[0], r[0]] };
   }
   const layout = t.layout === 'grid' ? 'columns' : t.layout;
@@ -113,10 +143,11 @@ export function computeTiles(area: Rect, t: TileState): { panes: PaneGeometry[];
   parts.forEach(([pos, size], i) => {
     pane(ids[i], vertical ? { x: pos, y: area.y, width: size, height: area.height } : { x: area.x, y: pos, width: area.width, height: size });
     if (i < parts.length - 1) {
+      const g = parts[i + 1][0] - pos - size;
       dividers.push({
         key: vertical ? `c${i}` : `r${i}`,
         orientation: vertical ? 'vertical' : 'horizontal',
-        rect: vertical ? { x: pos + size, y: area.y, width: GAP, height: area.height } : { x: area.x, y: pos + size, width: area.width, height: GAP },
+        rect: vertical ? { x: pos + size, y: area.y, width: g, height: area.height } : { x: area.x, y: pos + size, width: area.width, height: g },
       });
     }
   });
@@ -130,17 +161,19 @@ export function computeTiles(area: Rect, t: TileState): { panes: PaneGeometry[];
 export function dragDivider(area: Rect, t: TileState, key: DividerGeometry['key'], at: number): number[] {
   if (t.layout === 'grid' && t.ids.length >= 3) {
     const r = [...t.ratios];
-    if (key === 'col') r[0] = (at - area.x) / Math.max(1, area.width - GAP);
-    if (key === 'row') r[1] = (at - area.y) / Math.max(1, area.height - GAP);
+    if (key === 'col') r[0] = (at - area.x) / Math.max(1, area.width - gapFor(area.width, 2));
+    if (key === 'row') r[1] = (at - area.y) / Math.max(1, area.height - gapFor(area.height, 2));
     return computeTiles(area, { ...t, ratios: r }).ratios;
   }
   const vertical = t.layout !== 'rows';
   const i = Number(String(key).slice(1));
   const cur = computeTiles(area, t).ratios;
-  const total = (vertical ? area.width : area.height) - GAP * (cur.length - 1);
+  const span = vertical ? area.width : area.height;
+  const gap = gapFor(span, cur.length);
+  const total = Math.max(1, span - gap * (cur.length - 1));
   const start = vertical ? area.x : area.y;
   // pixel boundaries of panes i and i+1
-  const before = cur.slice(0, i).reduce((a, x) => a + x, 0) * total + GAP * i;
+  const before = cur.slice(0, i).reduce((a, x) => a + x, 0) * total + gap * i;
   const pair = (cur[i] + cur[i + 1]) * total;
   let left = at - start - before;
   left = Math.max(0, Math.min(pair, left));

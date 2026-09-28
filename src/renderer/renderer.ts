@@ -85,6 +85,7 @@ interface Geometry {
   dragging: boolean;
   panes: Array<{ tabId: number; pane: number | null; outer: Rect; active: boolean; agent: boolean; chrome: boolean }>;
   dividers: Array<{ key: string; orientation: 'vertical' | 'horizontal'; rect: Rect }>;
+  notice?: string;
 }
 let geometry: Geometry | null = null;
 let dragKey: string | null = null;
@@ -96,6 +97,8 @@ function renderPanes(g: Geometry) {
   const box = $('panes');
   box.replaceChildren();
   $('untile').toggleAttribute('disabled', g.mode !== 'tiled');
+  $('tile-notice').textContent = g.notice ?? '';
+  $('tile-notice').classList.toggle('hidden', !g.notice);
   if (g.layout) $<HTMLSelectElement>('tile-layout').value = g.layout;
   for (const p of g.panes) {
     const t = lastTabs.find((x) => x.id === p.tabId);

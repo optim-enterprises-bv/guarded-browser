@@ -97,8 +97,14 @@ test('tile two tabs side by side, drag the divider, change layout, untile (butto
   await a.ui.mouse.up();
   await expect.poll(async () => (await viewBounds(a!)).length).toBe(2);
   b = (await viewBounds(a)).sort((p, q) => p.x - q.x);
-  expect(b[0].width).toBeGreaterThan(before[0] + 20);
-  expect(b[1].width).toBeGreaterThanOrEqual(240 - 2 * 3 - 1); // MIN_W minus the chrome frame
+  const areaW = (await a.ui.evaluate(() => window.innerWidth)) - 440;
+  expect(b[0].width).toBeGreaterThanOrEqual(before[0]);
+  if (areaW >= 2 * 240 + 8 + 60) {
+    // room to move: pane 1 grew, pane 2 stopped at the minimum pane size
+    expect(b[0].width).toBeGreaterThan(before[0] + 20);
+    expect(b[1].width).toBeGreaterThanOrEqual(240 - 2 * 3 - 1); // MIN_W minus the chrome frame
+  }
+  expect(b[1].x + b[1].width).toBeLessThanOrEqual(areaW);
 
   // stacked
   await a.ui.selectOption('[data-testid=tile-layout]', 'rows');
@@ -202,4 +208,30 @@ test('SECURITY: post-task gate and popup block still apply to the agent pane whi
   await expect.poll(() => a!.audit().some((e) => e.type === 'navigation' && e.blocked && /popup/.test(String(e.reason))), { timeout: 10_000 }).toBe(true);
   await expect(a.ui.locator('[data-testid=tab]')).toHaveCount(2);
   await expect(a.ui.locator('[data-testid=agent-active-badge]')).toHaveCount(0); // frame gone after the task
+});
+
+test('a window too small for the split view: panes shrink, never overlap each other or the agent panel, and a notice appears', async () => {
+  a = await launch({ llmUrl: mock.url, startUrl: `${site}/plain.html` });
+  await openTwoTabs(a.ui, `${site}/one.html`);
+  await a.ui.click('[data-testid=new-tab]');
+  const tabs = a.ui.locator('[data-testid=tab]');
+  for (const i of [0, 1, 2]) await tabs.nth(i).click({ modifiers: ['Control'] });
+  await a.ui.click('[data-testid=tile]');
+  await expect(a.ui.locator('[data-testid=pane]')).toHaveCount(3);
+  await expect(a.ui.locator('[data-testid=tile-notice]')).toBeHidden();
+  for (const [w, h] of [[800, 600], [500, 480], [300, 300]]) {
+    await a.app.evaluate(({ BrowserWindow }, [ww, hh]) => BrowserWindow.getAllWindows()[0].setContentSize(ww, hh), [w, h]);
+    await expect.poll(() => a!.ui.evaluate(() => window.innerWidth)).toBe(w);
+    await expect(a.ui.locator('[data-testid=tile-notice]')).toBeVisible();
+    const limit = Math.max(0, w - 440);
+    const b = await viewBounds(a);
+    for (const r of b) expect(r.x + r.width, `${w}px window`).toBeLessThanOrEqual(limit);
+    for (let i = 0; i < b.length; i++)
+      for (let j = i + 1; j < b.length; j++) {
+        const [p, q] = [b[i], b[j]];
+        expect(p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height).toBe(false);
+      }
+  }
+  await a.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1440, 920));
+  await expect(a.ui.locator('[data-testid=tile-notice]')).toBeHidden();
 });

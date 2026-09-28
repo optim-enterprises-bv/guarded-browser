@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { ActionOutcome, BrowserDriver } from '../core/agent';
 import type { FormField, Snapshot } from '../core/types';
 import { ISOLATED_WORLD, PAGE_TEXT_JS, SNAPSHOT_JS, actionJs } from './page-scripts';
-import { MAX_TILES, computeTiles, defaultRatios, dragDivider, innerRect, type DividerGeometry, type Rect, type TileLayout, type TileState } from './tile-layout';
+import { MAX_TILES, computeTiles, contentArea, tooSmall, defaultRatios, dragDivider, innerRect, type DividerGeometry, type Rect, type TileLayout, type TileState } from './tile-layout';
 
 export const TOP_BAR = 84;
 export const PANEL_WIDTH = 440;
@@ -32,6 +32,8 @@ export interface Geometry {
   dragging: boolean;
   panes: Array<{ tabId: number; pane: number | null; outer: Rect; active: boolean; agent: boolean; chrome: boolean }>;
   dividers: DividerGeometry[];
+  /** set when the window is too small to give every pane its minimum size */
+  notice?: string;
 }
 
 export class Tab {
@@ -162,7 +164,8 @@ export class TabManager {
 
   private area(): Rect {
     const { width, height } = this.win.getContentBounds();
-    return { x: 0, y: TOP_BAR, width: Math.max(100, width - PANEL_WIDTH), height: Math.max(100, height - TOP_BAR) };
+    // never wider than the space left of the agent panel, even in a tiny window
+    return contentArea(width, height, TOP_BAR, PANEL_WIDTH);
   }
 
   active(): Tab | undefined {
@@ -246,6 +249,7 @@ export class TabManager {
       const c = computeTiles(area, this.tiles);
       this.tiles.ratios = c.ratios;
       g.dividers = c.dividers;
+      if (tooSmall(area, this.tiles)) g.notice = 'Window too small for this split view: panes are below their minimum size. Enlarge the window, use fewer panes, or untile.';
       c.panes.forEach((p, i) => {
         views.set(p.tabId, p.view);
         g.panes.push({ tabId: p.tabId, pane: i + 1, outer: p.outer, active: p.tabId === this.activeId, agent: p.tabId === this.agentTabId, chrome: true });
@@ -258,8 +262,9 @@ export class TabManager {
     }
     for (const t of this.tabs) {
       const r = views.get(t.id);
-      // while a divider is dragged the page views are hidden so the chrome receives the pointer
-      t.view.setVisible(!!r && !this.dragging);
+      // while a divider is dragged the page views are hidden so the chrome receives the pointer;
+      // a pane squeezed to nothing hides its view instead of drawing outside its slot
+      t.view.setVisible(!!r && r.width >= 1 && r.height >= 1 && !this.dragging);
       if (r) t.view.setBounds(r);
     }
     this.onGeometry(g);

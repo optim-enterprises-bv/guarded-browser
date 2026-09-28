@@ -56,7 +56,13 @@ export async function launch(o: LaunchOpts): Promise<App> {
   env.GUARDED_DOWNLOAD_DIR = join(userData, 'downloads');
   mkdirSync(env.GUARDED_DOWNLOAD_DIR, { recursive: true });
   delete env.ELECTRON_RUN_AS_NODE;
-  const app = await electron.launch({ args: [ROOT], cwd: ROOT, env });
+  // Deterministic display: never the developer's Wayland session (its compositor may resize the
+  // window, and windows would appear on the desktop). X11 only (xvfb from scripts/run-e2e.mjs),
+  // with a fixed window size.
+  delete env.WAYLAND_DISPLAY;
+  env.XDG_SESSION_TYPE = 'x11';
+  env.GUARDED_WINDOW_SIZE = '1440x920';
+  const app = await electron.launch({ args: ['--ozone-platform=x11', ROOT], cwd: ROOT, env });
   const ui = await app.firstWindow();
   await ui.waitForSelector('[data-testid=task-input]');
   const auditDir = join(userData, 'audit');
