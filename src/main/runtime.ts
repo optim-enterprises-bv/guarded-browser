@@ -22,6 +22,7 @@ import type { TileLayout } from './tile-layout';
 import { ISOLATED_WORLD } from './page-scripts';
 import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type Theme } from '../core/theme';
 import type { Profile } from './profiles';
+import { testEnv } from './test-hooks';
 import { HistoryStore, recordable } from '../core/history';
 import { BAR_ID, BookmarkStore, OTHER_ID, type ParsedImport } from '../core/bookmarks';
 import { Worker } from 'node:worker_threads';
@@ -53,7 +54,7 @@ export type Runtime = Awaited<ReturnType<typeof createRuntime>>;
 export async function createRuntime(ctx: RuntimeContext) {
 const handlers: Record<string, Handler> = {};
 /** TEST ONLY. Bypasses the policy engine and judge so tests can show the egress layer holds alone. */
-const POLICY_DISABLED = process.env.GUARDED_UNSAFE_DISABLE_POLICY === '1' && process.env.GUARDED_TEST === '1' && !app.isPackaged;
+const POLICY_DISABLED = testEnv('GUARDED_UNSAFE_DISABLE_POLICY') === '1';
 
 const { profile, dir: profileDir, guard, feeds } = ctx;
 // read synchronously, before any await: this runtime only ever uses ITS profile's partition
@@ -62,7 +63,7 @@ const settingsFile = join(profileDir, 'settings.json');
 let settings: Settings = loadSettings(settingsFile);
 settings.reputation.feeds = ctx.sharedFeeds();
 settings.guard = { ...ctx.sharedGuard() };
-if (process.env.GUARDED_CONFIRM_TIMEOUT_MS) settings.agent.confirmTimeoutMs = Number(process.env.GUARDED_CONFIRM_TIMEOUT_MS);
+if (testEnv('GUARDED_CONFIRM_TIMEOUT_MS')) settings.agent.confirmTimeoutMs = Number(testEnv('GUARDED_CONFIRM_TIMEOUT_MS'));
 let audit: AuditLog;
 let egress: EgressController;
 let proxy: ProxyHandle;
@@ -512,7 +513,7 @@ function setupEgress(ses: Session) {
           if (item.getState() === 'progressing') item.resume();
           const state = await done;
           if (state === 'completed' && existsSync(tmp)) {
-            const dest = uniquePath(process.env.GUARDED_DOWNLOAD_DIR || app.getPath('downloads'), name);
+            const dest = uniquePath(testEnv('GUARDED_DOWNLOAD_DIR') || app.getPath('downloads'), name);
             renameSync(tmp, dest);
             audit.write('egress', { layer: 'download', decision: 'allow', host: hostKey(url), method: 'GET', url, reason: `saved as ${dest}` });
           }
@@ -723,7 +724,7 @@ async function startTask(text: string, origins?: string[]) {
       // Service workers registered by pages the agent visited would outlive the task and act
       // without a tab: unregister them for every origin the agent's tab visited.
       // (TEST ONLY: GUARDED_TEST_KEEP_SW=1 skips this to show the worker gate holds on its own)
-      const keepSw = process.env.GUARDED_TEST_KEEP_SW === '1' && process.env.GUARDED_TEST === '1' && !app.isPackaged;
+      const keepSw = testEnv('GUARDED_TEST_KEEP_SW') === '1';
       for (const origin of keepSw ? [] : guardedOrigins) {
         void guardedSession
           ?.clearStorageData({ origin, storages: ['serviceworkers'] })
@@ -1007,7 +1008,7 @@ const abortIfDeleted = async () => {
   throw new Error('profile was deleted while its window was being created');
 };
 // TEST ONLY: widen the gap between starting and creating the window
-const openDelay = process.env.GUARDED_TEST === '1' && !app.isPackaged ? Number(process.env.GUARDED_TEST_OPEN_DELAY_MS ?? 0) : 0;
+const openDelay = Number(testEnv('GUARDED_TEST_OPEN_DELAY_MS') ?? 0);
 if (openDelay > 0) await new Promise((r) => setTimeout(r, openDelay));
 await abortIfDeleted();
 if (settings.reputation.enabled) egress.reputation = reputation;
@@ -1028,7 +1029,7 @@ win = new BrowserWindow({
   width: size ? Number(size[1]) : 1440,
   height: size ? Number(size[2]) : 920,
   title: windowTitle(),
-  webPreferences: { preload: join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false },
+  webPreferences: { preload: join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: !app.isPackaged },
 });
 const api = {
   proxyPort: proxy.port,

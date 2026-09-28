@@ -66,6 +66,10 @@ export async function launch(o: LaunchOpts): Promise<App> {
     env.GUARDED_TEST_OPEN_DELAY_MS = String(o.openDelayMs);
     env.GUARDED_TEST = '1';
   }
+  // test hooks (download dir, confirm timeout, ...) are only honoured with GUARDED_TEST=1 in an
+  // unpackaged build; the guard model is verified into a shared, gitignored test directory
+  env.GUARDED_TEST = '1';
+  env.GUARDED_MODEL_DIR = join(ROOT, '.cache-test', 'models');
   env.GUARDED_DOWNLOAD_DIR = join(userData, 'downloads');
   mkdirSync(env.GUARDED_DOWNLOAD_DIR, { recursive: true });
   delete env.ELECTRON_RUN_AS_NODE;

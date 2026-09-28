@@ -194,7 +194,8 @@ function renderState(s: any) {
   }
   renderTabs(s.tabs);
   const g = $('chip-guard');
-  g.textContent = s.guard.status === 'ready' ? 'guard: on' : s.guard.status === 'loading' ? 'guard: loading' : 'guard unavailable';
+  g.textContent =
+    s.guard.status === 'ready' ? 'guard: on' : s.guard.status === 'loading' ? (/^guard model /.test(s.guard.detail) ? s.guard.detail : 'guard: loading') : 'guard unavailable';
   g.title = s.guard.detail;
   g.className = `lock-chip ${s.guard.status === 'ready' ? 'lock-chip-ok' : s.guard.status === 'loading' ? 'lock-chip-loading' : 'lock-chip-bad'}`;
   renderEgress(s.egress);

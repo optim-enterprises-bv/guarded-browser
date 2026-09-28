@@ -13,8 +13,12 @@ import { DEFAULT_FEEDS, HostSet, ReputationDb, type FeedBuilder, type FeedConfig
 import type { Guard } from '../core/types';
 import { PROFILE_COLORS, ProfileRegistry, partitionDir, type Profile } from './profiles';
 import { createRuntime, type Runtime } from './runtime';
+import { GUARD_MODEL, ensureModel } from './model-store';
+import { testEnv } from './test-hooks';
 
-if (process.env.GUARDED_USER_DATA) app.setPath('userData', process.env.GUARDED_USER_DATA);
+// user data: ~/.config/guarded-browser (the package's product name would otherwise make it
+// "~/.config/Guarded Browser"); GUARDED_USER_DATA picks another directory
+app.setPath('userData', process.env.GUARDED_USER_DATA || join(app.getPath('appData'), 'guarded-browser'));
 
 // A bug in one handler must not take every profile's window down: log it (stderr + every open
 // profile's audit log) and keep running.
@@ -345,7 +349,31 @@ app.whenReady().then(async () => {
   if (process.env.GUARDED_GUARD === 'off' || !guardSettings.enabled) {
     guard = new NullGuard(process.env.GUARDED_GUARD === 'off' ? 'guard unavailable: disabled by GUARDED_GUARD=off' : 'guard unavailable: disabled in settings');
   } else {
-    const g = new TransformersGuard({ ...guardSettings, enabled: true, cacheDir: process.env.GUARDED_MODEL_CACHE ?? join(homedir(), '.cache', 'guarded-browser', 'models') });
+    // The model is not in the package: copied from a local cache / offline bundle or downloaded at a
+    // pinned revision, and verified against pinned sha256 checksums before it is loaded.
+    const dataHome = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
+    const modelRoot = testEnv('GUARDED_MODEL_DIR') || join(dataHome, 'guarded-browser', 'models');
+    const sources = [testEnv('GUARDED_MODEL_CACHE'), join(homedir(), '.cache', 'guarded-browser', 'models'), app.isPackaged ? join(process.resourcesPath, 'models') : undefined].filter((x): x is string => !!x);
+    let lastSent = 0;
+    const g = new TransformersGuard({
+      ...guardSettings,
+      enabled: true,
+      prepare: async (setDetail) => {
+        if (guardSettings.model !== GUARD_MODEL.id) return { ok: false, error: `only the pinned model ${GUARD_MODEL.id} is supported` };
+        return ensureModel(GUARD_MODEL, {
+          root: modelRoot,
+          sources,
+          downloadBase: 'https://huggingface.co',
+          onProgress: (p) => {
+            setDetail(`guard model ${p.phase} ${Math.floor((100 * p.done) / p.total)}%`);
+            if (Date.now() - lastSent > 400) {
+              lastSent = Date.now();
+              for (const r of runtimes.values()) r.guardChanged();
+            }
+          },
+        });
+      },
+    });
     guard = g;
     void g.load().then(() => {
       for (const r of runtimes.values()) {

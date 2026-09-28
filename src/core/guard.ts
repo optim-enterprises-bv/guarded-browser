@@ -38,6 +38,11 @@ export interface GuardOptions {
   threads: number;
   cacheDir?: string;
   enabled: boolean;
+  /**
+   * Make the model files available locally and verified (download / copy + pinned checksums).
+   * When given, the model is loaded ONLY from the returned local root (remote loading disabled).
+   */
+  prepare?: (setDetail: (d: string) => void) => Promise<{ ok: true; root: string } | { ok: false; error: string }>;
 }
 
 export class TransformersGuard implements Guard {
@@ -65,9 +70,26 @@ export class TransformersGuard implements Guard {
     if (!this.opts.enabled) return Promise.resolve();
     this.loading ??= (async () => {
       try {
+        let localRoot: string | null = null;
+        if (this.opts.prepare) {
+          const r = await this.opts.prepare((d) => (this.detail = d));
+          if (!r.ok) {
+            this.state = 'unavailable';
+            this.detail = `guard unavailable: ${r.error}`;
+            return;
+          }
+          localRoot = r.root;
+        }
         const tf = await import('@huggingface/transformers');
-        if (this.opts.cacheDir) tf.env.cacheDir = this.opts.cacheDir;
-        tf.env.allowLocalModels = false;
+        if (localRoot) {
+          // verified local files only: never fetch anything at load time
+          tf.env.localModelPath = localRoot.endsWith('/') ? localRoot : `${localRoot}/`;
+          tf.env.allowLocalModels = true;
+          tf.env.allowRemoteModels = false;
+        } else {
+          if (this.opts.cacheDir) tf.env.cacheDir = this.opts.cacheDir;
+          tf.env.allowLocalModels = false;
+        }
         const pipe = await tf.pipeline('text-classification', this.opts.model, {
           dtype: 'fp32',
           device: 'cpu',

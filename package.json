@@ -25,6 +25,7 @@
     "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.3",
     "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
     "vitest": "^5.0.2"
@@ -32,6 +33,7 @@
   "allowScripts": {
     "esbuild@0.28.2": true,
     "onnxruntime-node": false,
-    "protobufjs": false
+    "protobufjs": false,
+    "electron-winstaller": false
   }
 }
