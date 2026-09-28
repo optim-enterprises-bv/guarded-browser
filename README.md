@@ -31,7 +31,8 @@ v1. Local models by default (any OpenAI-compatible server), optional cloud fallb
 6. **Taint tracking only matches exact values.** Your data is recognised in outgoing requests when
    it is plain, URL-encoded or base64; hashed, split, reworded or otherwise transformed copies are not.
 7. **iframes are not read, and third-party-heavy sites partly break during tasks** (their CDN / API
-   hosts are blocked until you allow them).
+   hosts are blocked until you allow them). With split view, the task's host allowlist applies to
+   every pane while the task runs, not just the agent's pane.
 8. **Reputation feeds lag new domains**, and attackers can show scanners a clean page.
 9. **Cloud fallback, if you enable it, sends your task and page text to that provider.**
 
@@ -293,6 +294,69 @@ the agent panel, is disabled while an agent task runs, and is refused in code if
 user overrides are ignored in agent mode, so **the agent can never get past a listing**. Subresource
 requests to listed hosts are dropped silently. Every hit is audited with the feed name.
 
+## Browser features
+
+### Split view (tab tiling)
+Tile 2-4 tabs **side by side**, **stacked** or as a **grid** (3 tabs: two on top, one below; 4: 2x2).
+Select tabs with **Ctrl+click** in the tab strip, then use the **Tile** toolbar button (layout from the
+drop-down), the tab **context menu** (right-click), or **Ctrl+Shift+S**; **Ctrl+Shift+U** or
+**Untile** returns to a single view. The shortcuts also work while a page has focus. Dividers between
+panes can be dragged (panes stop at 240 x 160 px); while you drag, the pages are hidden behind
+placeholders so the browser gets the pointer. Clicking into a pane (or its header) focuses it: the
+address bar and the accent-coloured focus frame follow. Activating a tab that is not part of the
+tile set returns to a single view. Layout is recalculated on window resize and always leaves the
+agent panel its width. Geometry is a pure module (`src/main/tile-layout.ts`, unit-tested).
+
+Security with split view:
+* **The agent operates exactly one pane**: the tab that was focused when the task started. Its
+  snapshot, page text, clicks and typing all go through a driver bound to that tab; the other panes
+  are never read. A test tiles a second pane full of a secret and checks that the string never
+  appears in any planner, reader or judge request.
+* That pane gets an **AGENT ACTIVE** frame and header (black / yellow), also in single view, and the
+  tab strip shows an `AGENT` chip. Both are drawn by the browser chrome *around* the page's view; the
+  page's pixels end at its view bounds, so a page cannot draw or fake them.
+* **Every confirmation names its source**: "Tab 2, pane 1 of 2 (AGENT pane)", "pane 2 of 2 (not the
+  agent pane)", a background tab, or "a background worker ... (no tab)". The tab title is shown
+  quoted because it is page text.
+* All protections keep working per tab: the post-task gate and popup block apply to the agent's tab
+  wherever it is tiled; the state-change gate applies to every tab during a task (so a *second pane's*
+  POST is held too, and its dialog says it is not the agent pane); taint and reputation checks are
+  unchanged. **The proxy's task allowlist is session-wide**: while a task runs, all tiled panes (and
+  background tabs) share it, so sites in the other panes may partially break until the task ends or
+  you allow their hosts.
+* Closing the agent's tab stops its task.
+
+### Themes
+Built-in themes **Light**, **Dark**, **Light Violet** and **Dark Teal**; the default **System**
+follows `prefers-color-scheme`. Settings → *theme editor*: background, foreground, accent,
+highlight, corner radius and density (normal / compact) with **live preview** (Revert preview or
+closing Settings drops unsaved changes), **Save theme** under a name, **Import / Export JSON**
+(text box or file). *Schedule*: a day theme and a night theme switched by local clock times, or by
+the system's light / dark setting.
+
+Theme files are untrusted input. Main validates every import and save with zod
+(`src/core/theme.ts`): colours only as `#rgb`, `#rrggbb` or `rgb(r, g, b)` (0-255) and re-serialised
+to `#rrggbb`; radius an integer 0-16; enumerated base / density; name limited to letters, digits,
+space, `_ . -`; unknown keys rejected; 64 KB cap; built-in names cannot be overwritten. The renderer
+only ever writes those normalised hex values and numbers it formatted into CSS custom properties on
+the chrome's `:root`, so a theme cannot inject CSS. Themes style the browser chrome only: web pages
+are separate views and are never themed (tested).
+
+**Accent from site** (off by default): the active page's `<meta name="theme-color">`, else the
+dominant colour of its favicon, is blended into the theme accent (60 %) and darkened / lightened
+until text on it has at least **4.5:1** contrast (WCAG AA). It is page-controlled, so it is parsed
+with the same strict colour parser (anything else is ignored), and it only feeds `--accent`. No
+favicon is fetched while an agent task runs; favicons are fetched through the guarded session (so
+proxy, reputation and webRequest rules apply).
+
+**Locked security styling.** The confirmation dialog, the allowlist editor, the blocked-host notice,
+the guard warning badge / tab flag and the AGENT ACTIVE frame use fixed, high-contrast colours
+declared with `!important` and never reference theme variables; the reputation interstitial is a
+browser-generated page with its own inline style that themes cannot reach. A test applies a theme
+whose background, foreground, accent and highlight are all the warning yellow, turns on a site
+accent, and checks the dialog, buttons, preflight, AGENT ACTIVE frame and interstitial still render
+with their locked colours and size.
+
 ## Threat model
 
 **Defended (enforced in code, tested with compromised mock models):**
@@ -399,10 +463,10 @@ Electron's per-app directory (`~/.config/guarded-browser` on Linux; override wit
 ```
 src/core/       agent loop, planner, reader + handles, judge, policy, taint, sanitize, guard, egress
                 proxy, reputation, llm client, config, audit (no Electron imports; unit-testable)
-src/main/       Electron main: window, tabs (WebContentsView), isolated-world page scripts,
+src/main/       Electron main: window, tabs (WebContentsView) + split view (tile-layout.ts), isolated-world page scripts,
                 confirmation broker, egress/reputation wiring, UI preload bridge, tab preload
                 (WebRTC removal), feed-parsing worker
-src/renderer/   browser chrome + agent panel (plain DOM)
+src/renderer/   browser chrome + agent panel (plain DOM), split-view pane chrome, themes (appearance.ts)
 test/unit/      vitest: policy, taint, reader/llm/planner/judge, egress proxy, reputation, agent loop, guard
 test/e2e/       Playwright _electron: benign, attacks, regressions (review), reputation, guard
 test/helpers/   mock OpenAI server, fixture + attacker servers, fake browser driver
@@ -427,12 +491,16 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/taint.test.ts` | 4 | pass |
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
+| unit | `test/unit/tile-layout.test.ts` (split-view geometry) | 5 | pass |
+| unit | `test/unit/theme.test.ts` (colour parsing, schema, contrast, schedule) | 11 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
 | e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-4, ported, plus controls) | 30 | pass |
 | e2e | `test/e2e/benign.spec.ts` | 3 | pass |
 | e2e | `test/e2e/reputation.spec.ts` | 5 | pass |
 | e2e | `test/e2e/guard.spec.ts` | 2 | pass |
-| **total** | | **140** (90 unit + 50 e2e) | **all pass** |
+| e2e | `test/e2e/splitview.spec.ts` (tiling + agent confined to its pane) | 4 | pass |
+| e2e | `test/e2e/themes.spec.ts` (themes + locked security styling) | 5 | pass |
+| **total** | | **165** (106 unit + 59 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 
