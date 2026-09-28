@@ -4,12 +4,37 @@
 // WebContentsViews that this document cannot style.
 
 import { z } from 'zod';
-import { BUILTIN_THEMES, ThemeSchema, parseColor, resolveTheme, themeVars, type Appearance, type Theme } from '../core/theme';
+import { BUILTIN_THEMES, ThemeSchema, parseColor, resolveTheme, themeVars, toHex, type Appearance, type Theme } from '../core/theme';
 
 type Bridge = { invoke(channel: string, ...args: unknown[]): Promise<any>; on(channel: string, fn: (p: any) => void): void };
 
 // the chrome's CSP forbids eval: keep zod on its non-JIT path
 z.config({ jitless: true });
+
+/** Dominant colour of a favicon: decoded with createImageBitmap, sampled on a 16x16 canvas. */
+async function faviconColor(f: { mime: string; data: string }): Promise<string | null> {
+  if (!/^image\/(png|x-icon|vnd\.microsoft\.icon|gif|jpeg|webp|bmp)$/.test(f.mime) || f.data.length > 360_000) return null;
+  try {
+    const bytes = Uint8Array.from(atob(f.data), (c) => c.charCodeAt(0));
+    const bmp = await createImageBitmap(new Blob([bytes], { type: f.mime }), { resizeWidth: 16, resizeHeight: 16 });
+    const canvas = new OffscreenCanvas(16, 16);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(bmp, 0, 0, 16, 16);
+    bmp.close();
+    const px = ctx.getImageData(0, 0, 16, 16).data;
+    let [r, g, b, w] = [0, 0, 0, 0];
+    for (let i = 0; i + 3 < px.length; i += 4) {
+      if (px[i + 3] < 128) continue;
+      const [R, G, B] = [px[i], px[i + 1], px[i + 2]];
+      const weight = 1 + (4 * (Math.max(R, G, B) - Math.min(R, G, B))) / 255; // favour saturated pixels
+      [r, g, b, w] = [r + R * weight, g + G * weight, b + B * weight, w + weight];
+    }
+    return w ? toHex({ r: r / w, g: g / w, b: b / w }) : null;
+  } catch {
+    return null;
+  }
+}
 
 export function initAppearance(gb: Bridge) {
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -142,9 +167,17 @@ export function initAppearance(gb: Bridge) {
     renderForm();
     apply();
   });
-  gb.on('site-accent', (s: { color: string; source: string } | null) => {
+  gb.on('site-accent', (s: { color?: string; source: string; favicon?: { mime: string; data: string } } | null) => {
+    if (s?.favicon) {
+      // favicon bytes are decoded HERE, in the sandboxed chrome renderer, never in the main process
+      void faviconColor(s.favicon).then((c) => {
+        site = c ? { color: c, source: 'favicon' } : null;
+        apply();
+      });
+      return;
+    }
     // page-controlled: only a strictly parsed colour is kept
-    site = s && parseColor(s.color) ? s : null;
+    site = s?.color && parseColor(s.color) ? { color: s.color, source: s.source } : null;
     apply();
   });
   dark.addEventListener('change', apply);

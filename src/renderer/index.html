@@ -13,7 +13,7 @@
     <button id="back" title="Back">&#8592;</button>
     <button id="forward" title="Forward">&#8594;</button>
     <button id="reload" title="Reload">&#8635;</button>
-    <input id="address" data-testid="address" spellcheck="false" placeholder="Enter a URL">
+    <input id="address" class="lock-address" data-testid="address" spellcheck="false" placeholder="Enter a URL">
     <span id="guard-badge" class="lock-badge hidden" data-testid="guard-badge"></span>
     <select id="tile-layout" title="Split view layout" data-testid="tile-layout">
       <option value="columns">Side by side</option>
@@ -30,7 +30,7 @@
 <aside id="panel">
   <div id="panel-head">
     <strong>Agent</strong>
-    <span id="chip-guard" class="chip" data-testid="guard-status"></span>
+    <span id="chip-guard" class="lock-chip" data-testid="guard-status"></span>
     <span id="chip-egress" class="chip" data-testid="egress-mode"></span>
     <span id="chip-rep" class="chip" data-testid="reputation-status"></span>
     <button id="open-settings" class="link" data-testid="open-settings">Settings</button>
@@ -41,7 +41,7 @@
   <div class="row">
     <button id="run" class="primary" data-testid="task-run">Run task</button>
     <button id="stop" class="danger" data-testid="task-stop" disabled>Stop</button>
-    <span id="status" data-testid="task-status">idle</span>
+    <span id="status" class="lock-status" data-testid="task-status">idle</span>
   </div>
   <div id="preflight" class="preflight hidden lock-notice" data-testid="preflight">
     <strong>Allowed sites for this task</strong>

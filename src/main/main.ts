@@ -1,6 +1,6 @@
 // Electron main process: window, tabs, agent wiring, egress layers, confirmation broker, IPC.
 
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, session, type Session, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
@@ -19,7 +19,7 @@ import { ConfirmBroker } from './confirm';
 import { ElectronDriver, TabManager, type Tab } from './tabs';
 import type { TileLayout } from './tile-layout';
 import { ISOLATED_WORLD } from './page-scripts';
-import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type RGB, type Theme } from '../core/theme';
+import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type Theme } from '../core/theme';
 
 if (process.env.GUARDED_USER_DATA) app.setPath('userData', process.env.GUARDED_USER_DATA);
 
@@ -43,7 +43,7 @@ let win: BrowserWindow;
 let reputation: ReputationDb;
 let current: { task: AgentTask; tab: Tab } | null = null;
 /** reputation interstitials waiting for Go back / Proceed anyway */
-const interstitials = new Map<string, { url: string; host: string; feed: string }>();
+const interstitials = new Map<string, { url: string; host: string; feed: string; wcId: number }>();
 const PROCEED_PREFIX = 'https://guarded-browser.invalid/proceed?t=';
 const sbCache = new Map<string, { verdict: string | null; at: number }>();
 const fallbackActive: Partial<Record<Role, string>> = {};
@@ -102,31 +102,59 @@ async function updateSiteAccent() {
   }
   if (!color && !current && t.favicons[0]) {
     // no favicon fetches while a task runs: the agent's network footprint stays what the task needs
-    const c = await faviconColor(t.favicons[0]).catch(() => null);
-    if (c) [color, source] = [toHex(c), 'favicon'];
+    const fav = await faviconBytes(t.favicons[0]).catch(() => null);
+    if (fav && tabs.active() === t) return sendUI('site-accent', { favicon: fav, source: 'favicon' });
   }
   if (tabs.active() === t) sendUI('site-accent', color ? { color, source } : null);
 }
 
-async function faviconColor(url: string): Promise<RGB | null> {
-  let img: Electron.NativeImage;
-  if (url.startsWith('data:image/')) img = nativeImage.createFromDataURL(url.slice(0, 256 * 1024));
-  else if (/^https?:/i.test(url) && guardedSession) {
-    const res = await guardedSession.fetch(url, { signal: AbortSignal.timeout(5000) });
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (!res.ok || buf.length > 256 * 1024) return null;
-    img = nativeImage.createFromBuffer(buf);
-  } else return null;
-  if (img.isEmpty()) return null;
-  const bmp = img.resize({ width: 16, height: 16 }).toBitmap(); // BGRA
-  let [r, g, b, w] = [0, 0, 0, 0];
-  for (let i = 0; i + 3 < bmp.length; i += 4) {
-    if (bmp[i + 3] < 128) continue;
-    const [B, G, R] = [bmp[i], bmp[i + 1], bmp[i + 2]];
-    const weight = 1 + (4 * (Math.max(R, G, B) - Math.min(R, G, B))) / 255; // favour saturated pixels
-    [r, g, b, w] = [r + R * weight, g + G * weight, b + B * weight, w + weight];
+const FAVICON_MAX = 256 * 1024;
+const FAVICON_TYPES = /^image\/(png|x-icon|vnd\.microsoft\.icon|gif|jpeg|webp|bmp)$/i;
+
+/**
+ * Favicon BYTES for the optional site accent. Nothing is decoded here: image decoding happens in the
+ * sandboxed chrome renderer (src/renderer/appearance.ts). Hard 256 KB limit: Content-Length is
+ * checked first and the body is streamed and aborted as soon as it goes over.
+ */
+async function faviconBytes(url: string): Promise<{ mime: string; data: string } | null> {
+  const d = /^data:(image\/[\w.+-]+)(;base64)?,(.*)$/is.exec(url);
+  if (d) {
+    if (!FAVICON_TYPES.test(d[1]) || d[3].length > FAVICON_MAX * 1.4) return null;
+    const bytes = d[2] ? Buffer.from(d[3], 'base64') : Buffer.from(decodeURIComponent(d[3]), 'latin1');
+    return bytes.length && bytes.length <= FAVICON_MAX ? { mime: d[1].toLowerCase(), data: bytes.toString('base64') } : null;
   }
-  return w ? { r: r / w, g: g / w, b: b / w } : null;
+  if (!/^https?:/i.test(url) || !guardedSession) return null;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 5000);
+  try {
+    // through the guarded session: proxy, reputation and webRequest rules apply
+    const res = await guardedSession.fetch(url, { signal: ctl.signal });
+    const mime = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    const len = Number(res.headers.get('content-length') ?? 'NaN');
+    if (!res.ok || !FAVICON_TYPES.test(mime) || len > FAVICON_MAX || !res.body) {
+      ctl.abort();
+      return null;
+    }
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > FAVICON_MAX) {
+        ctl.abort();
+        audit.write('egress', { layer: 'webrequest', decision: 'block', host: hostKey(url) ?? '?', method: 'GET', url: url.slice(0, 300), reason: 'favicon larger than 256 KB: download aborted' });
+        return null;
+      }
+      chunks.push(value);
+    }
+    return { mime, data: Buffer.concat(chunks).toString('base64') };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Browser-generated "where does this request come from" for confirmation dialogs. */
@@ -180,7 +208,7 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 /** Full-page interstitial for a listed host. Proceed goes through a browser-chrome confirmation. */
 function showInterstitial(wc: WebContents, url: string, host: string, feed: string, matched: string) {
   const token = randomBytes(16).toString('hex');
-  interstitials.set(token, { url, host, feed });
+  interstitials.set(token, { url, host, feed, wcId: wc.id });
   const agent = !!current;
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Blocked: ${esc(host)}</title>
 <style>body{font-family:system-ui,sans-serif;background:#7f1d1d;color:#fff;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center}
@@ -197,9 +225,10 @@ ${agent ? '<p><b>An agent task is running: the agent can never override a reputa
   setImmediate(() => void wc.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => undefined));
 }
 
-function handleProceed(token: string) {
+/** "Proceed anyway" only ever applies to the tab that showed that interstitial. */
+function handleProceed(token: string, wc: WebContents) {
   const it = interstitials.get(token);
-  if (!it) return;
+  if (!it || it.wcId !== wc.id) return;
   if (current) {
     audit.write('egress', { taskId: current.task.id, layer: 'reputation', decision: 'block', host: it.host, method: 'GET', url: it.url, reason: 'proceed refused: an agent task is running (the agent can never override a reputation block)', feed: it.feed });
     return;
@@ -208,7 +237,7 @@ function handleProceed(token: string) {
     .request({
       id: `r${Date.now().toString(36)}`,
       kind: 'reputation',
-      source: sourceOf(tabs.active()?.wc.id),
+      source: sourceOf(wc.id),
       action: 'visit a host listed as malicious',
       target: it.host,
       destination: it.url,
@@ -220,8 +249,7 @@ function handleProceed(token: string) {
       if (o !== 'approve') return;
       egress.overrideReputation(it.host);
       interstitials.delete(token);
-      const t = tabs.active();
-      void t?.wc.loadURL(it.url).catch(() => undefined);
+      if (!wc.isDestroyed()) void wc.loadURL(it.url).catch(() => undefined);
     });
 }
 
@@ -504,6 +532,11 @@ function setupTab(tab: Tab) {
     } else if (postTaskGuard.has(wc.id)) {
       // a new tab would escape the post-task gate: refuse until the user navigates this tab themselves
       audit.write('navigation', { url, by: 'page', blocked: true, reason: 'popup from a tab under the post-task gate (navigate the tab yourself to lift it)' });
+    } else if (current && originOf(url)) {
+      // another pane / tab opens a popup during a task: open it in the background so split view and
+      // the AGENT ACTIVE frame stay on screen
+      audit.write('navigation', { url, by: 'page', tab: tab.id, reason: 'popup opened in the background (agent task running)' });
+      tabs.create(url, { background: true });
     } else if (originOf(url)) {
       tabs.create(url);
     }
@@ -542,9 +575,10 @@ function setupTab(tab: Tab) {
   wc.on('will-navigate', (e) => {
     if (e.url.startsWith(PROCEED_PREFIX)) {
       e.preventDefault();
-      handleProceed(e.url.slice(PROCEED_PREFIX.length));
+      handleProceed(e.url.slice(PROCEED_PREFIX.length), wc);
       return;
     }
+    if (e.isMainFrame) tab.navSource = 'page'; // renderer-initiated (link, form, location = ...)
     guardNav(e, 'navigation');
   });
   wc.on('will-redirect', (e) => guardNav(e, 'redirect'));
@@ -553,7 +587,11 @@ function setupTab(tab: Tab) {
       const o = originOf(url);
       if (o) guardedOrigins.add(o);
     }
-    audit.write('navigation', { url, tab: tab.id, by: current?.tab === tab ? 'agent-task' : 'user' });
+    // who started it: 'user' (address bar / back / forward / reload), 'agent' (the driver's navigate),
+    // 'page' (renderer-initiated or anything else, e.g. redirects of a page navigation)
+    const by = tab.navSource ?? 'page';
+    tab.navSource = undefined;
+    audit.write('navigation', { url, tab: tab.id, by, agentTab: current?.tab === tab });
   });
 }
 
@@ -633,7 +671,11 @@ async function startTask(text: string, origins?: string[]) {
 
 function registerIpc() {
   ipcMain.handle('state:get', () => state());
-  ipcMain.handle('tabs:new', (_e, url?: string) => tabs.create(url || 'about:blank').id);
+  ipcMain.handle('tabs:new', (_e, url?: string) => {
+    const t = tabs.create(url || 'about:blank');
+    t.navSource = 'user';
+    return t.id;
+  });
   ipcMain.handle('tabs:close', (_e, id: number) => {
     const t = tabs.byId(id);
     if (current && current.tab === t) stopTask(); // closing the agent's pane ends its task
@@ -661,6 +703,7 @@ function registerIpc() {
     const t = tabs.active();
     if (!t) return;
     if (!current) postTaskGuard.delete(t.wc.id); // the user took the tab back
+    t.navSource = 'user';
     if (!postTaskGuard.size) guardedOrigins.clear();
     let url = input.trim();
     if (!/^[a-z]+:/i.test(url)) url = /^[\w.-]+(:\d+)?(\/|$)/.test(url) ? `http://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
@@ -671,6 +714,7 @@ function registerIpc() {
     if (!t) return;
     if (!current) postTaskGuard.delete(t.wc.id);
     if (!postTaskGuard.size) guardedOrigins.clear();
+    t.navSource = 'user';
     fn(t.wc);
   };
   ipcMain.handle('nav:back', () => userNav((wc) => wc.navigationHistory.goBack()));

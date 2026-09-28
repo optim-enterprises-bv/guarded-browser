@@ -40,6 +40,8 @@ export class Tab {
   guardFlags = 0;
   /** favicon URLs reported by the page (page-controlled; only used for the optional site accent) */
   favicons: string[] = [];
+  /** who started the pending main-frame navigation (for the audit log) */
+  navSource?: 'user' | 'agent' | 'page';
   constructor(
     readonly id: number,
     readonly view: WebContentsView,
@@ -180,7 +182,7 @@ export class TabManager {
     return this.tabs.find((t) => t.wc === wc);
   }
 
-  create(url?: string): Tab {
+  create(url?: string, opts: { background?: boolean } = {}): Tab {
     const view = new WebContentsView({
       webPreferences: {
         session: this.session,
@@ -211,7 +213,11 @@ export class TabManager {
       }
     });
     this.setupTab(tab);
-    this.activate(tab.id);
+    if (opts.background) {
+      view.setVisible(false);
+      this.layout();
+      this.onChange();
+    } else this.activate(tab.id);
     if (url) void wc.loadURL(url).catch(() => undefined);
     return tab;
   }
@@ -301,6 +307,7 @@ export class ElectronDriver implements BrowserDriver {
   }
 
   async navigate(url: string): Promise<ActionOutcome> {
+    this.tab.navSource = 'agent';
     try {
       await this.wc.loadURL(url);
       return { ok: true };

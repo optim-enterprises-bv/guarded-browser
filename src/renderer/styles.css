@@ -14,7 +14,7 @@ button { font: inherit; border: 1px solid var(--line); background: var(--card); 
 button:disabled { opacity: .5; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 button.danger { color: var(--danger); border-color: var(--danger); }
-button.link { border: none; background: none; color: var(--accent); padding: 0; margin-left: auto; }
+button.link { border: none; background: none; color: var(--accent-text); padding: 0; margin-left: auto; }
 .hidden { display: none !important; }
 .muted { color: var(--muted); } .small { font-size: 11px; }
 #topbar { position: fixed; inset: 0 0 auto 0; height: var(--top); border-bottom: 1px solid var(--line); background: var(--card); }
@@ -32,7 +32,7 @@ button.link { border: none; background: none; color: var(--accent); padding: 0; 
 #panel { position: fixed; top: var(--top); right: 0; bottom: 0; width: var(--panel); border-left: 1px solid var(--line); background: var(--card); padding: 10px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
 #panel-head { display: flex; align-items: center; gap: 6px; }
 .chip { font-size: 11px; padding: 2px 6px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); }
-.chip.ok { color: var(--ok); border-color: var(--ok); } .chip.bad { color: var(--danger); border-color: var(--danger); } .chip.agent { color: var(--accent); border-color: var(--accent); }
+.chip.ok { color: var(--ok); border-color: var(--ok); } .chip.bad { color: var(--danger); border-color: var(--danger); } .chip.agent { color: var(--accent-text); border-color: var(--accent); }
 .banner { padding: 6px 8px; border-radius: 6px; font-weight: 600; }
 .banner.danger { background: #fde2e0; color: #8a1c12; } .banner.warn { background: #fdf0d5; color: #7a4d00; }
 textarea, input, select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
@@ -69,7 +69,8 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 /* ---------- split view: pane chrome drawn by the browser around page views ---------- */
 #panes { position: fixed; inset: 0; pointer-events: none; }
 .pane { position: absolute; box-sizing: border-box; border: 3px solid var(--line); border-radius: var(--radius-sm, 4px); pointer-events: none; }
-.pane.active { border-color: var(--accent); }
+/* focused (non-agent) pane: a FIXED blue, never the theme/site accent, never near the agent yellow */
+.pane.active { border-color: #0b57d0 !important; }
 .pane .phead { position: absolute; left: 0; right: 0; top: 0; height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 6px; font-size: 12px; background: var(--card); color: var(--fg); overflow: hidden; white-space: nowrap; pointer-events: auto; cursor: default; }
 .pane .phead .ptitle { overflow: hidden; text-overflow: ellipsis; }
 .divider { position: absolute; pointer-events: auto; background: transparent; }
@@ -123,3 +124,16 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 #theme-editor textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 11px; }
 [data-testid=appearance] label, #theme-editor label { display: grid; grid-template-columns: 120px 1fr; gap: 6px; margin: 3px 0; align-items: center; }
 .tile-notice { position: fixed; left: 8px; bottom: 8px; max-width: 360px; z-index: 5; background: var(--highlight); color: var(--fg); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; font-size: 12px; }
+
+/* locked: fields that tell you where you are and what the agent does (theme-independent) */
+#address.lock-address { background: #ffffff !important; color: #111111 !important; border: 1px solid #555555 !important; }
+:root[data-base=dark] #address.lock-address { background: #000000 !important; color: #ffffff !important; border-color: #888888 !important; }
+.lock-status { background: #ffffff !important; color: #111111 !important; border: 1px solid #555555 !important; border-radius: 4px !important; padding: 1px 6px !important; font-size: 12px !important; }
+:root[data-base=dark] .lock-status { background: #000000 !important; color: #ffffff !important; border-color: #888888 !important; }
+.lock-chip { font-size: 11px !important; padding: 2px 6px !important; border-radius: 8px !important; background: #ffffff !important; color: #333333 !important; border: 1px solid #333333 !important; }
+.lock-chip.lock-chip-ok { color: #1b5e20 !important; border-color: #1b5e20 !important; }
+.lock-chip.lock-chip-bad { color: #b00020 !important; border-color: #b00020 !important; }
+.lock-chip.lock-chip-loading { color: #333333 !important; }
+.phead.lock-pane-head { background: #e8eaed !important; color: #202124 !important; }
+.phead.lock-pane-head .pnum { color: #202124 !important; }
+.phead .ptitle { font-style: italic; }

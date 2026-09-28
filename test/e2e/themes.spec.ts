@@ -104,6 +104,7 @@ async function importTheme(ui: Page, theme: unknown) {
   return (await ui.locator('[data-testid=theme-msg]').innerText()).trim();
 }
 
+const READABLE = { name: 'Readable', base: 'dark', background: '#101010', foreground: '#ffe082', accent: '#ffe082', highlight: '#303030', radius: 16, density: 'compact' };
 const EXTREME = { name: 'Extreme', base: 'light', background: '#ffe082', foreground: '#ffe082', accent: '#ffe082', highlight: '#ffe082', radius: 16, density: 'compact' };
 
 test('theme import is validated strictly: CSS injection, named colours, ranges, extra keys are rejected', async () => {
@@ -118,12 +119,14 @@ test('theme import is validated strictly: CSS injection, named colours, ranges, 
     { ...EXTREME, name: 'x5', radius: 999 },
     { ...EXTREME, name: 'x6', css: '.lock-dialog{display:none}' },
     { ...EXTREME, name: 'Dark' }, // built-in name
+    { ...EXTREME, name: 'Unreadable' }, // background == foreground (contrast 1:1)
+    { ...EXTREME, name: 'Nice Mono', background: '#101010', foreground: '#101010', highlight: '#101010' },
   ];
   for (const b of bad) expect(await importTheme(a.ui, b), JSON.stringify(b)).toMatch(/^rejected/);
-  expect(await importTheme(a.ui, { ...EXTREME, name: 'Good one', background: 'rgb(10, 20, 30)' })).toBe('imported "Good one"');
+  expect(await importTheme(a.ui, { ...READABLE, name: 'Good one', background: 'rgb(10, 20, 30)' })).toBe('imported "Good one"');
   await expect(a.ui.locator('[data-testid=theme-select] option')).toContainText(['System', 'Light', 'Dark', 'Light Violet', 'Dark Teal', 'Good one']);
   const saved = JSON.parse(readFileSync(join(a.userData, 'settings.json'), 'utf8')).appearance.custom;
-  expect(saved).toEqual([{ ...EXTREME, name: 'Good one', background: '#0a141e' }]);
+  expect(saved).toEqual([{ ...READABLE, name: 'Good one', background: '#0a141e' }]);
 });
 
 test('theme editor live preview, save, and it themes the chrome only (never a web page)', async () => {
@@ -131,11 +134,11 @@ test('theme editor live preview, save, and it themes the chrome only (never a we
   await openSettings(a.ui);
   await a.ui.click('#te-load');
   await a.ui.fill('[data-testid=te-name]', 'Pinkish');
-  await a.ui.locator('[data-testid=te-background]').fill('#ff00aa');
-  await expect.poll(() => style(a!.ui, 'body', 'background-color')).toBe('rgb(255, 0, 170)'); // live
+  await a.ui.locator('[data-testid=te-background]').fill('#ffd0f0');
+  await expect.poll(() => style(a!.ui, 'body', 'background-color')).toBe('rgb(255, 208, 240)'); // live
   await a.ui.click('#te-revert');
-  await expect.poll(() => style(a!.ui, 'body', 'background-color')).not.toBe('rgb(255, 0, 170)');
-  await a.ui.locator('[data-testid=te-background]').fill('#ff00aa');
+  await expect.poll(() => style(a!.ui, 'body', 'background-color')).not.toBe('rgb(255, 208, 240)');
+  await a.ui.locator('[data-testid=te-background]').fill('#ffd0f0');
   await a.ui.click('[data-testid=theme-save]');
   await expect(a.ui.locator('[data-testid=theme-msg]')).toHaveText('saved "Pinkish"');
   await expect.poll(() => a!.ui.evaluate(() => document.documentElement.dataset.theme)).toBe('Pinkish');
@@ -197,15 +200,29 @@ test('LOCKED styling: an extreme theme + site accent cannot restyle the confirma
     feeds: [{ name: 'theme-test-feed', url: `${site}/feed.txt`, format: 'domains', enabled: true }],
   });
   await openSettings(a.ui);
-  expect(await importTheme(a.ui, EXTREME)).toBe('imported "Extreme"');
-  await a.ui.selectOption('[data-testid=theme-select]', 'Extreme');
+  // an unreadable theme is refused at import ...
+  expect(await importTheme(a.ui, EXTREME)).toMatch(/^rejected: .*contrast/);
+  // ... so emulate one that got past validation anyway: every theme variable = the warning colour
   await a.ui.check('[data-testid=site-accent]');
   await a.ui.click('[data-testid=appearance-save]');
-  await expect.poll(() => a!.ui.evaluate(() => [document.documentElement.dataset.theme, document.documentElement.dataset.siteAccent])).toEqual(['Extreme', 'theme-color']);
+  await expect.poll(() => a!.ui.evaluate(() => document.documentElement.dataset.siteAccent)).toBe('theme-color');
   await a.ui.click('#s-close');
+  const forceExtreme = () =>
+    a!.ui.evaluate(() => {
+      for (const v of ['--bg', '--fg', '--card', '--line', '--muted', '--accent', '--accent-fg', '--accent-text', '--highlight', '--danger', '--warn', '--ok']) document.documentElement.style.setProperty(v, '#ffe082');
+    });
+  await forceExtreme();
   // the theme really is extreme: chrome background == foreground == warning colour
   expect(await style(a.ui, 'body', 'background-color')).toBe('rgb(255, 224, 130)');
   expect(await style(a.ui, 'body', 'color')).toBe('rgb(255, 224, 130)');
+
+  // address bar, task status and guard chip stay readable (locked)
+  const readable = async (sel: string) => {
+    const [fg, bg] = await a!.ui.locator(sel).evaluate((e) => [getComputedStyle(e).color, getComputedStyle(e).backgroundColor]);
+    const rgb = (x: string) => { const m = x.match(/\d+/g)!.map(Number); return { r: m[0], g: m[1], b: m[2] }; };
+    return contrast(rgb(fg), rgb(bg));
+  };
+  for (const sel of ['[data-testid=address]', '[data-testid=task-status]', '[data-testid=guard-status]']) expect(await readable(sel), sel).toBeGreaterThanOrEqual(4.5);
 
   // allowlist editor (preflight) keeps its locked look
   await a.ui.fill('[data-testid=task-input]', 'look around');
@@ -215,6 +232,7 @@ test('LOCKED styling: an extreme theme + site accent cannot restyle the confirma
   await a.ui.click('[data-testid=preflight-start]');
 
   // confirmation dialog
+  await forceExtreme();
   const card = '.lock-dialog:not(.hidden) .card';
   await expect(a.ui.locator(card)).toBeVisible({ timeout: 20_000 });
   expect(await style(a.ui, card, 'background-color')).toBe('rgb(255, 255, 255)');

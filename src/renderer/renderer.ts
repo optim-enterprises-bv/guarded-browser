@@ -111,10 +111,12 @@ function renderPanes(g: Geometry) {
     if (!p.chrome) continue;
     // Frame and header are browser chrome around the page view: a page cannot draw or fake them.
     const frame = el('div', { class: `pane${p.active ? ' active' : ''}${p.agent ? ' lock-agent-frame' : ''}`, 'data-testid': p.agent ? 'agent-pane' : 'pane', 'data-tab-id': String(p.tabId) });
-    const head = el('div', { class: `phead${p.agent ? ' lock-agent-head' : ''}` },
+    // the page title is page text: it is quoted and labelled, and non-agent headers use a fixed grey
+    // style, so a title reading "AGENT ACTIVE" never looks like the real (black / yellow) agent header
+    const head = el('div', { class: `phead ${p.agent ? 'lock-agent-head' : 'lock-pane-head'}` },
       ...(p.agent ? [el('span', { class: 'lock-agent-badge', 'data-testid': 'agent-active-badge' }, 'AGENT ACTIVE')] : []),
       ...(p.pane ? [el('span', { class: 'pnum' }, `pane ${p.pane}`)] : []),
-      el('span', { class: 'ptitle' }, t?.title ?? ''));
+      el('span', { class: 'ptitle', 'data-testid': 'pane-title' }, `page title: \u201c${(t?.title ?? '').slice(0, 120)}\u201d`));
     head.onclick = () => void gb.invoke('tabs:activate', p.tabId);
     frame.append(head);
     place(frame, p.outer);
@@ -188,7 +190,7 @@ function renderState(s: any) {
   const g = $('chip-guard');
   g.textContent = s.guard.status === 'ready' ? 'guard: on' : s.guard.status === 'loading' ? 'guard: loading' : 'guard unavailable';
   g.title = s.guard.detail;
-  g.className = `chip ${s.guard.status === 'ready' ? 'ok' : s.guard.status === 'loading' ? '' : 'bad'}`;
+  g.className = `lock-chip ${s.guard.status === 'ready' ? 'lock-chip-ok' : s.guard.status === 'loading' ? 'lock-chip-loading' : 'lock-chip-bad'}`;
   renderEgress(s.egress);
   renderFallback(s.fallback);
   renderReputation(s.reputation);

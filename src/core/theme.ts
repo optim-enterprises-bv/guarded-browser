@@ -45,7 +45,7 @@ const ColorSchema = z
   .refine((s) => parseColor(s) !== null, 'colour must be #rgb, #rrggbb or rgb(r, g, b)')
   .transform((s) => toHex(parseColor(s)!));
 
-export const ThemeSchema = z
+const ThemeShape = z
   .object({
     name: z.string().regex(/^[A-Za-z0-9 _.-]{1,40}$/, 'name: 1-40 letters, digits, space, _ . -'),
     base: z.enum(['light', 'dark']),
@@ -58,7 +58,23 @@ export const ThemeSchema = z
   })
   .strict();
 
-export type Theme = z.infer<typeof ThemeSchema>;
+/**
+ * A theme must stay readable: its text colour needs >= 4.5:1 (WCAG AA) against every background it
+ * controls (page background, cards / inputs, the highlight colour), otherwise a shared theme could
+ * hide which site you are on or what the agent is doing.
+ */
+export const ThemeSchema = ThemeShape.superRefine((t, ctx) => {
+  const [bg, fg, hl] = [parseColor(t.background), parseColor(t.foreground), parseColor(t.highlight)];
+  if (!bg || !fg || !hl || (t.base !== 'light' && t.base !== 'dark')) return; // field errors are reported already
+  const pairs: Array<[string, RGB]> = [['background', bg], ['card / input background', cardOf(bg, t.base)], ['highlight', hl]];
+  for (const [label, back] of pairs) {
+    const r = contrast(fg, back);
+    if (r < MIN_TEXT_CONTRAST) ctx.addIssue({ code: 'custom', path: ['foreground'], message: `foreground vs ${label} contrast is ${r.toFixed(2)}:1, needs at least ${MIN_TEXT_CONTRAST}:1` });
+  }
+});
+
+export type Theme = z.infer<typeof ThemeShape>;
+export const MIN_TEXT_CONTRAST = 4.5;
 
 const TIME = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'time must be HH:MM');
 
@@ -135,6 +151,28 @@ export function mix(a: RGB, b: RGB, t: number): RGB {
 
 const WHITE = { r: 255, g: 255, b: 255 };
 const BLACK = { r: 0, g: 0, b: 0 };
+/** The locked AGENT ACTIVE yellow; theme accents are kept visibly away from it. */
+export const AGENT_YELLOW = { r: 0xff, g: 0xd6, b: 0x00 };
+
+export function cardOf(bg: RGB, base: 'light' | 'dark'): RGB {
+  return parseColor(toHex(mix(bg, WHITE, base === 'dark' ? 0.05 : 0.7)))!;
+}
+
+const dist = (a: RGB, b: RGB) => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
+
+/** Move a colour away from the AGENT yellow (min RGB distance 120) so only the agent frame is yellow. */
+export function avoidAgentYellow(c: RGB): RGB {
+  let x = { ...c };
+  for (let i = 0; i < 20 && dist(x, AGENT_YELLOW) < 120; i++) x = mix(x, { r: 0x2f, g: 0x5b, b: 0xd3 }, 0.2);
+  return x;
+}
+
+/** A text colour close to `c` with >= 4.5:1 against every background given (moves towards `fg`). */
+export function readableOn(c: RGB, fg: RGB, backs: RGB[]): RGB {
+  let x = { ...c };
+  for (let i = 0; i < 30 && backs.some((b) => contrast(x, b) < MIN_TEXT_CONTRAST); i++) x = mix(x, fg, 0.15);
+  return backs.some((b) => contrast(x, b) < MIN_TEXT_CONTRAST) ? fg : parseColor(toHex(x))!;
+}
 
 /**
  * An accent plus the text colour to put on it, with contrast >= min (WCAG AA 4.5:1 by default).
@@ -150,24 +188,31 @@ export function accessibleAccent(accent: RGB, min = 4.5): { accent: RGB; text: R
 
 /** Blend a page-supplied colour into the theme accent (weight 0.6 site) and make it accessible. */
 export function blendSiteAccent(themeAccent: RGB, site: RGB): { accent: RGB; text: RGB; ratio: number } {
-  return accessibleAccent(mix(themeAccent, site, 0.6));
+  return accessibleAccent(avoidAgentYellow(mix(themeAccent, site, 0.6)));
 }
 
 /** CSS custom properties for a theme (+ optional site colour). Values are only hex / numbers. */
 export function themeVars(t: Theme, siteColor?: RGB | null): Record<string, string> {
   const bg = parseColor(t.background)!;
   const fg = parseColor(t.foreground)!;
-  const card = mix(bg, WHITE, t.base === 'dark' ? 0.05 : 0.7);
+  const card = cardOf(bg, t.base);
   const line = mix(bg, fg, 0.18);
+  const backs = [bg, card];
+  // every text colour the chrome uses on themed backgrounds is forced to >= 4.5:1
+  const text = (c: RGB) => toHex(readableOn(c, fg, backs));
   const muted = mix(bg, fg, 0.6);
-  const acc = siteColor ? blendSiteAccent(parseColor(t.accent)!, siteColor) : accessibleAccent(parseColor(t.accent)!);
+  const acc = siteColor ? blendSiteAccent(parseColor(t.accent)!, siteColor) : accessibleAccent(avoidAgentYellow(parseColor(t.accent)!));
   return {
     '--bg': t.background,
     '--fg': t.foreground,
     '--card': toHex(card),
     '--line': toHex(line),
-    '--muted': toHex(muted),
+    '--muted': text(muted),
     '--accent': toHex(acc.accent),
+    '--accent-text': text(acc.accent),
+    '--danger': text({ r: 0xc0, g: 0x39, b: 0x2b }),
+    '--warn': text({ r: 0xb7, g: 0x79, b: 0x1f }),
+    '--ok': text({ r: 0x2f, g: 0x85, b: 0x5a }),
     '--accent-fg': toHex(acc.text),
     '--highlight': t.highlight,
     '--radius': `${t.radius}px`,

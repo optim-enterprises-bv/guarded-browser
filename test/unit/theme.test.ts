@@ -4,7 +4,7 @@ import {
   parseColor, resolveTheme, themeVars, toHex,
 } from '../../src/core/theme';
 
-const good = { name: 'My theme', base: 'dark', background: '#000', foreground: 'rgb(255, 255, 255)', accent: '#12ab34', highlight: '#fff', radius: 4, density: 'compact' };
+const good = { name: 'My theme', base: 'dark', background: '#000', foreground: 'rgb(255, 255, 255)', accent: '#12ab34', highlight: '#333', radius: 4, density: 'compact' };
 
 describe('colour parsing', () => {
   it('accepts only #rgb, #rrggbb and rgb(r, g, b)', () => {
@@ -20,7 +20,7 @@ describe('colour parsing', () => {
 describe('theme schema (import validation)', () => {
   it('normalises colours to #rrggbb', () => {
     const t = ThemeSchema.parse(good);
-    expect([t.background, t.foreground, t.highlight]).toEqual(['#000000', '#ffffff', '#ffffff']);
+    expect([t.background, t.foreground, t.highlight]).toEqual(['#000000', '#ffffff', '#333333']);
   });
   it('rejects CSS-injection strings, bad ranges, unknown keys and odd names', () => {
     const cases: Array<Record<string, unknown>> = [
@@ -93,5 +93,39 @@ describe('scheduled themes', () => {
     const custom = ThemeSchema.parse({ ...good, name: 'Mine' });
     expect(resolveTheme({ ...defaultAppearance(), theme: 'Mine', custom: [custom] }, at(12), false).name).toBe('Mine');
     expect(resolveTheme({ ...defaultAppearance(), theme: 'Nope' }, at(12), false).name).toBe('Light');
+  });
+});
+
+describe('round 5: readability and the agent yellow', () => {
+  it('rejects unreadable themes: text vs background, card and highlight must be >= 4.5:1', () => {
+    for (const bad of [
+      { ...good, background: '#101010', foreground: '#101010' },
+      { ...good, background: '#ffffff', foreground: '#dddddd', base: 'light' },
+      { ...good, highlight: '#eeeeee' },
+      { ...good, background: '#777777', foreground: '#ffffff' },
+    ]) {
+      const r = ThemeSchema.safeParse(bad);
+      expect(r.success, JSON.stringify(bad)).toBe(false);
+      if (!r.success) expect(r.error.issues[0].message).toMatch(/contrast/);
+    }
+  });
+  it('every built-in theme passes, and all derived text colours are >= 4.5:1 on background and card', () => {
+    for (const t of BUILTIN_THEMES) {
+      expect(ThemeSchema.safeParse(t).success, t.name).toBe(true);
+      for (const site of [null, parseColor('#ffffff')!, parseColor('#000000')!, parseColor('#ffd600')!]) {
+        const v = themeVars(t, site);
+        for (const k of ['--fg', '--muted', '--accent-text', '--danger', '--warn', '--ok']) {
+          for (const back of ['--bg', '--card']) expect(contrast(parseColor(v[k])!, parseColor(v[back])!), `${t.name} ${k} on ${back}`).toBeGreaterThanOrEqual(4.5);
+        }
+        expect(contrast(parseColor(v['--accent'])!, parseColor(v['--accent-fg'])!)).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+  it('the accent never lands on (or near) the locked AGENT yellow, from the theme or the site', () => {
+    const yellow = ThemeSchema.parse({ ...good, name: 'Y', accent: '#ffd600' });
+    const d = (h: string) => { const c = parseColor(h)!; return Math.hypot(c.r - 0xff, c.g - 0xd6, c.b - 0); };
+    expect(d(themeVars(yellow)['--accent'])).toBeGreaterThanOrEqual(100);
+    expect(d(themeVars(yellow, parseColor('#ffd600'))['--accent'])).toBeGreaterThanOrEqual(100);
+    for (const t of BUILTIN_THEMES) expect(d(themeVars(t, parseColor('#ffd600'))['--accent'])).toBeGreaterThanOrEqual(100);
   });
 });
