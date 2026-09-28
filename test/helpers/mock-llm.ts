@@ -1,0 +1,143 @@
+// Mock OpenAI-compatible server for tests. Each role (planner / reader / judge, detected from the
+// system prompt) is driven by a script, so tests can make a model "compromised" on purpose and
+// check that the code-level defences still hold.
+
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+export type MockRole = 'planner' | 'reader' | 'judge' | 'unknown';
+
+export interface MockCall {
+  role: MockRole;
+  body: Record<string, unknown>;
+  messages: Array<{ role: string; content: string | null; tool_calls?: unknown[] }>;
+  /** index of this call among calls for the same role */
+  n: number;
+  /** concatenated text of every message (for scripted "compromised" behaviour) */
+  transcript: string;
+}
+
+export type MockReply =
+  | { tool: string; args: Record<string, unknown> }
+  | { json: unknown }
+  | { content: string }
+  | { status: number };
+
+export type Responder = (call: MockCall) => MockReply;
+
+export interface MockLlm {
+  url: string;
+  calls: MockCall[];
+  script(role: MockRole, r: Responder): void;
+  reset(): void;
+  close(): Promise<void>;
+}
+
+/** Replies in order; after the list is exhausted keeps repeating the last one. */
+export function sequence(...steps: Array<MockReply | Responder>): Responder {
+  return (call) => {
+    const s = steps[Math.min(call.n, steps.length - 1)];
+    return typeof s === 'function' ? s(call) : s;
+  };
+}
+
+function roleOf(messages: MockCall['messages']): MockRole {
+  const sys = messages.find((m) => m.role === 'system')?.content ?? '';
+  if (sys.includes('You are the PLANNER')) return 'planner';
+  if (sys.includes('You are the READER')) return 'reader';
+  if (sys.includes('You are the JUDGE')) return 'judge';
+  return 'unknown';
+}
+
+const defaults: Record<MockRole, Responder> = {
+  planner: () => ({ tool: 'finish', args: { answer: 'mock: nothing to do' } }),
+  reader: () => ({ json: {} }),
+  judge: () => ({ json: { verdict: 'allow', reason: 'mock judge: serves the task' } }),
+  unknown: () => ({ content: 'mock' }),
+};
+
+export async function startMockLlm(): Promise<MockLlm> {
+  let scripts: Record<MockRole, Responder> = { ...defaults };
+  const calls: MockCall[] = [];
+  let toolCounter = 0;
+
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      if (req.url?.endsWith('/models')) {
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ data: [{ id: 'default' }] }));
+        return;
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      const messages = body.messages ?? [];
+      const role = roleOf(messages);
+      const call: MockCall = {
+        role,
+        body,
+        messages,
+        n: calls.filter((c) => c.role === role).length,
+        transcript: messages.map((m: { content: string | null }) => m.content ?? '').join('\n'),
+      };
+      calls.push(call);
+      let reply: MockReply;
+      try {
+        reply = scripts[role](call);
+      } catch (e) {
+        reply = { content: `mock script error: ${(e as Error).message}` };
+      }
+      if ('status' in reply) {
+        res.writeHead(reply.status).end('mock error');
+        return;
+      }
+      let message: Record<string, unknown>;
+      if ('tool' in reply) {
+        message = {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: `call_${++toolCounter}`, type: 'function', function: { name: reply.tool, arguments: JSON.stringify(reply.args) } }],
+        };
+      } else if ('json' in reply) {
+        message = { role: 'assistant', content: JSON.stringify(reply.json) };
+      } else {
+        message = { role: 'assistant', content: reply.content };
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'mock', object: 'chat.completion', choices: [{ index: 0, message, finish_reason: 'stop' }] }));
+    });
+  });
+  const port = await new Promise<number>((r) => server.listen(0, '127.0.0.1', () => r((server.address() as AddressInfo).port)));
+  return {
+    url: `http://127.0.0.1:${port}/v1`,
+    calls,
+    script(role, r) {
+      scripts[role] = r;
+    },
+    reset() {
+      scripts = { ...defaults };
+      calls.length = 0;
+    },
+    close: () => new Promise((r) => { server.closeAllConnections(); server.close(() => r()); }),
+  };
+}
+
+/** Find the latest reader result JSON the planner received (for scripting compromised planners). */
+export function lastExtracted(call: MockCall): Record<string, unknown> | null {
+  for (let i = call.messages.length - 1; i >= 0; i--) {
+    const c = call.messages[i].content ?? '';
+    const m = /\{"ok":true,"label":"untrusted".*?"data":(\{.*?\})\}/.exec(c);
+    if (m) return JSON.parse(m[1]);
+  }
+  return null;
+}
+
+/** Find the ref of the first snapshot element whose line matches a pattern. */
+export function refFor(call: MockCall, pattern: RegExp): string {
+  for (let i = call.messages.length - 1; i >= 0; i--) {
+    for (const line of (call.messages[i].content ?? '').split('\n')) {
+      const m = /^\[(e\d+)\]/.exec(line);
+      if (m && pattern.test(line)) return m[1];
+    }
+  }
+  throw new Error(`no element matching ${pattern} in planner transcript`);
+}

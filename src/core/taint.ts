@@ -110,10 +110,9 @@ export class TaintRegistry {
     return { label: 'untrusted', provenance, taintIds: matches.map((m) => m.id) };
   }
 
-  /** Registered values found in a piece of text (used for planner args). */
+  /** Registered values found in a piece of text (used for planner args), with the same normalisation. */
   findIn(text: string): RegisteredValue[] {
-    const lower = text.toLowerCase();
-    return this.all().filter((e) => e.value.length >= MIN_MATCH_LENGTH && lower.includes(e.value.toLowerCase()));
+    return this.matchRequest(text);
   }
 
   /** Registered values found in an outgoing request (URL + body), with normalisation. */

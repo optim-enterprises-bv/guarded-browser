@@ -64,6 +64,12 @@ function formValues(ctx: PolicyContext): PolicyResult['values'] {
     });
 }
 
+function checkFormOrigin(r: PolicyResult, el: SnapshotElement, ctx: PolicyContext): PolicyResult {
+  const o = el.formAction ? originOf(el.formAction) : null;
+  if (o && !ctx.allowedOrigins.has(o)) return { ...r, newOrigin: o, reasons: [...r.reasons, `form sends data to a new origin not mentioned in the task: ${o}`] };
+  return r;
+}
+
 export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): PolicyResult {
   const a = action.args;
   const currentOrigin = originOf(ctx.currentUrl);
@@ -93,6 +99,7 @@ export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): Polic
           destination: el.formAction || ctx.currentUrl,
           values: formValues(ctx),
         });
+        r = checkFormOrigin(r, el, ctx);
       }
       if (RISKY_NAME.test(el.name)) r = escalate(r, `irreversible/outward-looking control "${el.name.slice(0, 60)}" (always confirmed)`);
       if (el.inputType === 'file') r = escalate(r, 'file upload control (always confirmed)');
@@ -125,10 +132,11 @@ export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): Polic
     case 'submit': {
       const el = ctx.element;
       if (!el) return result('block', [`unknown element ref ${String(a.ref)}`]);
-      return result('confirm', ['form submission (always confirmed)'], {
-        destination: el.formAction || ctx.currentUrl,
-        values: formValues(ctx),
-      });
+      return checkFormOrigin(
+        result('confirm', ['form submission (always confirmed)'], { destination: el.formAction || ctx.currentUrl, values: formValues(ctx) }),
+        el,
+        ctx,
+      );
     }
     case 'scroll':
     case 'extract':
