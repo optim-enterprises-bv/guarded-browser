@@ -3,6 +3,7 @@
 import type { Settings } from '../core/config';
 import type { ConfirmRequest } from '../core/types';
 import { initAppearance } from './appearance';
+import { initLibrary } from './library';
 
 interface Bridge {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
@@ -58,6 +59,7 @@ function renderTabs(list: TabInfo[]) {
   if (active) {
     const addr = $<HTMLInputElement>('address');
     if (document.activeElement !== addr) addr.value = active.url === 'about:blank' ? '' : active.url;
+    library?.tabsChanged(active.url);
     $<HTMLButtonElement>('back').disabled = !active.canGoBack;
     $<HTMLButtonElement>('forward').disabled = !active.canGoForward;
     const badge = $('guard-badge');
@@ -551,6 +553,8 @@ gb.on('profiles:show-manager', () => void openProfiles());
 // ---------- boot ----------
 const appearanceUi = initAppearance(gb);
 void appearanceUi.load();
+const library = initLibrary(gb);
+void library.load();
 gb.on('state', renderState);
 gb.on('tabs', (l: TabInfo[]) => {
   renderTabs(l);

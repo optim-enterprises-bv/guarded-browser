@@ -143,3 +143,29 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .avatar { display: inline-flex; width: 20px; height: 20px; border-radius: 50%; align-items: center; justify-content: center; color: #ffffff; font-weight: 700; font-size: 11px; flex: none; }
 .profile-row { display: grid; grid-template-columns: 24px 1fr 44px auto; gap: 6px; align-items: center; margin: 6px 0; }
 .profile-row .actions-inline { display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* ---------- history & bookmarks ---------- */
+#topbar { height: var(--top); }
+.bmbar { display: flex; gap: 4px; align-items: center; height: 28px; padding: 0 8px; overflow: hidden; border-top: 1px solid var(--line); }
+.bmbar button { padding: 1px 8px; font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.star { font-size: 16px; padding: 0 8px; }
+.star.on { color: var(--accent-text); }
+.suggest { position: fixed; z-index: 30; left: 180px; top: 76px; width: min(700px, calc(100vw - 700px)); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 6px 18px rgba(0,0,0,.25); padding: 4px; }
+.suggest .sug { display: flex; gap: 8px; padding: 4px 6px; cursor: pointer; border-radius: 4px; align-items: baseline; }
+.suggest .sug:hover, .suggest .sug.sel { background: var(--bg); }
+.suggest .kind { font-size: 10px; text-transform: uppercase; color: var(--muted); width: 58px; flex: none; }
+.suggest .u { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side { position: fixed; left: 0; top: var(--top); bottom: 0; width: 340px; background: var(--card); border-right: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; z-index: 4; }
+.side section { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
+.side-head { display: flex; justify-content: space-between; align-items: center; }
+.lib-list { overflow: auto; flex: 1; border-top: 1px solid var(--line); }
+.lib-list h4 { margin: 8px 0 2px; font-size: 12px; color: var(--muted); }
+.hrow, .brow { display: grid; grid-template-columns: 18px 1fr auto; gap: 6px; align-items: center; padding: 3px 2px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.hrow .t, .brow .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrow .u, .brow .u { display: block; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrow .btns, .brow .btns { display: flex; gap: 2px; }
+.hrow .btns button, .brow .btns button { padding: 0 5px; font-size: 11px; }
+.brow.folder .t { font-weight: 700; }
+.brow.dragover { outline: 2px dashed var(--accent); }
+.fav { width: 16px; height: 16px; border-radius: 3px; background: var(--line); }
+.bedit { display: grid; grid-template-columns: 70px 1fr; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 4px; margin: 4px 0; font-size: 12px; }

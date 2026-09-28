@@ -59,6 +59,9 @@ export class TabManager {
   private agentTabId: number | null = null;
   private selected = new Set<number>();
   private dragging = false;
+  private overlay = false;
+  private topInset = TOP_BAR;
+  private leftInset = 0;
   /** called with the chrome geometry after every layout */
   onGeometry: (g: Geometry) => void = () => undefined;
 
@@ -155,6 +158,19 @@ export class TabManager {
     this.onChange();
   }
 
+  /** chrome heights / widths around the pages (bookmarks bar, side panel) */
+  setInsets(top: number, left: number) {
+    this.topInset = Math.max(TOP_BAR, top);
+    this.leftInset = Math.max(0, left);
+    this.layout();
+  }
+
+  /** hide page views while a chrome overlay (address suggestions) needs the space */
+  setOverlay(on: boolean) {
+    this.overlay = on;
+    this.layout();
+  }
+
   setDragging(on: boolean) {
     this.dragging = on;
     this.layout();
@@ -169,7 +185,8 @@ export class TabManager {
   private area(): Rect {
     const { width, height } = this.win.getContentBounds();
     // never wider than the space left of the agent panel, even in a tiny window
-    return contentArea(width, height, TOP_BAR, PANEL_WIDTH);
+    const a = contentArea(width - this.leftInset, height, this.topInset, PANEL_WIDTH);
+    return { ...a, x: a.x + this.leftInset };
   }
 
   active(): Tab | undefined {
@@ -272,7 +289,7 @@ export class TabManager {
       const r = views.get(t.id);
       // while a divider is dragged the page views are hidden so the chrome receives the pointer;
       // a pane squeezed to nothing hides its view instead of drawing outside its slot
-      t.view.setVisible(!!r && r.width >= 1 && r.height >= 1 && !this.dragging);
+      t.view.setVisible(!!r && r.width >= 1 && r.height >= 1 && !this.dragging && !this.overlay);
       if (r) t.view.setBounds(r);
     }
     this.onGeometry(g);

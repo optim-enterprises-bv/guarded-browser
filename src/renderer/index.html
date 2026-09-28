@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:">
 <title>Guarded Browser</title>
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -14,7 +14,10 @@
     <button id="back" title="Back">&#8592;</button>
     <button id="forward" title="Forward">&#8594;</button>
     <button id="reload" title="Reload">&#8635;</button>
-    <input id="address" class="lock-address" data-testid="address" spellcheck="false" placeholder="Enter a URL">
+    <input id="address" class="lock-address" data-testid="address" spellcheck="false" placeholder="Enter a URL, search, or a bookmark nickname" autocomplete="off">
+    <button id="star" class="star" title="Bookmark this page (Ctrl+D)" data-testid="star">&#9734;</button>
+    <button id="btn-history" title="History (Ctrl+H)" data-testid="open-history">History</button>
+    <button id="btn-bookmarks" title="Bookmarks (Ctrl+Shift+B toggles the bar)" data-testid="open-bookmarks">Bookmarks</button>
     <span id="guard-badge" class="lock-badge hidden" data-testid="guard-badge"></span>
     <select id="tile-layout" title="Split view layout" data-testid="tile-layout">
       <option value="columns">Side by side</option>
@@ -24,8 +27,42 @@
     <button id="tile" title="Tile selected tabs (Ctrl+Shift+S; Ctrl+click tabs to select)" data-testid="tile">Tile</button>
     <button id="untile" title="Back to a single view (Ctrl+Shift+U)" data-testid="untile">Untile</button>
   </div>
+  <div id="bmbar" class="bmbar hidden" data-testid="bookmarks-bar"></div>
 </header>
 <div id="panes" data-testid="panes"></div>
+<div id="suggest" class="suggest hidden" data-testid="suggestions" role="listbox"></div>
+<aside id="side" class="side hidden" data-testid="side-panel">
+  <div class="side-head"><strong id="side-title"></strong><button id="side-close" data-testid="side-close">Close</button></div>
+  <section id="history-view" class="hidden" data-testid="history-panel">
+    <input id="h-q" placeholder="Search history" data-testid="history-search">
+    <div class="row">
+      <select id="h-src" data-testid="history-source"><option value="">all sources</option><option value="user">you</option><option value="page">pages</option><option value="agent">agent</option></select>
+      <select id="h-range" data-testid="history-range"><option value="hour">last hour</option><option value="day">last day</option><option value="week">last week</option><option value="all">all time</option></select>
+      <button id="h-del-range" class="danger" data-testid="history-delete-range">Delete</button>
+    </div>
+    <label class="small"><input id="h-clear-exit" type="checkbox" data-testid="history-clear-on-exit"> Clear history when this profile's window closes</label>
+    <div id="h-list" class="lib-list" data-testid="history-list"></div>
+  </section>
+  <section id="bookmarks-view" class="hidden" data-testid="bookmarks-panel">
+    <input id="b-q" placeholder="Search bookmarks" data-testid="bookmarks-search">
+    <div class="row">
+      <button id="b-add-current" data-testid="bookmarks-add-current">Add this page</button>
+      <button id="b-add-folder" data-testid="bookmarks-add-folder">New folder</button>
+      <label class="small"><input id="b-bar" type="checkbox" data-testid="bookmarks-bar-toggle"> Show bar</label>
+    </div>
+    <div id="b-tree" class="lib-list" data-testid="bookmarks-tree"></div>
+    <details><summary>Import / export (Netscape HTML)</summary>
+      <textarea id="b-io" rows="4" spellcheck="false" data-testid="bookmarks-io" placeholder="paste a bookmarks.html here to import"></textarea>
+      <div class="row">
+        <button id="b-import" data-testid="bookmarks-import">Import text</button>
+        <button id="b-export" data-testid="bookmarks-export">Export to text</button>
+        <button id="b-import-file">Import file…</button>
+        <button id="b-export-file">Export file…</button>
+      </div>
+    </details>
+    <span id="b-msg" class="muted small" data-testid="bookmarks-msg"></span>
+  </section>
+</aside>
 <div id="tile-notice" class="tile-notice hidden" data-testid="tile-notice" role="status"></div>
 <div id="tab-menu" class="menu hidden" data-testid="tab-menu" role="menu"></div>
 <aside id="panel">

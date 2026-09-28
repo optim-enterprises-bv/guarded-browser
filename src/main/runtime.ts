@@ -22,6 +22,8 @@ import type { TileLayout } from './tile-layout';
 import { ISOLATED_WORLD } from './page-scripts';
 import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type Theme } from '../core/theme';
 import type { Profile } from './profiles';
+import { HistoryStore, recordable } from '../core/history';
+import { BAR_ID, BookmarkStore, OTHER_ID } from '../core/bookmarks';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Handler = (e: any, ...args: any[]) => unknown;
@@ -67,6 +69,12 @@ let tabs: TabManager;
 let win: BrowserWindow;
 /** this profile's own local block / allow lists (the feeds are shared) */
 const localLists = new LocalLists(join(profileDir, 'reputation'));
+// Private per-profile data for the CHROME UI only. The agent (planner / reader / judge) never gets
+// a reference to these stores; they are only reachable through the UI window's IPC handlers.
+const history = new HistoryStore(join(profileDir, 'history.json'));
+const bookmarks = new BookmarkStore(join(profileDir, 'bookmarks.json'));
+/** favicon bytes by origin (in memory only; decoded in the sandboxed renderer) */
+const faviconCache = new Map<string, { mime: string; data: string }>();
 const reputation: ReputationChecker = { check: (h) => feeds.check(h, localLists) };
 let current: { task: AgentTask; tab: Tab } | null = null;
 /** reputation interstitials waiting for Go back / Proceed anyway */
@@ -531,8 +539,20 @@ function uniquePath(dir: string, name: string): string {
 /** Ctrl+Shift+S tiles the selected tabs, Ctrl+Shift+U untiles; works while a page has focus too. */
 function installShortcuts(wc: WebContents) {
   wc.on('before-input-event', (e, input) => {
-    if (input.type !== 'keyDown' || !(input.control || input.meta) || !input.shift) return;
+    if (input.type !== 'keyDown' || !(input.control || input.meta)) return;
     const k = input.key.toLowerCase();
+    // library shortcuts while a page has focus: forwarded to this profile's chrome UI
+    if (!input.shift && (k === 'h' || k === 'd')) {
+      e.preventDefault();
+      sendUI('shortcut', k === 'h' ? 'history' : 'bookmark-page');
+      return;
+    }
+    if (input.shift && k === 'b') {
+      e.preventDefault();
+      sendUI('shortcut', 'toggle-bar');
+      return;
+    }
+    if (!input.shift) return;
     if (k === 's') {
       e.preventDefault();
       tabs.tile(undefined, 'columns');
@@ -548,6 +568,15 @@ function setupTab(tab: Tab) {
   installShortcuts(wc);
   wc.on('page-favicon-updated', (_e, favicons) => {
     tab.favicons = favicons.slice(0, 4).map((f) => String(f).slice(0, 256 * 1024));
+    // favicons for history / bookmarks: same capped fetch, never during an agent task
+    const origin = originOf(wc.getURL());
+    if (origin && !current && tab.favicons[0] && !faviconCache.has(origin)) {
+      void faviconBytes(tab.favicons[0]).then((f) => {
+        if (!f) return;
+        if (faviconCache.size >= 200) faviconCache.delete(faviconCache.keys().next().value!);
+        faviconCache.set(origin, f);
+      });
+    }
     if (tabs.active() === tab) void updateSiteAccent();
   });
   wc.on('did-stop-loading', () => {
@@ -621,6 +650,12 @@ function setupTab(tab: Tab) {
     const by = tab.navSource ?? 'user';
     tab.navSource = undefined;
     audit.write('navigation', { url, tab: tab.id, by, agentTab: current?.tab === tab });
+    // history: real web pages only (never the interstitial / data: / blob: / internal pages)
+    if (recordable(url)) history.record(url, wc.getTitle() === url ? '' : wc.getTitle(), current?.tab === tab && by !== 'user' ? 'agent' : by);
+  });
+  wc.on('page-title-updated', (_e, title) => {
+    const u = wc.getURL();
+    if (recordable(u)) history.updateTitle(u, title);
   });
 }
 
@@ -738,9 +773,119 @@ function registerIpc() {
     t.navSource = 'user';
     if (!postTaskGuard.size) guardedOrigins.clear();
     let url = input.trim();
-    if (!/^[a-z]+:/i.test(url)) url = /^[\w.-]+(:\d+)?(\/|$)/.test(url) ? `http://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
+    const nick = bookmarks.byNickname(url);
+    if (nick) url = nick.url; // a bookmark nickname typed in the address bar
+    else if (!/^[a-z]+:/i.test(url)) url = /^[\w.-]+(:\d+)?(\/|$)/.test(url) ? `http://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
     void t.wc.loadURL(url).catch(() => undefined);
   });
+
+  // ---------- history & bookmarks: chrome UI only ----------
+  const libraryChanged = () => sendUI('bookmarks', { roots: bookmarks.tree(), showBar: bookmarks.showBar });
+  /** open through the normal navigation path: reputation, proxy and every gate apply */
+  const openUrl = (url: string, newTab: boolean) => {
+    if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'only http(s) URLs' };
+    if (newTab) {
+      const t = tabs.create(url);
+      t.navSource = 'user';
+    } else {
+      const t = tabs.active();
+      if (!t) return { ok: false };
+      if (!current) postTaskGuard.delete(t.wc.id);
+      t.navSource = 'user';
+      void t.wc.loadURL(url).catch(() => undefined);
+    }
+    return { ok: true };
+  };
+  const wrap = <T>(fn: () => T) => {
+    try {
+      const r = fn();
+      libraryChanged();
+      return { ok: true, result: r };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message.slice(0, 200) };
+    }
+  };
+  const RANGES = new Set(['hour', 'day', 'week', 'all']);
+  const SOURCES = new Set(['user', 'page', 'agent']);
+  on('history:list', (_e, q: unknown, source: unknown) => ({
+    groups: history.grouped(String(q ?? '').slice(0, 200), SOURCES.has(String(source)) ? (String(source) as 'user') : undefined),
+    clearOnExit: history.clearOnExit,
+  }));
+  on('history:delete', (_e, url: unknown) => ({ ok: true, removed: history.deleteUrl(String(url)) }));
+  on('history:delete-range', (_e, range: unknown) => (RANGES.has(String(range)) ? { ok: true, removed: history.deleteRange(String(range) as 'all') } : { ok: false }));
+  on('history:clear-on-exit', (_e, v: unknown) => {
+    history.setClearOnExit(v === true);
+    return { ok: true };
+  });
+  on('history:open', (_e, url: unknown, newTab: unknown) => openUrl(String(url), newTab === true));
+  on('bookmarks:tree', () => ({ roots: bookmarks.tree(), showBar: bookmarks.showBar }));
+  on('bookmarks:add', (_e, parent: unknown, title: unknown, url: unknown, nickname: unknown) =>
+    wrap(() => bookmarks.addBookmark(String(parent ?? BAR_ID), String(title ?? ''), String(url ?? ''), nickname ? String(nickname) : undefined)),
+  );
+  on('bookmarks:add-current', () => {
+    const t = tabs.active();
+    const url = t?.wc.getURL() ?? '';
+    const existing = bookmarks.isBookmarked(url);
+    if (existing) return { ok: true, result: { id: existing, existed: true } };
+    return wrap(() => bookmarks.addBookmark(BAR_ID, t?.wc.getTitle() ?? url, url));
+  });
+  on('bookmarks:add-folder', (_e, parent: unknown, title: unknown) => wrap(() => bookmarks.addFolder(String(parent ?? OTHER_ID), String(title ?? ''))));
+  on('bookmarks:update', (_e, id: unknown, patch: unknown) => {
+    const p = (patch ?? {}) as Record<string, unknown>;
+    return wrap(() =>
+      bookmarks.update(String(id), {
+        ...(p.title !== undefined ? { title: String(p.title) } : {}),
+        ...(p.url !== undefined ? { url: String(p.url) } : {}),
+        ...(p.nickname !== undefined ? { nickname: p.nickname === null || p.nickname === '' ? null : String(p.nickname) } : {}),
+      }),
+    );
+  });
+  on('bookmarks:remove', (_e, id: unknown) => wrap(() => bookmarks.remove(String(id))));
+  on('bookmarks:move', (_e, id: unknown, parent: unknown, index: unknown) => wrap(() => bookmarks.move(String(id), String(parent), Number(index))));
+  on('bookmarks:search', (_e, q: unknown) => bookmarks.search(String(q ?? '').slice(0, 200)));
+  on('bookmarks:set-bar', (_e, v: unknown) => wrap(() => bookmarks.setShowBar(v === true)));
+  on('bookmarks:is-bookmarked', () => bookmarks.isBookmarked(tabs.active()?.wc.getURL() ?? ''));
+  on('bookmarks:open', (_e, id: unknown, newTab: unknown) => {
+    const b = bookmarks.all().find((x) => x.id === String(id));
+    return b ? openUrl(b.url, newTab === true) : { ok: false, error: 'no such bookmark' };
+  });
+  on('bookmarks:import', (_e, html: unknown, folder: unknown) => {
+    if (typeof html !== 'string') return { ok: false, error: 'expected text' };
+    return wrap(() => bookmarks.importNetscape(html, folder ? String(folder) : 'Imported'));
+  });
+  on('bookmarks:import-file', async () => {
+    const r = await dialog.showOpenDialog(win, { title: 'Import bookmarks (HTML)', filters: [{ name: 'Bookmarks HTML', extensions: ['html', 'htm'] }], properties: ['openFile'] });
+    if (r.canceled || !r.filePaths[0]) return { ok: false, error: 'cancelled' };
+    if (statSync(r.filePaths[0]).size > 5 * 1024 * 1024) return { ok: false, error: 'file larger than 5 MB' };
+    const html = readFileSync(r.filePaths[0], 'utf8');
+    return wrap(() => bookmarks.importNetscape(html, 'Imported'));
+  });
+  on('bookmarks:export', () => bookmarks.exportNetscape());
+  on('bookmarks:export-file', async () => {
+    const r = await dialog.showSaveDialog(win, { title: 'Export bookmarks', defaultPath: 'bookmarks.html' });
+    if (r.canceled || !r.filePath) return { ok: false, error: 'cancelled' };
+    writeFileSync(r.filePath, bookmarks.exportNetscape());
+    return { ok: true };
+  });
+  on('suggest', (_e, q: unknown) => {
+    const query = String(q ?? '').slice(0, 200);
+    const nick = bookmarks.byNickname(query);
+    const bms = bookmarks.search(query, 5);
+    return {
+      bookmarks: (nick ? [nick, ...bms.filter((b) => b.id !== nick.id)] : bms).slice(0, 5).map((b) => ({ title: b.title, url: b.url, nickname: b.nickname })),
+      history: history.suggest(query, 5).map((h) => ({ title: h.title, url: h.url })),
+    };
+  });
+  on('favicon:get', (_e, url: unknown) => {
+    const o = originOf(String(url ?? ''));
+    return o ? faviconCache.get(o) ?? null : null;
+  });
+  on('chrome:insets', (_e, top: unknown, left: unknown) => {
+    const t = Math.max(0, Math.min(400, Math.round(Number(top) || 0)));
+    const l = Math.max(0, Math.min(600, Math.round(Number(left) || 0)));
+    tabs.setInsets(t, l);
+  });
+  on('chrome:overlay', (_e, on: unknown) => tabs.setOverlay(on === true));
   const userNav = (fn: (wc: WebContents) => void) => {
     const t = tabs.active();
     if (!t) return;
@@ -892,6 +1037,8 @@ function windowTitle() {
 async function dispose() {
   if (disposed) return;
   disposed = true;
+  if (history.clearOnExit) history.clear();
+  else history.flush();
   if (current) stopTask();
   broker.denyAll('deny');
   unsubscribeFeeds();

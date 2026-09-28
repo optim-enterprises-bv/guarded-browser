@@ -5,8 +5,9 @@ const INVOKE = new Set([
   'state:get', 'tabs:new', 'tabs:close', 'tabs:activate', 'tabs:select', 'tiles:tile', 'tiles:untile', 'tiles:layout', 'tiles:drag', 'tiles:state', 'nav:go', 'nav:back', 'nav:forward', 'nav:reload',
   'agent:preview', 'agent:start', 'agent:stop', 'confirm:answer', 'egress:allow', 'settings:get', 'settings:save', 'audit:recent', 'reputation:refresh', 'appearance:get', 'appearance:save', 'theme:import', 'theme:import-file', 'theme:export-file',
   'profiles:list', 'profiles:create', 'profiles:update', 'profiles:open', 'profiles:delete',
+  'history:list', 'history:delete', 'history:delete-range', 'history:clear-on-exit', 'history:open', 'bookmarks:tree', 'bookmarks:add', 'bookmarks:add-current', 'bookmarks:add-folder', 'bookmarks:update', 'bookmarks:remove', 'bookmarks:move', 'bookmarks:search', 'bookmarks:set-bar', 'bookmarks:is-bookmarked', 'bookmarks:open', 'bookmarks:import', 'bookmarks:import-file', 'bookmarks:export', 'bookmarks:export-file', 'suggest', 'favicon:get', 'chrome:insets', 'chrome:overlay',
 ]);
-const EVENTS = new Set(['state', 'tabs', 'agent:update', 'agent:done', 'confirm:request', 'confirm:clear', 'audit', 'egress', 'fallback', 'reputation', 'geometry', 'appearance', 'site-accent', 'profiles', 'profiles:show-manager']);
+const EVENTS = new Set(['state', 'tabs', 'agent:update', 'agent:done', 'confirm:request', 'confirm:clear', 'audit', 'egress', 'fallback', 'reputation', 'geometry', 'appearance', 'site-accent', 'profiles', 'profiles:show-manager', 'bookmarks', 'shortcut']);
 
 contextBridge.exposeInMainWorld('gb', {
   invoke: (channel: string, ...args: unknown[]) => {
