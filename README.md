@@ -334,7 +334,8 @@ Security with split view:
   you allow their hosts.
 * Closing the agent's tab stops its task. Popups opened by *other* panes during a task open as
   background tabs (split view and the AGENT frame stay on screen); popups from the agent's own tab
-  are refused.
+  are refused. Untiling during a task shows the agent's tab. (You can still switch to another tab
+  yourself; the tab strip's `AGENT` chip then marks the agent's tab.)
 * The audit log records who started each navigation: `user` (address bar, new tab, back / forward /
   reload), `agent` (the agent's navigate) or `page` (renderer-initiated: links, forms, script,
   popups).

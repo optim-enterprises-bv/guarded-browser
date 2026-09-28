@@ -121,6 +121,8 @@ test('R5-V1/3: the agent stays on its tab through focus switches, re-layout and 
   await fake.click();
   await inv(a.ui, 'tiles:layout', 'rows');
   await a.ui.click('[data-testid=untile]');
+  // leaving split view mid-task shows the agent's tab, so the AGENT frame stays visible
+  await expect(a.ui.locator('[data-testid=agent-active-badge]')).toBeVisible();
   await a.ui.waitForTimeout(1500);
   release = true;
   await waitDone(a.ui);
@@ -206,7 +208,8 @@ test('R5-6: "Proceed anyway" applies only to the tab that showed the interstitia
   await expect(a.ui.locator('[data-testid=confirm-source]')).toContainText('pane 2 of 2');
   await a.ui.click('[data-testid=confirm-approve]');
   await expect.poll(() => fx.attackerHits.map((h) => h.url)).toContain('/landing');
-  const urls = await a.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children.map((v) => (v as Electron.WebContentsView).webContents.getURL()));
-  expect(urls.some((u) => u.endsWith('/a.html'))).toBe(true); // pane 1 untouched
-  expect(urls.some((u) => u.endsWith('/landing'))).toBe(true);
+  const urls = () => a!.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].contentView.children.map((v) => (v as Electron.WebContentsView).webContents.getURL()));
+  // the navigation commits shortly after the server saw the request
+  await expect.poll(async () => (await urls()).some((u) => u.endsWith('/landing')), { timeout: 10_000 }).toBe(true);
+  expect((await urls()).some((u) => u.endsWith('/a.html'))).toBe(true); // pane 1 untouched
 });

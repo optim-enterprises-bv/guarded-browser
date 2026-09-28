@@ -147,6 +147,8 @@ export class TabManager {
   }
 
   untile() {
+    // while the agent works, leaving split view shows the agent's tab so its frame stays visible
+    if (this.agentTabId !== null && this.tiles?.ids.includes(this.agentTabId)) this.activeId = this.agentTabId;
     this.tiles = null;
     this.dragging = false;
     this.layout();
