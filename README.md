@@ -16,16 +16,24 @@ v1. Local models by default (any OpenAI-compatible server), optional cloud fallb
    names) reaches the planner, capped and screened, but a short injection the screen misses can
    still steer it. The confirmations are what stop the consequences.
 3. **GET requests are not gated.** During a task a page can still put data it already has into
-   ordinary GET requests to sites on the task's allowlist.
+   ordinary GET requests to sites on the task's allowlist. After the task the proxy is open again
+   and the content filter only logs, so a page can send GET requests anywhere. State changes done
+   with a GET (logout or unsubscribe links, `?delete=` URLs) are only confirmed when the link's
+   label matches the risky-word list.
 4. **Sites can act on their own with your cookies.** Any site can do things for its own origin while
    you are logged in, agent or not. Use the dedicated profile, and don't log into sites you don't
-   want the agent near.
-5. **Taint tracking only matches exact values.** Your data is recognised in outgoing requests when
+   want the agent near. Service workers are handled: the ones registered by sites the agent visited
+   are unregistered when the task ends, and their POSTs are held while the agent's tab is still
+   guarded.
+5. **When a task on an untrusted site ends, close that tab or navigate it somewhere else yourself.**
+   Until you do, the page keeps running; the browser keeps holding its POSTs and popups, but not
+   its GET requests.
+6. **Taint tracking only matches exact values.** Your data is recognised in outgoing requests when
    it is plain, URL-encoded or base64; hashed, split, reworded or otherwise transformed copies are not.
-6. **iframes are not read, and third-party-heavy sites partly break during tasks** (their CDN / API
+7. **iframes are not read, and third-party-heavy sites partly break during tasks** (their CDN / API
    hosts are blocked until you allow them).
-7. **Reputation feeds lag new domains**, and attackers can show scanners a clean page.
-8. **Cloud fallback, if you enable it, sends your task and page text to that provider.**
+8. **Reputation feeds lag new domains**, and attackers can show scanners a clean page.
+9. **Cloud fallback, if you enable it, sends your task and page text to that provider.**
 
 ## Quick start
 
@@ -219,11 +227,12 @@ The agent panel shows it as a timeline (manual-browsing proxy chatter is only in
      A one-shot approval is created only when you approve a form submission in the action dialog; it
      is bound to method + URL + the form's encoding + the exact field set the dialog showed, which
      includes empty fields and — when the agent clicked a named submit button — that button's own
-     `name=value`, labelled "(sent by the clicked button)". The request may contain exactly those
+     `name=value`, labelled "(sent by the clicked button)"; for an `<input type=image>` it is
+     exactly `name.x` and `name.y` with small integer values (the click coordinates). The request may contain exactly those
      pairs (any order) and, for a click, at most that one submitter pair; nothing else. Bodies are
      parsed strictly (the byte-exact form Chromium produces for urlencoded / multipart); any part or
      byte that does not parse is a mismatch, and the request's Content-Type (and multipart boundary)
-     must match the form's enctype. The approval is dropped as soon as that action finishes. If the
+     must match the form's enctype (a Content-Type with more than one `boundary=` is rejected). The approval is dropped as soon as that action finishes. If the
      page changes anything after your approval (submit handler rewrites, a different named
      submitter, a different or hidden form, JSON, a malformed multipart part), the request is held
      again and the dialog says the page changed what is sent and shows the **actual** body — the raw
@@ -233,7 +242,10 @@ The agent panel shows it as a timeline (manual-browsing proxy chatter is only in
      forward, reload) or close it, so a page cannot simply wait for the task to finish. While a tab is
      gated (during the task or after it) it cannot open popups / new tabs (`window.open`,
      `target=_blank`): the attempt is refused and audited, so a gated page cannot escape into an
-     ungated tab. Consequences: sites that fire
+     ungated tab. Requests that belong to no tab (service workers, shared workers) are gated the same
+     way when they go to an origin the agent's tab visited, and at task end the service workers of
+     those origins are unregistered (`session.clearStorageData({ origin, storages:
+     ['serviceworkers'] })`). Both layers are tested separately. Consequences: sites that fire
      analytics or telemetry POSTs during a task will prompt (acceptable in v1); an approved click on a
      button whose script then POSTs in the background prompts a second time with the real request.
   3. *Tracked values.* A request containing a taint-registry value (reader output, task secrets,
@@ -376,7 +388,7 @@ Electron's per-app directory (`~/.config/guarded-browser` on Linux; override wit
   shows a **CLOUD FALLBACK ACTIVE** banner while it is in use.
 * Environment: `GUARDED_USER_DATA`, `GUARDED_START_URL`, `GUARDED_GUARD=off`,
   `GUARDED_CONFIRM_TIMEOUT_MS`, `GUARDED_MODEL_CACHE`, `GUARDED_DOWNLOAD_DIR`, and the test-only
-  `GUARDED_UNSAFE_DISABLE_POLICY=1`, honoured only together with `GUARDED_TEST=1` in an unpackaged
+  `GUARDED_UNSAFE_DISABLE_POLICY=1` and `GUARDED_TEST_KEEP_SW=1` (skip service-worker unregistration), honoured only together with `GUARDED_TEST=1` in an unpackaged
   build (turns the policy engine and judge off, shows a red banner; used to prove the egress layer
   holds on its own). Guard test: `GUARDED_SKIP_GUARD_TEST=1` skips it; it fails if the model is
   cached but does not load, and passes as "unavailable" only when the model is absent *and*
@@ -409,18 +421,18 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/policy.test.ts` | 15 | pass |
 | unit | `test/unit/llm-reader.test.ts` (client, fallback, planner parsing, reader validation, judge) | 13 | pass |
 | unit | `test/unit/agent.test.ts` (agent loop with compromised mock models) | 13 | pass |
-| unit | `test/unit/hardening.test.ts` (review regressions, rounds 1-3) | 23 | pass |
+| unit | `test/unit/hardening.test.ts` (review regressions, rounds 1-4) | 24 | pass |
 | unit | `test/unit/reputation.test.ts` | 11 | pass |
 | unit | `test/unit/egress.test.ts` (proxy + content filter) | 7 | pass |
 | unit | `test/unit/taint.test.ts` | 4 | pass |
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
-| e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-3, ported, plus controls) | 24 | pass |
+| e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-4, ported, plus controls) | 30 | pass |
 | e2e | `test/e2e/benign.spec.ts` | 3 | pass |
 | e2e | `test/e2e/reputation.spec.ts` | 5 | pass |
 | e2e | `test/e2e/guard.spec.ts` | 2 | pass |
-| **total** | | **133** (89 unit + 44 e2e) | **all pass** |
+| **total** | | **140** (90 unit + 50 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 
@@ -448,6 +460,9 @@ What the attack tests assert (planner, reader and judge scripted to be compromis
 | named submit button adds `to=mallory` (review I); page swaps in another named submitter | the clicked submitter is recorded and shown; only that pair may be added | yes | yes |
 | multipart part the parser drops (review J): `;name=`, `name='x'`, LF-only, `name*=`, preamble/epilogue | strict parse → mismatch → re-confirm with raw body; enctype + Content-Type/boundary must match | yes | yes |
 | gated page opens a popup that POSTs after the task (review K) | popups refused from gated tabs, audited | yes | - |
+| service worker registered during the task POSTs after it (review K2) | workers of visited origins unregistered at task end; tab-less requests to those origins gated (each tested alone) | yes | - |
+| submitter value changed on click, `formaction` / `formenctype` button, `e.submitter` renamed (review i2, i3, i5) | recorded submitter + destination; changes re-confirmed | yes | yes |
+| `<input type=image>` submit (review i4, usability) | `name.x` / `name.y` integers allowed: one confirmation | yes | yes |
 | WebRTC from a page loaded before the task / via iframe (review C2, C3) | IP handling policy: 0 UDP packets | yes | - |
 | typing race, Blob body, base64 at offset 1 and 2 (review B) | register-before-type; `getBlobData`; 3-alignment base64 | yes | yes |
 | WebRTC UDP with base64 email in ICE ufrag (review C) | `disable_non_proxied_udp` (0 packets, also in manual mode); no RTCPeerConnection in agent mode | yes | - |
@@ -463,7 +478,7 @@ Benign controls (shop price lookup, article summary: **0 confirmations**; contac
 submission check) complete in both unit and e2e runs.
 
 The reviewer's exploit specs (which assert the bypass *succeeds*) now fail against this build:
-round 1 A-E 5/5, round 2 F, G, G2, H and C2, C3 6/6, round 3 I, J, K 3/3.
+round 1 A-E 5/5, round 2 F, G, G2, H and C2, C3 6/6, round 3 I, J, K 3/3, round 4 K2 1/1 (i2, i3, i5 were already blocked; i4 is now one confirmation).
 
 Guard scores (real `protectai/deberta-v3-base-prompt-injection-v2`, threshold 0.5, all attacker
 controlled text of each fixture incl. hidden text, comments, alt/aria-label; regenerated by
