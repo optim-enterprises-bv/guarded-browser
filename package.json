@@ -1,0 +1,36 @@
+{
+  "name": "guarded-browser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop browser with a prompt-injection-hardened AI agent (planner / quarantined reader / taint policy / guard / judge / human confirmation)",
+  "main": "dist/main/main.js",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "npm run build && electron .",
+    "test": "npm run typecheck && npm run test:unit && npm run test:e2e",
+    "test:unit": "vitest run",
+    "test:e2e": "npm run build && node scripts/run-e2e.mjs",
+    "guard:report": "vitest run test/unit/guard.test.ts",
+    "smoke:local": "npm run build && node --experimental-strip-types scripts/smoke-local.ts",
+    "postinstall": "node node_modules/electron/install.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.3",
+    "electron": "^44.4.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "onnxruntime-node": false,
+    "protobufjs": false
+  }
+}
