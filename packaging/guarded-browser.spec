@@ -12,7 +12,7 @@ Summary:        Desktop web browser with a prompt-injection-hardened AI agent
 # The app is Apache-2.0; the bundled Electron / Chromium and npm modules carry their own licenses
 # (see /opt/guarded-browser/LICENSE.electron.txt, LICENSES.chromium.html and the module licenses).
 License:        Apache-2.0 AND MIT AND BSD-3-Clause AND LicenseRef-Chromium-Bundled
-URL:            https://localhost/guarded-browser
+URL:            https://www.optimcloud.com/work/guarded-browser
 ExclusiveArch:  x86_64
 AutoReqProv:    no
 Requires:       gtk3, nss, alsa-lib, libXScrnSaver, libXtst, mesa-libgbm, libdrm, at-spi2-core, xdg-utils

@@ -43,7 +43,7 @@
   "author": {
     "name": "Optim Enterprises B.V."
   },
-  "homepage": "https://localhost/guarded-browser",
+  "homepage": "https://www.optimcloud.com/work/guarded-browser",
   "build": {
     "appId": "io.guardedbrowser.app",
     "productName": "Guarded Browser",
