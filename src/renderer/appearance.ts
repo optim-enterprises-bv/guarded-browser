@@ -75,7 +75,8 @@ export function initAppearance(gb: Bridge) {
   const msg = (s: string) => ($('theme-msg').textContent = s);
 
   // live preview: every edit re-validates and re-applies (invalid values are simply not applied)
-  $('theme-editor').addEventListener('input', () => {
+  $('theme-editor').addEventListener('input', (e) => {
+    if (!(e.target as HTMLElement).id.startsWith('te-')) return; // the JSON box is not the editor
     const r = ThemeSchema.safeParse(editorTheme());
     if (r.success) {
       preview = r.data;
