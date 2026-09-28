@@ -34,11 +34,12 @@ npm run smoke:local  # one tiny real task against http://127.0.0.1:1234/v1, skip
                             │                                                      ▲ every step
                             ▼                                                      │
  ┌───────────────── PLANNER (privileged LLM, tools) ─────────────────┐             │
- │ sees: task, its own actions, typed reader results, guarded       │             │
- │ element snapshot (role / name / ref). NEVER raw page text.        │             │
+ │ sees: task, its own actions, reader numbers + string HANDLES,    │             │
+ │ sanitised snapshot: fixed-vocab roles, capped + guarded names,    │             │
+ │ origin+path URLs. No page body text; see "What the planner sees". │             │
  └──────────────┬──────────────────────────────▲─────────────────────┘             │
-   proposed     │                              │ typed JSON, tagged untrusted      │
-   action       ▼                              │ (+ provenance url/time)           │
+   proposed     │                              │ numbers / booleans + handles;     │
+   action       ▼                              │ strings stay in code (untrusted)  │
  ┌──────────────────────────┐       ┌──────────┴───────────────┐                   │
  │ POLICY ENGINE (code)     │       │ QUARANTINED READER (LLM) │ no tools          │
  │ taint + origin rules     │       │ page text + narrow query │◄── page text ◄── GUARD
@@ -57,8 +58,10 @@ npm run smoke:local  # one tiny real task against http://127.0.0.1:1234/v1, skip
  ┌──────────────────────── BROWSER (persist:guarded profile) ─────────────────────┐│
  │ tab WebContentsView; snapshots/actions run in an isolated JS world              ││
  │ will-navigate / will-redirect: page-initiated moves to new origins → confirm   ││
- │ webRequest layer: reputation (interstitial / drop) + taint values in URL/body   ││
+ │ webRequest: reputation → uninspectable bodies → unconfirmed form POSTs →       ││
+ │             taint values in URL/body (each needs confirmation during a task)    ││
  │ forward proxy 127.0.0.1:<ephemeral>: reputation → denylist → task allowlist     ││
+ │ WebRTC: disable_non_proxied_udp always; RTCPeerConnection removed in agent mode ││
  └────────────────────────────────────────────────────────────────────────────────┘│
 ```
 
@@ -76,10 +79,26 @@ npm run smoke:local  # one tiny real task against http://127.0.0.1:1234/v1, skip
 
 ### 1. Planner (privileged)
 Native tool calling (`navigate, click, type, select, scroll, submit, extract, finish`); if the server
-returns no `tool_calls` it falls back to a strict `{"action": ..., "args": {...}}` JSON format. It
-receives an accessibility-style snapshot built by our code in an isolated world: role, name (≤80
-chars, screened by the guard), ref id, input type, link target, form target. Only the newest snapshot
-stays in its context. Step limit and task timeout come from settings.
+returns no `tool_calls` it falls back to a strict `{"action": ..., "args": {...}}` JSON format. Only
+the newest snapshot stays in its context. Step limit and task timeout come from settings.
+
+**What the planner sees.** It never gets page body text, but it is *not* free of page-derived
+strings. Every page-derived string in its prompt is listed here, with how it is constrained
+(`src/core/sanitize.ts`, `src/core/agent.ts`):
+
+| string | constraint |
+|---|---|
+| element role | mapped onto a fixed list of ARIA roles, anything else becomes `generic` |
+| input type / form method | fixed lists (`text`, `email`, ... / `get`, `post`) |
+| element name (label, aria-label, alt, text) | whitespace-collapsed, capped at 80 chars, guard-screened |
+| page title | capped at 80, guard-screened |
+| page URL, link target, form action | **origin + path only** (query string and fragment dropped), path capped at 40 chars and guard-screened |
+| action results | fixed strings; driver errors reduced to a Chromium error code (`ERR_ABORTED`); blocked / denied results carry no reasons |
+| reader output | numbers and booleans only; strings are handles (next section) |
+
+So names, titles and paths are still attacker text (≤80 / ≤40 chars each, guarded, labelled
+untrusted). A short injection that the guard misses can still reach the planner through them;
+the policy / egress layers are what stop the consequences.
 
 ### 2. Quarantined reader
 No tools. Gets guarded page text (≤12k chars) wrapped in `<page_content>` plus the planner's query
@@ -88,18 +107,36 @@ string[] | number[]`, `?` for nullable). Output is validated with a strict zod s
 rejected, one retry), strings capped at 200 chars and arrays at 20, re-screened by the guard, then
 registered in the taint registry as `untrusted` with `{source: reader, url, timestamp}`.
 
+**Handles (CaMeL-style, implemented in v1).** Reader strings are not given to the planner. It gets
+`{"price": 19.99, "name": {"handle": "{{$r1.name}}", "type": "string", "length": 11}}` and can put
+`{{$r1.name}}` into `navigate.url`, `type.text`, `select.value` or `finish.answer`; code substitutes
+the value after the planner decided, the policy engine evaluates the substituted (untrusted) value,
+and the confirmation dialog shows it. The judge's history shows handles, never values. Limitation:
+the planner cannot reason about string contents (compare two names, pick the cheaper of two
+products by name) — only numbers and booleans are visible to it. Reader validation errors are
+reported to the planner generically.
+
 ### 3. Taint / data-flow policy (code)
+* **Task allowlist.** Before a task starts the agent panel shows the seed allowlist for editing:
+  origins written with an explicit `http(s)://` in the task plus the current tab's origin. Bare
+  names (`report.zip`, `setup.py`, `shop.example.com`) are never added automatically; type them in
+  the editor if you mean them.
 * Text the planner types or navigates to is **trusted only if it appears verbatim in the user's
   task**; otherwise it is untrusted (its provenance points at the reader value it contains, or at
   "planner-generated, context contains untrusted data from <origins>").
-* Navigation: new origin not named in the task (and not the tab's start origin / an approved
-  origin) → confirm. Untrusted URL while the planner has read content from a *different* origin →
-  confirm. `javascript:`, `file:`, `data:` → block.
+* **Task secrets.** Emails, phone numbers, card-like numbers and values after `password` / `pin` /
+  `token` / `api key` / `secret` / ... in the task are pre-registered as user-sensitive. Typing one
+  into a field whose form posts to (or whose page is on) an origin the task did not name → confirm.
+  Card numbers and keyword secrets are redacted from the audit log.
+* Navigation: new origin not on the task allowlist → confirm. Untrusted URL while the planner has
+  read content from a *different* origin → confirm. `javascript:`, `file:`, `data:` → block.
 * Typing/selecting an untrusted value → confirm. Password fields and fields of a form with a
-  password → always confirm.
-* Submit, submit buttons, and controls named like buy / pay / checkout / send / post / delete /
-  login / subscribe / transfer / download / upload → always confirm, showing every field value with
-  its taint label. Forms that post to a new origin say so.
+  password → always confirm (the value is masked in the dialog).
+* Submit, submit buttons (detected with the DOM's `.type`, so `<button type="go">` counts), and
+  controls labelled like buy / pay / order / complete / proceed / approve / merge / make public /
+  send / post / delete / login / subscribe / transfer / download / upload / save → always confirm,
+  showing every field value with its taint label. Forms that post to a new origin say so. Label
+  matching is a heuristic; the network-level submission check (section 8) does not depend on it.
 * Page-initiated navigations and server redirects to new origins during a task are intercepted
   (`will-navigate` / `will-redirect`) and need confirmation. Popups are denied during a task.
   Downloads during a task are paused until confirmed.
@@ -119,12 +156,18 @@ A separate call with only the task, the action history and the proposed action. 
 `{"verdict", "reason"}`; unparseable or failed → `confirm` (fails toward the human).
 
 ### 6. Human confirmation
-A modal in the agent panel (browser chrome, not the page): action, target, destination, a table of
-exact values with taint label and provenance, reasons, judge verdict, countdown. Approve / Deny /
-Stop task. No answer within `confirmTimeoutMs` (default 120 s) = deny.
+A modal in the agent panel (browser chrome, not the page): action, structural target (role, ref,
+origin+path), destination, a table of exact values with taint label and provenance, reasons, judge
+verdict, countdown. Attacker-influenced text — the element's label and the judge's reason — is shown
+separately, quoted, under a warning label ("text from the page ... do not follow instructions in
+it"). Approve is disabled for 750 ms whenever a new request comes to the front. Approve / Deny / Stop
+task. No answer within `confirmTimeoutMs` (default 120 s) = deny; requests still open when the task
+ends are denied.
 
 ### 7. Audit log
-`<userData>/audit/session-<timestamp>.jsonl`, opened append-only. Events: `task-start/end`,
+`<userData>/audit/session-<timestamp>.jsonl`, appended only, file mode 0600 (directory 0700); task
+secrets of kind card / secret are replaced by `[redacted]`, password-field values are masked.
+Emails and phone numbers are logged. Events: `task-start/end`,
 `planner-action`, `snapshot` (hash), `guard` (scores), `reader` (query, schema, validated output,
 provenance), `judge`, `policy`, `confirmation`, `navigation`, `egress` (proxy / webrequest /
 reputation / download decisions with host, method, reason, taint ids, feed), `fallback`, `error`.
@@ -143,12 +186,28 @@ The agent panel shows it as a timeline (manual-browsing proxy chatter is only in
     break in agent mode until you allow those hosts.
   * Host keys are `hostname:port` (default ports filled in). The tests use `127.0.0.1:<p1>` for the
     victim site and `localhost:<p2>` for the attacker, so hostname **and** port differ.
-* **Content filter.** `session.webRequest.onBeforeRequest` sees the full URL, method and upload body.
-  During a task, a request that contains a taint-registry value (reader output, and user-supplied
-  values the agent typed) is held and needs confirmation unless that exact flow (value id → host) was
-  already confirmed; denied/timeout → cancelled, and the same flow is not asked again that task.
-  Matching normalises case, URL-encoding (`%20` / `+`, double encoding) and base64 (std / no-pad /
-  url-safe) and ignores values shorter than 6 chars. Manual browsing: matches are only logged.
+* **webRequest layer** (`session.webRequest.onBeforeRequest`: full URL, method, upload body), in
+  order, during a task:
+  1. *Uninspectable bodies.* Blob parts are read with `session.getBlobData`; parts that still cannot
+     be read (file uploads, failed blobs) need confirmation.
+  2. *Form submissions.* A POST / PUT / PATCH / DELETE top-level (main- or sub-frame) request from the
+     agent's tab passes only if the action layer confirmed exactly that submission (single use, 30 s);
+     otherwise it needs its own confirmation showing the body fields. This catches `form.submit()`
+     from page JS and anything the snapshot heuristics mislabel.
+  3. *Tracked values.* A request containing a taint-registry value (reader output, task secrets,
+     values the agent typed — registered *before* they are typed) needs confirmation unless that flow
+     (value id → host) was confirmed. Matching: case, URL-encoding (`%20` / `+`, double), and base64
+     at all three byte alignments (std and url-safe); values shorter than 6 chars are not matched.
+  Denied / timed-out flows are cancelled and not asked again in that task. Manual browsing: tracked
+  values are only logged. JS `fetch`/XHR POSTs are *not* covered by step 2 (only by 1 and 3).
+* **WebRTC.** Every tab uses `setWebRTCIPHandlingPolicy('disable_non_proxied_udp')` (no direct UDP,
+  in any mode). During a task a sandboxed tab preload also removes `RTCPeerConnection` from the
+  page's main frame before page scripts run.
+* **Speculative network.** `--dns-prefetch-disable` and prerender/prefetch features are switched
+  off. With a fixed proxy, Chromium sends host names to the proxy instead of resolving them.
+* **Downloads.** Manual browsing: Electron's save dialog. During a task: the transfer is paused and
+  written to a private staging dir; only after Approve *and* completion is it moved to the downloads
+  folder under a de-duplicated name (`report (1).bin`), never overwriting.
 
 ### 9. Reputation feeds (network layer, manual and agent mode)
 Keyless public feeds, downloaded at startup when older than 24 h and then every 24 h (sequentially,
@@ -180,13 +239,17 @@ requests to listed hosts are dropped silently. Every hit is audited with the fee
 ## Threat model
 
 **Defended (enforced in code, tested with compromised mock models):**
-* Page text / hidden text / alt / aria-label / comments / fake system prompts / review injections
-  reaching a model that can act: the planner never sees raw page text; the reader cannot act.
-* A fooled planner exfiltrating data by navigation, form fill, submit, or typing untrusted values:
-  confirmation with the exact value and destination, default deny.
+* Page body text reaching a model that can act: the planner gets no body text and no reader strings
+  (handles); the reader cannot act. Short page-derived labels / titles / paths still reach it, capped
+  and guarded (see "What the planner sees").
+* A fooled planner exfiltrating data by navigation, form fill, submit, or typing untrusted values or
+  task secrets: confirmation with the exact value and destination, default deny.
+* Form submissions the snapshot heuristics miss (`<button type="go">`, `form.submit()` from page JS):
+  held at the network layer.
 * Pages moving the agent to attacker origins by redirect chains or JS navigation: intercepted.
-* Pages exfiltrating by their own JavaScript (img / fetch / sendBeacon) during a task: blocked by
-  the proxy host allowlist, and by the content filter even on allowed hosts.
+* Pages exfiltrating by their own JavaScript during a task: requests to hosts off the allowlist are
+  blocked by the proxy; requests to allowed hosts are held when they carry a *tracked* value (plain,
+  URL-encoded or base64, including Blob bodies). WebRTC UDP is disabled.
 * Known-bad hosts (phishing / malware lists) in any mode.
 * The agent overriding the user's decisions: the judge cannot downgrade, the agent cannot proceed
   past a reputation interstitial, confirmations live in browser chrome.
@@ -199,24 +262,37 @@ requests to listed hosts are dropped silently. Every hit is audited with the fee
   user who clicks Approve lets the flow through. The same for "Allow for this task" on a blocked host.
 * **UI spoofing inside pages.** A page can draw a fake dialog inside its own area. Our real dialogs
   are only in the agent panel / interstitial, which pages cannot draw on; users still have to know that.
-* **Snapshot names and link targets are untrusted text shown to the planner.** They are truncated
-  and guarded, not eliminated; a planner can be steered by them (that is why the policy exists).
+* **Short page-derived strings still reach the planner** (names ≤80, titles ≤80, paths ≤40 chars),
+  guard-screened but not eliminated; a planner can be steered by them. That is why the policy and
+  egress layers exist.
+* **Page-JS exfiltration to an allowed host is only partly covered.** Data the page already has
+  (its own content, cookies, anything the user typed there) can be sent anywhere on the allowlist;
+  the content filter only recognises values in the taint registry, and JS `fetch` POSTs are not
+  subject to the form-submission check.
+* **iframes.** Snapshots and page text cover the main frame only, so the agent cannot read or operate
+  inside iframes; the RTCPeerConnection removal applies to the main frame only. Network rules (proxy,
+  webRequest, WebRTC IP policy, reputation) apply to all frames.
 * **The planner's answer** is based on untrusted data and can be wrong or manipulated (it is only
   displayed, labelled as such).
 * **HTTPS is only filtered by host** (`CONNECT host:port`); no TLS interception. The content filter
   still sees full HTTPS URLs and bodies inside Chromium via webRequest, but only for this session.
-* **Taint tracking is value matching**, not full information flow: paraphrased, split, hashed or
-  otherwise transformed data (or anything shorter than 6 chars) is not recognised. Snapshot names
-  are not in the registry. Page JS that reads a typed value and sends it *after* the task ends
-  (manual mode = log-only) is not blocked.
-* **Same-origin writes are allowed** (except when they carry registered values): a malicious site
-  can still receive whatever the user asked the agent to type into it.
+* **Taint tracking is value matching**, not full information flow: paraphrased, split, hashed,
+  encrypted, compressed or otherwise transformed data (hex, base32, reversed, ...) and anything
+  shorter than 6 chars is not recognised. Snapshot names are not in the registry. Page JS that
+  reads a typed value and sends it *after* the task ends (manual mode = log-only) is not blocked.
+* **User-sensitive detection is pattern-based**: only emails, phone/card-like numbers and values
+  written after a keyword (`password: ...`) are recognised as task secrets. Other personal data
+  in the task (a home address, a name) is trusted and can be typed on task-named origins without
+  a confirmation.
+* **Same-origin writes are allowed** (except when they carry registered values): a malicious site on
+  the allowlist can still receive whatever the user asked the agent to type into it.
 * **Reputation feeds** target phishing / malware, not AI-injection; they lag new domains, and
   attackers cloak (serve clean pages to scanners, bad pages to victims). I know of no public
   AI-injection-specific host feed; none was found while building this.
 * **Third-party-heavy sites break in agent mode** until their CDN/API hosts are allowed.
 * Denylist/allowlist host matching is on hostnames; IP literals and DNS rebinding are not handled
-  specially. WebRTC and DNS-over-HTTPS from pages are not specifically filtered.
+  specially. WebRTC over TCP/TURN goes through the proxy (host-checked) but its payload is not
+  inspected. DNS-over-HTTPS from page JS is ordinary HTTPS to an allowed or blocked host.
 * Cloud fallback, when you enable it, sends task, snapshots (planner) and page text (reader) to that
   provider.
 
@@ -248,20 +324,24 @@ Electron's per-app directory (`~/.config/guarded-browser` on Linux; override wit
   enabled; the key is read from the named env var at request time and never stored. The agent panel
   shows a **CLOUD FALLBACK ACTIVE** banner while it is in use.
 * Environment: `GUARDED_USER_DATA`, `GUARDED_START_URL`, `GUARDED_GUARD=off`,
-  `GUARDED_CONFIRM_TIMEOUT_MS`, `GUARDED_MODEL_CACHE`, and the test-only
-  `GUARDED_UNSAFE_DISABLE_POLICY=1` (turns the policy engine and judge off, shows a red banner; used
-  to prove the egress layer holds on its own).
+  `GUARDED_CONFIRM_TIMEOUT_MS`, `GUARDED_MODEL_CACHE`, `GUARDED_DOWNLOAD_DIR`, and the test-only
+  `GUARDED_UNSAFE_DISABLE_POLICY=1`, honoured only together with `GUARDED_TEST=1` in an unpackaged
+  build (turns the policy engine and judge off, shows a red banner; used to prove the egress layer
+  holds on its own). Guard test: `GUARDED_SKIP_GUARD_TEST=1` skips it; it fails if the model is
+  cached but does not load, and passes as "unavailable" only when the model is absent *and*
+  `GUARDED_ALLOW_GUARD_UNAVAILABLE=1`.
 
 ## Layout
 
 ```
-src/core/       agent loop, planner, reader, judge, policy, taint, guard, egress proxy, reputation,
-                llm client, config, audit (no Electron imports; unit-testable)
+src/core/       agent loop, planner, reader + handles, judge, policy, taint, sanitize, guard, egress
+                proxy, reputation, llm client, config, audit (no Electron imports; unit-testable)
 src/main/       Electron main: window, tabs (WebContentsView), isolated-world page scripts,
-                confirmation broker, egress/reputation wiring, preload bridge
+                confirmation broker, egress/reputation wiring, UI preload bridge, tab preload
+                (WebRTC removal), feed-parsing worker
 src/renderer/   browser chrome + agent panel (plain DOM)
 test/unit/      vitest: policy, taint, reader/llm/planner/judge, egress proxy, reputation, agent loop, guard
-test/e2e/       Playwright _electron: benign, attacks, reputation, guard
+test/e2e/       Playwright _electron: benign, attacks, regressions (review), reputation, guard
 test/helpers/   mock OpenAI server, fixture + attacker servers, fake browser driver
 test/fixtures/  attack and benign pages, fixture threat feed
 scripts/        build, e2e runner (xvfb), smoke:local
@@ -278,16 +358,18 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/policy.test.ts` | 15 | pass |
 | unit | `test/unit/llm-reader.test.ts` (client, fallback, planner parsing, reader validation, judge) | 13 | pass |
 | unit | `test/unit/agent.test.ts` (agent loop with compromised mock models) | 13 | pass |
+| unit | `test/unit/hardening.test.ts` (review regressions) | 13 | pass |
 | unit | `test/unit/reputation.test.ts` | 11 | pass |
 | unit | `test/unit/egress.test.ts` (proxy + content filter) | 7 | pass |
 | unit | `test/unit/taint.test.ts` | 4 | pass |
 | unit | `test/unit/guard.test.ts` (real model) | 2 | pass |
 | unit | `test/unit/audit.test.ts` | 1 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
+| e2e | `test/e2e/regressions.spec.ts` (review exploits, ported) | 10 | pass |
 | e2e | `test/e2e/benign.spec.ts` | 3 | pass |
 | e2e | `test/e2e/reputation.spec.ts` | 5 | pass |
 | e2e | `test/e2e/guard.spec.ts` | 2 | pass |
-| **total** | | **86** (66 unit + 20 e2e) | **all pass** |
+| **total** | | **109** (79 unit + 30 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 
@@ -306,10 +388,23 @@ What the attack tests assert (planner, reader and judge scripted to be compromis
 | listed host subresources (manual browsing) | reputation block in proxy/webRequest, audited with feed name | yes | yes |
 | parent-domain listing, allowlist override, corrupt/failed feed download | reputation db | allowlist | yes |
 | judge fooled / judge says allow on a code-confirm | judge can only escalate | - | yes |
-| injected text in reviews / hidden text | guard withholds chunks; planner never sees page text | guard on | yes |
+| injected text in reviews / hidden text | guard withholds chunks; planner gets no body text, reader strings only as handles | guard on | yes |
+| injection in `role=`, URL fragment, link / form-action query (review A) | fixed ARIA roles; URLs shown as origin + path only | yes | yes |
+| typing race, Blob body, base64 at offset 1 and 2 (review B) | register-before-type; `getBlobData`; 3-alignment base64 | yes | yes |
+| WebRTC UDP with base64 email in ICE ufrag (review C) | `disable_non_proxied_udp` (0 packets, also in manual mode); no RTCPeerConnection in agent mode | yes | - |
+| `<button type="go">` checkout / "Complete my order" (review D, E) | `.type === 'submit'`, wider label list, network submission check | yes | yes |
+| `form.submit()` from page JS on a plain div | webRequest form-submission check: denied → nothing sent, approved → sent | yes | - |
+| task download | staged, confirmed; denied → no file; approved → unique name, no overwrite | yes | - |
+| filenames in the task (`report.zip`) | not allowlisted; editable allowlist at task start | yes | yes |
+| task email typed into a form posting to an unnamed origin | task-secret rule → confirm | yes | yes |
+| attacker text in the dialog | label + judge reason quoted and labelled; 750 ms Approve delay | yes | yes |
 
 Benign controls (shop price lookup, article summary: **0 confirmations**; contact form: exactly
-**1** confirmation, the always-confirmed submit) complete in both unit and e2e runs.
+**1** confirmation, the always-confirmed submit, whose approval also covers the network-level
+submission check) complete in both unit and e2e runs.
+
+The reviewer's original exploit specs (which assert the bypass *succeeds*) now fail 5/5 against
+this build.
 
 Guard scores (real `protectai/deberta-v3-base-prompt-injection-v2`, threshold 0.5, all attacker
 controlled text of each fixture incl. hidden text, comments, alt/aria-label; regenerated by
