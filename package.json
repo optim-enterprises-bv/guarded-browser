@@ -13,7 +13,7 @@
     "test:unit": "vitest run",
     "test:e2e": "npm run build && node scripts/run-e2e.mjs",
     "guard:report": "vitest run test/unit/guard.test.ts",
-    "smoke:local": "npm run build && node --experimental-strip-types scripts/smoke-local.ts",
+    "smoke:local": "node scripts/smoke-local.mjs",
     "postinstall": "node node_modules/electron/install.js"
   },
   "dependencies": {

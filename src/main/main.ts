@@ -11,7 +11,8 @@ import { EgressController, hostKey, startProxy, type ProxyHandle } from '../core
 import { NullGuard, TransformersGuard } from '../core/guard';
 import { LlmClient } from '../core/llm';
 import { originOf } from '../core/policy';
-import { ReputationDb, normalizeHost, safeBrowsingLookup } from '../core/reputation';
+import { HostSet, ReputationDb, normalizeHost, safeBrowsingLookup, type FeedBuilder } from '../core/reputation';
+import { Worker } from 'node:worker_threads';
 import type { ConfirmOutcome, Guard } from '../core/types';
 import { ConfirmBroker } from './confirm';
 import { ElectronDriver, TabManager, type Tab } from './tabs';
@@ -387,7 +388,17 @@ app.whenReady().then(async () => {
   proxy = await startProxy(egress);
 
   // Reputation: cached feeds load now, downloads happen in the background (never blocks startup).
-  reputation = new ReputationDb(join(ud, 'reputation'), settings.reputation.feeds);
+  const workerBuilder: FeedBuilder = (file, format) =>
+    new Promise((resolve, reject) => {
+      const w = new Worker(join(__dirname, 'feed-worker.js'), { workerData: { file, format } });
+      w.once('message', (m: { data?: string; offs?: Uint32Array; count?: number; error?: string }) => {
+        if (m.error || !m.data || !m.offs) reject(new Error(m.error ?? 'feed worker failed'));
+        else resolve({ set: HostSet.fromParts(m.data, m.offs), count: m.count ?? 0 });
+        void w.terminate();
+      });
+      w.once('error', reject);
+    });
+  reputation = new ReputationDb(join(ud, 'reputation'), settings.reputation.feeds, undefined, workerBuilder);
   let repTimer: NodeJS.Timeout | null = null;
   reputation.onChange(() => {
     repTimer ??= setTimeout(() => {

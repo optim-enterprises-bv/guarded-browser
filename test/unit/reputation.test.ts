@@ -89,7 +89,7 @@ describe('reputation db', () => {
       throw new Error('ECONNREFUSED');
     });
     writeFileSync(join(r2.feedDir, 'f1.txt'), 'cached.example\n');
-    r2.loadCache();
+    await r2.loadCache();
     await r2.refresh(true);
     expect(r2.check('cached.example')).toMatchObject({ listed: true });
     expect(r2.status()[0]).toMatchObject({ source: 'cache', failures: 1 });

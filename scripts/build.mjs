@@ -6,6 +6,7 @@ const common = { bundle: true, sourcemap: true, logLevel: 'warning', target: 'es
 const external = ['electron', '@huggingface/transformers', 'onnxruntime-node'];
 
 await build({ ...common, entryPoints: ['src/main/main.ts'], outfile: 'dist/main/main.js', platform: 'node', format: 'cjs', external });
+await build({ ...common, entryPoints: ['src/main/feed-worker.ts'], outfile: 'dist/main/feed-worker.js', platform: 'node', format: 'cjs', external });
 await build({ ...common, entryPoints: ['src/main/preload.ts'], outfile: 'dist/main/preload.js', platform: 'node', format: 'cjs', external });
 await build({ ...common, entryPoints: ['src/renderer/renderer.ts'], outfile: 'dist/renderer/renderer.js', platform: 'browser', format: 'iife' });
 mkdirSync('dist/renderer', { recursive: true });

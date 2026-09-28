@@ -7,7 +7,7 @@
 // - a user-editable local blocklist and allowlist; the allowlist wins
 // - these feeds target phishing / malware; they are not AI-injection specific
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { domainToASCII } from 'node:url';
 
@@ -69,7 +69,18 @@ export function normalizeHost(input: string): string {
 /** Parse one feed. Comments (#, !) and blank lines are ignored. */
 export function parseFeed(text: string, format: FeedFormat): string[] {
   const out: string[] = [];
-  for (const raw of text.split('\n')) {
+  const plain = /^[a-z0-9_][a-z0-9_.-]*$/;
+  // manual line loop instead of split(): the big feeds have ~1M lines and split() doubles the garbage
+  for (let start = 0; start < text.length; ) {
+    let end = text.indexOf('\n', start);
+    if (end < 0) end = text.length;
+    const raw = text.slice(start, end);
+    start = end + 1;
+    // fast path: most domain-feed lines are already normalised
+    if (format === 'domains' && plain.test(raw)) {
+      out.push(raw);
+      continue;
+    }
     const line = raw.trim();
     if (!line || line.startsWith('#') || line.startsWith('!')) continue;
     let host = '';
@@ -96,7 +107,72 @@ export function parents(host: string): string[] {
   return out;
 }
 
+/**
+ * Compact, immutable host set: one sorted newline-joined string plus an offset table, looked up by
+ * binary search. ~25 bytes/host instead of ~65 for a Set<string>; the feeds have >1M hosts.
+ */
+export class HostSet {
+  private constructor(
+    private readonly data: string,
+    private readonly offs: Uint32Array,
+  ) {}
+
+  /** Builds the set; sorts and dedupes `hosts` in place (no extra copies: feeds are large). */
+  static from(hosts: string[]): HostSet {
+    hosts.sort();
+    let w = 0;
+    for (let i = 0; i < hosts.length; i++) if (w === 0 || hosts[i] !== hosts[w - 1]) hosts[w++] = hosts[i];
+    hosts.length = w;
+    const sorted = hosts;
+    const offs = new Uint32Array(sorted.length + 1);
+    let pos = 0;
+    sorted.forEach((h, i) => {
+      offs[i] = pos;
+      pos += h.length + 1;
+    });
+    offs[sorted.length] = pos;
+    // flatten: a fresh one-byte string that does not retain the downloaded text
+    return new HostSet(sorted.join('\n') + '\n', offs);
+  }
+
+  /** Rebuild from parts produced elsewhere (a worker thread). */
+  static fromParts(data: string, offs: Uint32Array): HostSet {
+    return new HostSet(data, offs);
+  }
+
+  parts(): { data: string; offs: Uint32Array } {
+    return { data: this.data, offs: this.offs };
+  }
+
+  get size(): number {
+    return this.offs.length - 1;
+  }
+
+  has(host: string): boolean {
+    let lo = 0;
+    let hi = this.offs.length - 2;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      const v = this.data.slice(this.offs[mid], this.offs[mid + 1] - 1);
+      if (v === host) return true;
+      if (v < host) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return false;
+  }
+}
+
 export type Fetcher = (url: string) => Promise<{ status: number; text: string }>;
+
+/** Parses a cached feed file into a HostSet. The app runs this in a worker thread (see
+ *  src/main/feed-worker.ts) so parse garbage never lands in the main process heap. */
+export type FeedBuilder = (file: string, format: FeedFormat) => Promise<{ set: HostSet; count: number }>;
+
+export const inProcessBuilder: FeedBuilder = async (file, format) => {
+  const hosts = parseFeed(readFileSync(file, 'utf8'), format);
+  const count = hosts.length;
+  return { set: HostSet.from(hosts), count };
+};
 
 const defaultFetcher: Fetcher = async (url) => {
   const r = await fetch(url, { signal: AbortSignal.timeout(120_000), headers: { 'user-agent': 'guarded-browser/0.1 (feed update)' } });
@@ -104,7 +180,7 @@ const defaultFetcher: Fetcher = async (url) => {
 };
 
 export class ReputationDb {
-  private sets = new Map<string, Set<string>>();
+  private sets = new Map<string, HostSet>();
   private statuses = new Map<string, FeedStatus>();
   private localBlock = new Set<string>();
   private localAllow = new Set<string>();
@@ -118,6 +194,7 @@ export class ReputationDb {
     dir: string,
     private feeds: FeedConfig[],
     private readonly fetcher: Fetcher = defaultFetcher,
+    private readonly builder: FeedBuilder = inProcessBuilder,
   ) {
     this.feedDir = join(dir, 'feeds');
     mkdirSync(this.feedDir, { recursive: true });
@@ -159,16 +236,20 @@ export class ReputationDb {
   }
 
   /** Load every enabled feed from the local cache (no network). */
-  loadCache() {
+  async loadCache() {
     this.reloadLocalLists();
     for (const f of this.feeds) {
       if (!f.enabled) continue;
       const file = this.cacheFile(f.name);
       if (!existsSync(file)) continue;
-      const hosts = parseFeed(readFileSync(file, 'utf8'), f.format);
-      this.sets.set(f.name, new Set(hosts));
       const st = this.statuses.get(f.name)!;
-      Object.assign(st, { entries: hosts.length, fetchedAt: statSync(file).mtime.toISOString(), source: 'cache' });
+      try {
+        const { set, count } = await this.builder(file, f.format);
+        this.sets.set(f.name, set);
+        Object.assign(st, { entries: count, fetchedAt: statSync(file).mtime.toISOString(), source: 'cache' });
+      } catch (e) {
+        st.lastError = `cache unreadable: ${(e as Error).message.slice(0, 200)}`;
+      }
     }
     this.updateAges();
     this.changed();
@@ -194,16 +275,22 @@ export class ReputationDb {
       const r = await this.fetcher(f.url);
       if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
       if (/<html[\s>]/i.test(r.text.slice(0, 2000))) throw new Error('response looks like HTML, not a feed');
-      const hosts = parseFeed(r.text, f.format);
-      if (hosts.length === 0) throw new Error('feed parsed to 0 entries');
-      const prev = this.sets.get(f.name)?.size ?? 0;
-      if (prev > 1000 && hosts.length < prev * 0.1) throw new Error(`feed shrank from ${prev} to ${hosts.length} entries; treating as corrupt`);
       const file = this.cacheFile(f.name);
       const tmp = `${file}.tmp-${process.pid}`;
       writeFileSync(tmp, r.text);
-      renameSync(tmp, file); // atomic replace
-      this.sets.set(f.name, new Set(hosts));
-      Object.assign(st, { entries: hosts.length, fetchedAt: new Date().toISOString(), ageHours: 0, source: 'network', lastError: undefined });
+      let built: { set: HostSet; count: number };
+      try {
+        built = await this.builder(tmp, f.format);
+        if (built.count === 0) throw new Error('feed parsed to 0 entries');
+        const prev = this.sets.get(f.name)?.size ?? 0;
+        if (prev > 1000 && built.set.size < prev * 0.1) throw new Error(`feed shrank from ${prev} to ${built.set.size} entries; treating as corrupt`);
+      } catch (e) {
+        rmSync(tmp, { force: true });
+        throw e;
+      }
+      renameSync(tmp, file); // atomic replace; the previous copy stays until this point
+      this.sets.set(f.name, built.set);
+      Object.assign(st, { entries: built.count, fetchedAt: new Date().toISOString(), ageHours: 0, source: 'network', lastError: undefined });
       this.changed();
       return true;
     } catch (e) {
@@ -225,8 +312,7 @@ export class ReputationDb {
 
   /** Non-blocking start: cache now, network in the background, then every 24 h. */
   start() {
-    this.loadCache();
-    void this.refresh();
+    void this.loadCache().then(() => this.refresh());
     this.timer = setInterval(() => void this.refresh(), REFRESH_MS);
     this.timer.unref();
   }
