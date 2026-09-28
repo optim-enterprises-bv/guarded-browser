@@ -36,6 +36,8 @@ export interface Geometry {
 
 export class Tab {
   guardFlags = 0;
+  /** favicon URLs reported by the page (page-controlled; only used for the optional site accent) */
+  favicons: string[] = [];
   constructor(
     readonly id: number,
     readonly view: WebContentsView,

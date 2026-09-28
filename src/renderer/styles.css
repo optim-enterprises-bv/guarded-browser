@@ -2,16 +2,17 @@
   --bg: #f6f7f9; --fg: #1d2330; --muted: #6b7385; --line: #d9dde5; --card: #fff;
   --accent: #2f5bd3; --danger: #c0392b; --warn: #b7791f; --ok: #2f855a;
   --top: 84px; --panel: 440px;
-  font: 13px/1.4 system-ui, sans-serif;
+  --radius: 6px; --radius-sm: 4px; --pad: 4px 10px; --font-size: 13px; --accent-fg: #ffffff; --highlight: #fdf0d5;
+  font: var(--font-size)/1.4 system-ui, sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #16181d; --fg: #e3e6ec; --muted: #9aa1b0; --line: #2e323b; --card: #1e2128; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); height: 100vh; overflow: hidden; }
-button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: var(--radius); padding: var(--pad); cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 button.danger { color: var(--danger); border-color: var(--danger); }
 button.link { border: none; background: none; color: var(--accent); padding: 0; margin-left: auto; }
 .hidden { display: none !important; }
@@ -109,7 +110,7 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .lock-notice { background: #fff4e5 !important; color: #3e2723 !important; border: 2px solid #e65100 !important; border-radius: 6px !important; }
 .lock-notice *:not(button) { color: #3e2723 !important; }
 .lock-notice textarea { background: #ffffff !important; border: 1px solid #555555 !important; }
-.lock-notice button { background: #ffffff !important; color: #111111 !important; border: 1px solid #111111 !important; }
+.lock-notice button { background: #ffffff !important; color: #111111 !important; border: 1px solid #111111 !important; border-radius: 6px !important; padding: 4px 10px !important; font-size: 13px !important; }
 .lock-notice button.primary { background: #0b57d0 !important; color: #ffffff !important; border-color: #0b57d0 !important; }
 .lock-badge { background: #ffe082 !important; color: #3e2723 !important; border: 1px solid #e65100 !important; padding: 3px 8px !important; border-radius: 10px !important; font-size: 12px !important; font-weight: 700 !important; }
 .lock-flag { color: #b00020 !important; background: #ffe082 !important; font-weight: 700 !important; padding: 0 4px !important; border-radius: 3px !important; }
@@ -117,3 +118,7 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .pane.lock-agent-frame { border: 3px solid #ffd600 !important; outline: 1px solid #000000 !important; border-radius: 0 !important; }
 .phead.lock-agent-head { background: #000000 !important; color: #ffd600 !important; }
 .lock-agent-badge { background: #ffd600 !important; color: #000000 !important; font-weight: 800 !important; font-size: 11px !important; padding: 1px 6px !important; letter-spacing: .05em !important; }
+
+#settings-form fieldset, [data-testid=appearance], #theme-editor { border-radius: var(--radius); }
+#theme-editor textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 11px; }
+[data-testid=appearance] label, #theme-editor label { display: grid; grid-template-columns: 120px 1fr; gap: 6px; margin: 3px 0; align-items: center; }

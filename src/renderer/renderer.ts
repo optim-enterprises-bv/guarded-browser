@@ -2,6 +2,7 @@
 
 import type { Settings } from '../core/config';
 import type { ConfirmRequest } from '../core/types';
+import { initAppearance } from './appearance';
 
 interface Bridge {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
@@ -454,7 +455,10 @@ function setPath(obj: any, path: string, value: unknown) {
 }
 
 $('open-settings').onclick = () => void openSettings();
-$('s-close').onclick = () => $('settings').classList.add('hidden');
+$('s-close').onclick = () => {
+  $('settings').classList.add('hidden');
+  appearanceUi.closePreview();
+};
 $('s-save').onclick = async () => {
   if (!current) return;
   const s = structuredClone(current);
@@ -478,6 +482,8 @@ $('s-save').onclick = async () => {
 };
 
 // ---------- boot ----------
+const appearanceUi = initAppearance(gb);
+void appearanceUi.load();
 gb.on('state', renderState);
 gb.on('tabs', (l: TabInfo[]) => {
   renderTabs(l);

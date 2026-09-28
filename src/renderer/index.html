@@ -81,6 +81,46 @@
     <div class="card scroll">
       <h2>Settings</h2>
       <p class="muted small">API keys are never stored: give the <em>name</em> of an environment variable.</p>
+      <fieldset data-testid="appearance">
+        <legend>appearance (browser chrome only; security dialogs keep a fixed style)</legend>
+        <label>Theme <select id="ap-theme" data-testid="theme-select"></select></label>
+        <label>Schedule <select id="ap-mode" data-testid="schedule-mode">
+          <option value="off">off (use the theme above)</option>
+          <option value="times">day / night by clock</option>
+          <option value="system">day / night following the system</option>
+        </select></label>
+        <label>Day theme <select id="ap-day" data-testid="schedule-day"></select></label>
+        <label>Night theme <select id="ap-night" data-testid="schedule-night"></select></label>
+        <label>Day starts <input id="ap-day-start" type="time" data-testid="schedule-day-start"></label>
+        <label>Night starts <input id="ap-night-start" type="time" data-testid="schedule-night-start"></label>
+        <label>Accent from site <input id="ap-site" type="checkbox" data-testid="site-accent"></label>
+        <p class="muted small">Uses the page's theme-color or favicon colour, blended and clamped to 4.5:1 contrast. Never used for security UI.</p>
+        <button id="ap-save" class="primary" data-testid="appearance-save">Apply appearance</button>
+      </fieldset>
+      <fieldset id="theme-editor" data-testid="theme-editor">
+        <legend>theme editor (live preview)</legend>
+        <label>Name <input id="te-name" data-testid="te-name"></label>
+        <label>Base <select id="te-base"><option value="light">light</option><option value="dark">dark</option></select></label>
+        <label>Background <input id="te-background" type="color" data-testid="te-background"></label>
+        <label>Foreground <input id="te-foreground" type="color" data-testid="te-foreground"></label>
+        <label>Accent <input id="te-accent" type="color" data-testid="te-accent"></label>
+        <label>Highlight <input id="te-highlight" type="color" data-testid="te-highlight"></label>
+        <label>Corner radius <input id="te-radius" type="range" min="0" max="16" step="1"></label>
+        <label>Density <select id="te-density"><option value="normal">normal</option><option value="compact">compact</option></select></label>
+        <div class="row">
+          <button id="te-load">Start from current</button>
+          <button id="te-save" class="primary" data-testid="theme-save">Save theme</button>
+          <button id="te-revert">Revert preview</button>
+        </div>
+        <textarea id="theme-json" rows="5" spellcheck="false" data-testid="theme-json" placeholder="theme JSON"></textarea>
+        <div class="row">
+          <button id="theme-import" data-testid="theme-import">Import JSON</button>
+          <button id="theme-export" data-testid="theme-export">Export current</button>
+          <button id="theme-import-file">Import file…</button>
+          <button id="theme-export-file">Export to file…</button>
+        </div>
+        <span id="theme-msg" class="muted" data-testid="theme-msg"></span>
+      </fieldset>
       <div id="settings-form"></div>
       <fieldset><legend>reputation feeds</legend>
         <table id="rep-table" data-testid="reputation-table"></table>

@@ -1,8 +1,8 @@
 // Electron main process: window, tabs, agent wiring, egress layers, confirmation broker, IPC.
 
-import { app, BrowserWindow, ipcMain, session, type Session, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { AgentTask } from '../core/agent';
@@ -18,6 +18,8 @@ import type { ConfirmOutcome, ConfirmRequest, Guard, PolicyResult } from '../cor
 import { ConfirmBroker } from './confirm';
 import { ElectronDriver, TabManager, type Tab } from './tabs';
 import type { TileLayout } from './tile-layout';
+import { ISOLATED_WORLD } from './page-scripts';
+import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type RGB, type Theme } from '../core/theme';
 
 if (process.env.GUARDED_USER_DATA) app.setPath('userData', process.env.GUARDED_USER_DATA);
 
@@ -59,6 +61,73 @@ const postTaskGuard = new Set<number>();
  */
 const guardedOrigins = new Set<string>();
 let guardedSession: Session | null = null;
+
+/** Validate and store a theme (JSON text from the editor, the import box or a file). */
+function importTheme(json: unknown): { ok: boolean; error?: string; theme?: Theme } {
+  if (typeof json !== 'string' || json.length > 64 * 1024) return { ok: false, error: 'theme must be JSON text up to 64 KB' };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return { ok: false, error: 'not valid JSON' };
+  }
+  const r = ThemeSchema.safeParse(raw);
+  if (!r.success) return { ok: false, error: r.error.issues.map((i) => `${i.path.join('.') || 'theme'}: ${i.message}`).join('; ').slice(0, 400) };
+  if (r.data.name === 'System' || BUILTIN_THEMES.some((b) => b.name === r.data.name)) return { ok: false, error: `"${r.data.name}" is a built-in theme name` };
+  const custom = [...settings.appearance.custom.filter((t) => t.name !== r.data.name), r.data].slice(-50);
+  settings.appearance = { ...settings.appearance, custom };
+  saveSettings(settingsFile, settings);
+  sendUI('appearance', settings.appearance);
+  return { ok: true, theme: r.data };
+}
+
+/**
+ * Optional site accent: the active page's <meta name="theme-color">, else the favicon's dominant
+ * colour. Page-controlled, so it is parsed strictly (parseColor) and only ever sent as #rrggbb;
+ * the renderer applies it to --accent, which security UI does not use.
+ */
+async function updateSiteAccent() {
+  const t = tabs?.active();
+  if (!settings.appearance.siteAccent || !t) return sendUI('site-accent', null);
+  let color: string | null = null;
+  let source = '';
+  try {
+    const raw = await t.wc.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD + 1, [
+      { code: `(() => { const m = document.querySelector('meta[name="theme-color" i]'); return m ? String(m.getAttribute('content') || '').slice(0, 64) : null; })()` },
+    ]);
+    const c = parseColor(raw);
+    if (c) [color, source] = [toHex(c), 'theme-color'];
+  } catch {
+    /* page not ready */
+  }
+  if (!color && !current && t.favicons[0]) {
+    // no favicon fetches while a task runs: the agent's network footprint stays what the task needs
+    const c = await faviconColor(t.favicons[0]).catch(() => null);
+    if (c) [color, source] = [toHex(c), 'favicon'];
+  }
+  if (tabs.active() === t) sendUI('site-accent', color ? { color, source } : null);
+}
+
+async function faviconColor(url: string): Promise<RGB | null> {
+  let img: Electron.NativeImage;
+  if (url.startsWith('data:image/')) img = nativeImage.createFromDataURL(url.slice(0, 256 * 1024));
+  else if (/^https?:/i.test(url) && guardedSession) {
+    const res = await guardedSession.fetch(url, { signal: AbortSignal.timeout(5000) });
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!res.ok || buf.length > 256 * 1024) return null;
+    img = nativeImage.createFromBuffer(buf);
+  } else return null;
+  if (img.isEmpty()) return null;
+  const bmp = img.resize({ width: 16, height: 16 }).toBitmap(); // BGRA
+  let [r, g, b, w] = [0, 0, 0, 0];
+  for (let i = 0; i + 3 < bmp.length; i += 4) {
+    if (bmp[i + 3] < 128) continue;
+    const [B, G, R] = [bmp[i], bmp[i + 1], bmp[i + 2]];
+    const weight = 1 + (4 * (Math.max(R, G, B) - Math.min(R, G, B))) / 255; // favour saturated pixels
+    [r, g, b, w] = [r + R * weight, g + G * weight, b + B * weight, w + weight];
+  }
+  return w ? { r: r / w, g: g / w, b: b / w } : null;
+}
 
 /** Browser-generated "where does this request come from" for confirmation dialogs. */
 function sourceOf(wcId: number | undefined): ConfirmRequest['source'] {
@@ -420,6 +489,13 @@ function installShortcuts(wc: WebContents) {
 function setupTab(tab: Tab) {
   const wc = tab.wc;
   installShortcuts(wc);
+  wc.on('page-favicon-updated', (_e, favicons) => {
+    tab.favicons = favicons.slice(0, 4).map((f) => String(f).slice(0, 256 * 1024));
+    if (tabs.active() === tab) void updateSiteAccent();
+  });
+  wc.on('did-stop-loading', () => {
+    if (tabs.active() === tab) void updateSiteAccent();
+  });
   // WebRTC may only use proxied transports: no direct UDP past the egress proxy
   wc.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   wc.setWindowOpenHandler(({ url }) => {
@@ -565,7 +641,10 @@ function registerIpc() {
     if (!postTaskGuard.size) guardedOrigins.clear();
     tabs.close(id);
   });
-  ipcMain.handle('tabs:activate', (_e, id: number) => tabs.activate(id));
+  ipcMain.handle('tabs:activate', (_e, id: number) => {
+    tabs.activate(id);
+    void updateSiteAccent();
+  });
   ipcMain.handle('tabs:select', (_e, id: number, on?: boolean) => tabs.toggleSelected(Number(id), typeof on === 'boolean' ? on : undefined));
   const LAYOUTS = new Set(['columns', 'rows', 'grid']);
   const layoutArg = (l: unknown): TileLayout => (LAYOUTS.has(String(l)) ? (String(l) as TileLayout) : 'columns');
@@ -615,6 +694,8 @@ function registerIpc() {
   });
   ipcMain.handle('settings:get', () => settings);
   ipcMain.handle('settings:save', (_e, s: Settings) => {
+    // appearance has its own validated path; never take it from the generic settings form
+    s = { ...s, appearance: settings.appearance };
     settings = s;
     saveSettings(settingsFile, s);
     egress.setDenylist(s.egress.denylist);
@@ -623,6 +704,33 @@ function registerIpc() {
     void reputation.refresh();
     return true;
   });
+  // ---------- appearance (themes for the chrome UI only) ----------
+  ipcMain.handle('appearance:get', () => ({ appearance: settings.appearance, builtins: BUILTIN_THEMES }));
+  ipcMain.handle('appearance:save', (_e, a: unknown) => {
+    const r = AppearanceSchema.safeParse(a);
+    if (!r.success) return { ok: false, error: r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ').slice(0, 300) };
+    settings.appearance = r.data;
+    saveSettings(settingsFile, settings);
+    sendUI('appearance', settings.appearance);
+    void updateSiteAccent();
+    return { ok: true };
+  });
+  ipcMain.handle('theme:import', (_e, json: unknown) => importTheme(json));
+  ipcMain.handle('theme:import-file', async () => {
+    const r = await dialog.showOpenDialog(win, { title: 'Import theme', filters: [{ name: 'Theme JSON', extensions: ['json'] }], properties: ['openFile'] });
+    if (r.canceled || !r.filePaths[0]) return { ok: false, error: 'cancelled' };
+    if (statSync(r.filePaths[0]).size > 64 * 1024) return { ok: false, error: 'theme file larger than 64 KB' };
+    return importTheme(readFileSync(r.filePaths[0], 'utf8'));
+  });
+  ipcMain.handle('theme:export-file', async (_e, name: unknown) => {
+    const t = [...BUILTIN_THEMES, ...settings.appearance.custom].find((x) => x.name === String(name));
+    if (!t) return { ok: false, error: 'no such theme' };
+    const r = await dialog.showSaveDialog(win, { title: 'Export theme', defaultPath: `${t.name.replace(/[^\w.-]/g, '_')}.theme.json` });
+    if (r.canceled || !r.filePath) return { ok: false, error: 'cancelled' };
+    writeFileSync(r.filePath, JSON.stringify(t, null, 2) + '\n');
+    return { ok: true };
+  });
+
   ipcMain.handle('reputation:refresh', async () => {
     reputation.reloadLocalLists();
     await reputation.refresh(true);
