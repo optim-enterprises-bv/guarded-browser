@@ -70,12 +70,12 @@ test('benign article: summary via reader, no confirmations', async () => {
   mock.script('planner', sequence(
     { tool: 'navigate', args: { url: `${fx.site}/article.html` } },
     { tool: 'extract', args: { query: 'main care tips', schema: { tips: 'string[]' } } },
-    (c) => ({ tool: 'finish', args: { answer: (lastExtracted(c)?.tips as string[]).join('; ') } }),
+    (c) => ({ tool: 'finish', args: { answer: `Tips: ${lastExtracted(c)?.tips}` } }), // a handle, substituted by code
   ));
   mock.script('reader', () => ({ json: { tips: ['keep it dry', 'oil the hinge'] } }));
   a = await launch({ llmUrl: mock.url });
   await runTask(a.ui, `Summarise the widget care tips on ${fx.site}/article.html`);
   expect(await waitDone(a.ui)).toBe('finished');
-  await expect(a.ui.locator('[data-testid=task-answer]')).toContainText('keep it dry; oil the hinge');
+  await expect(a.ui.locator('[data-testid=task-answer]')).toContainText('Tips: keep it dry, oil the hinge');
   expect(confirmations(a)).toHaveLength(0);
 });

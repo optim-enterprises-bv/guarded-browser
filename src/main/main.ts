@@ -2,7 +2,7 @@
 
 import { app, BrowserWindow, ipcMain, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { AgentTask } from '../core/agent';
@@ -288,15 +288,33 @@ function setupEgress(ses: Session) {
       audit.write('egress', { layer: 'download', decision: 'log', host: hostKey(item.getURL()), method: 'GET', url: item.getURL(), reason: 'manual download (save dialog)' });
       return;
     }
-    // agent task: never overwrite; the file lands only after the user approves
-    item.setSavePath(uniquePath(process.env.GUARDED_DOWNLOAD_DIR || app.getPath('downloads'), item.getFilename()));
+    // agent task: bytes go to a private staging dir; the file only reaches the downloads folder
+    // (under a unique name, never overwriting) after the user approves AND the transfer completed
+    const staging = join(app.getPath('userData'), 'downloads-pending');
+    mkdirSync(staging, { recursive: true, mode: 0o700 });
+    const tmp = join(staging, `${randomBytes(8).toString('hex')}.part`);
+    item.setSavePath(tmp);
     item.pause();
+    const done = new Promise<string>((r) => item.once('done', (_ev, state) => r(state)));
+    const url = item.getURL();
+    const name = item.getFilename();
     void broker
-      .request({ id: `d${Date.now().toString(36)}`, kind: 'download', action: 'file download', target: item.getFilename(), destination: item.getURL(), values: [], reasons: ['file downloads during an agent task are always confirmed'] })
-      .then((o) => {
-        audit.write('egress', { layer: 'download', decision: o === 'approve' ? 'allow' : 'block', host: hostKey(item.getURL()), method: 'GET', url: item.getURL(), reason: `confirmation ${o}` });
-        if (o === 'approve') item.resume();
-        else item.cancel();
+      .request({ id: `d${Date.now().toString(36)}`, kind: 'download', action: 'file download', target: name, destination: url, values: [], reasons: ['file downloads during an agent task are always confirmed'] })
+      .then(async (o) => {
+        audit.write('egress', { layer: 'download', decision: o === 'approve' ? 'allow' : 'block', host: hostKey(url), method: 'GET', url, reason: `confirmation ${o}` });
+        if (o === 'approve') {
+          if (item.getState() === 'progressing') item.resume();
+          const state = await done;
+          if (state === 'completed' && existsSync(tmp)) {
+            const dest = uniquePath(process.env.GUARDED_DOWNLOAD_DIR || app.getPath('downloads'), name);
+            renameSync(tmp, dest);
+            audit.write('egress', { layer: 'download', decision: 'allow', host: hostKey(url), method: 'GET', url, reason: `saved as ${dest}` });
+          }
+        } else {
+          if (item.getState() === 'progressing') item.cancel();
+          await done;
+          rmSync(tmp, { force: true });
+        }
       });
   });
 
