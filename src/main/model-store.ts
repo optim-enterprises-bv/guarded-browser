@@ -137,7 +137,7 @@ export async function ensureModel(spec: ModelSpec, o: EnsureOptions): Promise<{ 
                 throw new Error(`${f.path} is larger than expected`);
               }
               h.update(value);
-              if (!out.write(value)) await new Promise((r) => out.once('drain', r));
+              if (!out.write(value)) await new Promise<void>((r) => out.once('drain', () => r()));
               progress('downloading', f.path, value.byteLength);
             }
           } finally {
