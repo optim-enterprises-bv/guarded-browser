@@ -115,6 +115,37 @@ describe('sync (36) — a first sync and an incremental sync', () => {
     expect(inbox.messages.find((m) => m.uid === 2)!.seen).toBe(true);
   });
 
+  it('RFC 2047 encoded-words in the ENVELOPE subject and sender name are decoded, not stored raw', async () => {
+    const { store, server, syncer } = harness();
+    seedInbox(server).messages.push({
+      uid: 3,
+      flags: [],
+      raw: 'Subject: =?UTF-8?B?Y2Fmw6kgdGVzdA==?=\r\nFrom: =?UTF-8?Q?Ren=C3=A9e?= <renee@example.com>\r\n\r\nbody\r\n',
+    });
+    seedInbox(server).uidNext = 4;
+    await syncer.syncAll(['INBOX']);
+    const m = store.listMessages({ accountId: 'work', folder: 'INBOX' }).messages.find((x) => x.uid === 3)!;
+    expect(m.subject).toBe('caf\u00e9 test');
+    expect(m.fromName).toBe('Ren\u00e9e');
+    expect(m.fromAddr).toBe('renee@example.com');
+  });
+
+  it('rows stored still encoded by an earlier build are repaired once, and a second pass changes nothing', async () => {
+    const { store, server, syncer } = harness();
+    await syncer.syncAll(['INBOX']);
+    const id = store.listMessages({ accountId: 'work', folder: 'INBOX' }).messages[0].id;
+    (store as unknown as { db: { exec(q: string): void } }).db.exec(
+      `UPDATE message SET subject = '=?UTF-8?B?Y2Fmw6kgdGVzdA==?=', fromName = '=?UTF-8?Q?Ren=C3=A9e?=' WHERE id = ${id}`,
+    );
+    const { decodeWords } = await import('../../src/core/mail/mime');
+    expect(store.repairEncodedHeaders((v) => decodeWords(v))).toBe(1);
+    const m = store.listMessages({ accountId: 'work', folder: 'INBOX' }).messages.find((x) => x.id === id)!;
+    expect(m.subject).toBe('caf\u00e9 test');
+    expect(m.fromName).toBe('Ren\u00e9e');
+    expect(store.repairEncodedHeaders((v) => decodeWords(v))).toBe(0);
+    void server;
+  });
+
   it('an incremental sync asks only for uids above the high-water mark', async () => {
     const { store, server, syncer } = harness();
     await syncer.syncAll();

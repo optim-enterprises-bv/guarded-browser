@@ -390,8 +390,18 @@ export class FakeImapServer {
       const attrs = [`UID ${m.uid}`, `FLAGS (${m.flags.join(' ')})`, `RFC822.SIZE ${m.bytes?.length ?? Buffer.byteLength(m.raw)}`, `INTERNALDATE "${date}"`];
       if (/ENVELOPE/i.test(what)) {
         const subject = /^Subject:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? '';
-        const from = /^From:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? '';
-        attrs.push(`ENVELOPE ("Mon, 01 Jan 2024 00:00:00 +0000" "${subject}" (("" NIL "${from.split('@')[0]}" "${from.split('@')[1] ?? ''}")) NIL NIL NIL NIL NIL "<${subject.replace(/\s+/g, '.')}@example.com>")`);
+        const fromRaw = /^From:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? '';
+        // RFC 3501: ENVELOPE has TEN fields (date subject from sender reply-to to cc bcc in-reply-to
+        // message-id). An earlier version sent nine, the client rightly refused it, and every sync test
+        // silently fell back to the HEADER path, so the envelope path real servers use went untested.
+        // "Name <a@b>" or a bare address; the name goes into the ENVELOPE as sent (encoded-words and
+        // all), exactly like a real server, which does not decode RFC 2047
+        const angle = /^(.*?)\s*<([^>]*)>\s*$/.exec(fromRaw);
+        const fromName = angle ? angle[1].replace(/^"|"$/g, '') : '';
+        const from = angle ? angle[2] : fromRaw;
+        // the message's own Message-ID, as a real server returns it (invented only when the raw has none)
+        const msgId = /^Message-ID:\s*(<[^>\r\n]*>)/im.exec(m.raw)?.[1] ?? `<${subject.replace(/\s+/g, '.')}@example.com>`;
+        attrs.push(`ENVELOPE ("Mon, 01 Jan 2024 00:00:00 +0000" "${subject}" (("${fromName}" NIL "${from.split('@')[0]}" "${from.split('@')[1] ?? ''}")) NIL NIL NIL NIL NIL NIL "${msgId}")`);
       }
       if (wantsBody || wantsHeader) {
         // BYTES: `{N}` is an octet count, so a non-ASCII message announces more than its JS length

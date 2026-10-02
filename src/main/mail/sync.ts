@@ -19,7 +19,7 @@
 import type { MailAccount } from './accounts';
 import { MailStore, htmlToText, type MessageHeader, type FolderKind } from '../../core/mail/store';
 import { ImapClient, type SocketFactory, type ImapSocket, type FetchResult, sanitizeDetail } from '../../core/mail/imap';
-import { parseHeaders, summaryFromHeaders, extractContent, parseMime, MAX_HEADER_BYTES } from '../../core/mail/mime';
+import { parseHeaders, summaryFromHeaders, extractContent, parseMime, decodeWords, MAX_HEADER_BYTES } from '../../core/mail/mime';
 
 export type SyncState = 'offline' | 'connecting' | 'online' | 'error';
 
@@ -275,9 +275,11 @@ export class MailSyncer {
     const s = summaryFromHeaders(headers);
     const env = r.envelope;
     const state = flagsToState(r.flags);
-    const subject = env?.subject ? env.subject : s.subject;
+    // the ENVELOPE carries header values as sent: RFC 2047 encoded-words (`=?UTF-8?B?...?=`) are NOT
+    // decoded by the server, so they are decoded here (the HEADER path already decodes them)
+    const subject = env?.subject ? decodeWords(env.subject, 400) : s.subject;
     const fromAddr = env?.from?.[0]?.address || s.fromAddr;
-    const fromName = env?.from?.[0]?.name || s.fromName;
+    const fromName = env?.from?.[0]?.name ? decodeWords(env.from[0].name, 200) : s.fromName;
     const to = env?.to?.length ? env.to.map((a) => a.address).join(', ') : s.toAddrs;
     const date = s.date ?? r.internalDate ?? null;
     const res = this.deps.store.upsertMessage({

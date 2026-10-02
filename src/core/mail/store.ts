@@ -564,6 +564,37 @@ export class MailStore {
     }
   }
 
+  /**
+   * Rows whose subject or sender name still holds RFC 2047 encoded-words (`=?UTF-8?B?...?=`), as
+   * stored by sync before the IMAP ENVELOPE path decoded them, are rewritten with `decode`. The
+   * decoder is passed in because it lives in mime.ts, which imports this module. Idempotent: a
+   * decoded value has no `=?` left, so a second run touches nothing. Returns the rows changed.
+   */
+  repairEncodedHeaders(decode: (s: string) => string): number {
+    const rows = this.db
+      .prepare("SELECT id, subject, fromName FROM message WHERE subject LIKE '%=?%?=%' OR fromName LIKE '%=?%?=%'")
+      .all() as Array<{ id: number; subject: string; fromName: string }>;
+    if (!rows.length) return 0;
+    const upd = this.db.prepare('UPDATE message SET subject = ?, fromName = ? WHERE id = ?');
+    let n = 0;
+    this.db.exec('BEGIN');
+    try {
+      for (const r of rows) {
+        const subject = clean(decode(r.subject), 400);
+        const fromName = clean(decode(r.fromName), 200);
+        if (subject !== r.subject || fromName !== r.fromName) {
+          upd.run(subject, fromName, r.id);
+          n++;
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+    return n;
+  }
+
   schemaVersion(): number {
     return this.userVersion;
   }

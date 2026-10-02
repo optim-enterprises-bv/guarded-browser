@@ -30,6 +30,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { decodeWords } from '../../core/mail/mime';
 import { MailStore, DB_FILE, type MessageRow, type DraftMode } from '../../core/mail/store';
 import { SecretStore, SECRETS_FILE, plaintextWarning, keychainBackend } from './secrets';
 import { normalizeAccount, testAccount, type MailAccount } from './accounts';
@@ -185,6 +186,8 @@ export class MailController {
       this.store = new MailStore(join(this.deps.profileDir, DB_FILE));
       // nothing left over from the last run is sent behind the user's back
       this.store.recoverOutbox();
+      // subjects / names stored still encoded (before sync decoded the ENVELOPE) are fixed once
+      this.store.repairEncodedHeaders((v) => decodeWords(v));
       for (const a of this.store.listAccounts()) {
         const norm = this.accountFor(a.id);
         if (norm) this.accounts.set(a.id, norm);
