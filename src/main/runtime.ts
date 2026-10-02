@@ -4,7 +4,7 @@
 // model and the public reputation feeds are shared (passed in through the context). IPC handlers
 // are looked up by main.ts from the SENDER's window, never from an id the renderer sends.
 
-import { app, BrowserWindow, clipboard, dialog, session, type Session, type WebContents } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, safeStorage, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
@@ -23,6 +23,9 @@ import { ISOLATED_WORLD } from './page-scripts';
 import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type Theme } from '../core/theme';
 import type { Profile } from './profiles';
 import { testEnv } from './test-hooks';
+// ticket 37c: the mail controller is per PROFILE and its handlers live on this runtime's `on()` table,
+// so the chrome resolves them from the sending window exactly like every other chrome channel.
+import { MailController, MAIL_CHANNELS } from './mail/controller';
 import { HistoryStore, recordable } from '../core/history';
 import { ClosedTabStore } from '../core/closed-tabs';
 import { SessionStore } from '../core/session-state';
@@ -73,6 +76,9 @@ export type Runtime = Awaited<ReturnType<typeof createRuntime>>;
 
 export async function createRuntime(ctx: RuntimeContext) {
 const handlers: Record<string, Handler> = {};
+/** the rail badge's number: unread-ish mail across this profile's accounts */
+let mailUnreadCount = 0;
+let mailController: MailController | null = null;
 /** TEST ONLY. Bypasses the policy engine and judge so tests can show the egress layer holds alone. */
 const POLICY_DISABLED = testEnv('GUARDED_UNSAFE_DISABLE_POLICY') === '1';
 
@@ -724,6 +730,11 @@ function runChord(input: { key: string; control?: boolean; meta?: boolean; shift
       break;
     case 'nav.focusAddress':
       sendUI('shortcut', 'focus-address');
+      break;
+    // ticket 37c: mail is a PANEL in this window, so the action simply tells the chrome to switch to
+    // it. One action, so the rail button, the chord and the menu land on the same place.
+    case 'mail.open':
+      sendUI('shortcut', 'open-mail');
       break;
     case 'view.zoomIn':
     case 'view.zoomOut':
@@ -1572,6 +1583,35 @@ function registerIpc() {
   // The chrome window's own keydown handler forwards keystrokes here, so the chord table applies
   // whether a page or the chrome has focus. Only a key event is accepted; the payload is a plain
   // description, never anything page-derived.
+  // ---------- mail (ticket 37c): same sender-resolved table as every other chrome channel ----------
+  // The controller is created on first call, so a profile with no mail never opens a store.
+  const mailCtrl = () => api.mail();
+  on('mail:state', () => mailCtrl().state());
+  on('mail:accounts', () => {
+    const st = mailCtrl().state();
+    return { accounts: st.accounts, keychain: st.keychain };
+  });
+  on('mail:folders', (_e, accountId: unknown) => mailCtrl().folders(String(accountId ?? '')));
+  on('mail:list', (_e, opts: unknown) => mailCtrl().list((opts ?? {}) as { accountId?: string; folder?: string }));
+  on('mail:search', (_e, q: unknown, opts: unknown) => mailCtrl().search(String(q ?? ''), (opts ?? {}) as { accountId?: string }));
+  on('mail:message', (_e, id: unknown, opts: unknown) => mailCtrl().message(Number(id), (opts ?? {}) as { markRead?: boolean }));
+  on('mail:sync', (_e, id: unknown) => mailCtrl().sync(String(id ?? '')));
+  on('mail:sync-all', () => mailCtrl().syncAll());
+  on('mail:flags', (_e, ids: unknown, patch: unknown) => mailCtrl().setFlags(ids, patch));
+  on('mail:move', (_e, ids: unknown, to: unknown) => mailCtrl().move(ids, String(to ?? '')));
+  on('mail:view-set', (_e, patch: unknown) => mailCtrl().viewSet(patch));
+  on('mail:unlock', (_e, pass: unknown) => mailCtrl().unlock(String(pass ?? '')));
+  on('mail:secret-state', () => {
+    const st = mailCtrl().state();
+    return { mode: st.secretMode, locked: st.locked, keychain: st.keychain, warning: st.warning };
+  });
+  on('mail:secret-mode', (_e, mode: unknown, pass: unknown) => mailCtrl().secretMode(String(mode ?? ''), String(pass ?? '')));
+  on('mail:account-save', (_e, input: unknown, secret: unknown) => mailCtrl().saveAccount(input, secret));
+  on('mail:account-remove', (_e, id: unknown) => mailCtrl().removeAccount(String(id ?? '')));
+  on('mail:account-test', (_e, id: unknown) => mailCtrl().testAccount(String(id ?? '')));
+  on('mail:import-scan', (_e, path: unknown) => mailCtrl().importScan(typeof path === 'string' ? path : undefined));
+  on('mail:import-apply', (_e, path: unknown, ids: unknown) => mailCtrl().importApply(typeof path === 'string' ? path : undefined, ids));
+
   on('chord', (_e, key: unknown, mods: unknown) => {
     const m = (mods ?? {}) as { ctrl?: boolean; shift?: boolean; alt?: boolean };
     if (typeof key !== 'string' || key.length > 32) return { handled: false };
@@ -2310,6 +2350,26 @@ const api = {
   /** the ONE action dispatcher: the menu, the palette and the chords all land here, so a menu item
    *  can never do something a chord cannot */
   runAction: (action: string) => runAction(action),
+  /** the per-profile mail controller (ticket 37c). Created on first use. */
+  mail(): MailController {
+    mailController ??= new MailController({
+      profileDir,
+      canConnect: () => (current ? { ok: false, reason: 'an agent task is running: mail will not connect while it does' } : { ok: true }),
+      audit: (kind, detail) => audit.write(kind as Parameters<AuditLog['write']>[0], detail),
+      sendUnread: (n) => {
+        mailUnreadCount = Math.max(0, Math.floor(n) || 0);
+        sendUI('mail', { unread: mailUnreadCount });
+      },
+      // the real backend name, so "no keyring" names what Electron actually reports
+      safeStorage,
+    
+    });
+    return mailController;
+  },
+  /** the last unread count pushed to the rail badge (ticket 37); the controller owns updating it */
+  mailUnread() {
+    return mailUnreadCount;
+  },
   /** the chord table (for menu accelerators) */
   chordTable: () => chordTable(),
   audit: (type: Parameters<AuditLog['write']>[0], data: Record<string, unknown>) => audit.write(type, data),
@@ -2367,6 +2427,12 @@ function windowTitle() {
 async function dispose() {
   if (disposed) return;
   disposed = true;
+  // drop mail connections and the sqlite handle with the window (ticket 37c)
+  try {
+    mailController?.dispose();
+  } catch {
+    /* nothing to release */
+  }
   // a clean exit marks the session clean, so the next launch does not show a crash notice
   try {
     const list = tabs?.list() ?? [];

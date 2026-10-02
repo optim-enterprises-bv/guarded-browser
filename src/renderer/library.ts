@@ -5,7 +5,7 @@
 type Bridge = { invoke(channel: string, ...args: unknown[]): Promise<any>; on(channel: string, fn: (p: any) => void): void };
 
 /** the sections the shared panel column can show */
-export type SectionId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels';
+export type SectionId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail';
 
 interface BNode { type: 'bookmark' | 'folder'; id: string; title: string; url?: string; nickname?: string; children?: BNode[] }
 interface HEntry { url: string; title: string; lastVisit: number; visits: number; sources: string[] }
@@ -14,6 +14,10 @@ const TOP = 84;
 const BAR = 28;
 // measured (docs/target-ui.md): panel column 220 logical, rail 27 logical
 const SIDE = 220;
+/** MAIL is a full view, not a list: it takes the whole content area beside the rail (ticket 37c).
+ *  Vivaldi's Mail is a full-page pane — the reference screenshot is 2053 logical px wide — so a
+ *  220 px column would put three columns of mail in a rail. Every other section keeps SIDE. */
+const MAIL_MIN = 720;
 /** the rail's own width, added to the left inset while a panel is open under it (ticket 17);
  *  the rail itself reports the real value, so this starts at 0 */
 let RAIL = 0;
@@ -28,6 +32,8 @@ export function initLibrary(gb: Bridge) {
     for (const k of kids) e.append(typeof k === 'string' ? document.createTextNode(k) : k);
     return e;
   };
+  /** set by renderer.ts: the mail panel's own module refreshes itself when the column opens */
+  let onMailShown: (() => void) | null = null;
   let roots: BNode[] = [];
   let showBar = false;
   /** which section the shared column shows; the rail drives this (ticket 17) */
@@ -36,11 +42,14 @@ export function initLibrary(gb: Bridge) {
   let currentUrl = '';
 
   // ---------- layout: tell main how much room the chrome takes ----------
+  /** the mail section's width: the window minus the rail, so the page area is not left peeking through */
+  const mailWidth = () => Math.max(MAIL_MIN, window.innerWidth - RAIL);
+
   function insets() {
     const top = TOP + (showBar ? BAR : 0);
     document.documentElement.style.setProperty('--top', `${top}px`);
     // the rail is always a left inset while it is visible; the column adds to it when open
-    void gb.invoke('chrome:insets', top, RAIL + (side ? SIDE : 0), STATUS);
+    void gb.invoke('chrome:insets', top, RAIL + (side ? (side === 'mail' ? mailWidth() : SIDE) : 0), STATUS);
     // a web panel is a WebContentsView positioned by main, so main needs the column's real box.
     // The rect is measured from the DOM (not assumed) because the column width is a CSS token.
     const col = document.getElementById(side ? `${side}-view` : '');
@@ -79,10 +88,13 @@ export function initLibrary(gb: Bridge) {
     sessions: 'Sessions',
     workspaces: 'Workspaces',
     webpanels: 'Web panels',
+    mail: 'Mail',
   };
   function openSide(which: SectionId) {
     side = which;
     $('side').classList.remove('hidden');
+    // mail spans the window; the other sections are a narrow column
+    $('side').classList.toggle('side-wide', which === 'mail');
     $('side-title').textContent = SECTION_TITLE[which];
     for (const id of Object.keys(SECTION_TITLE) as SectionId[]) {
       const sec = $(`${id}-view`);
@@ -93,10 +105,12 @@ export function initLibrary(gb: Bridge) {
     void gb.invoke('panels:show', null);
     if (which === 'history') void renderHistory();
     else if (which === 'bookmarks') void renderBookmarks();
+    else if (which === 'mail') onMailShown?.();
   }
   function closeSide() {
     side = null;
     $('side').classList.add('hidden');
+    $('side').classList.remove('side-wide');
     insets();
     void gb.invoke('panels:show', null);
   }
@@ -104,6 +118,9 @@ export function initLibrary(gb: Bridge) {
     if (side === which) closeSide();
     else openSide(which);
   }
+  window.addEventListener('resize', () => {
+    if (side === 'mail') insets();
+  });
   $('side-close').onclick = closeSide;
   $('btn-history').onclick = () => toggleSide('history');
   $('btn-bookmarks').onclick = () => toggleSide('bookmarks');
@@ -461,5 +478,9 @@ export function initLibrary(gb: Bridge) {
     },
     /** re-run the inset calculation after another module changes the geometry */
     refreshInsets: insets,
+    /** renderer.ts hands the mail panel's refresh in here (the column is shared, the content is not) */
+    setMailShown(fn: () => void) {
+      onMailShown = fn;
+    },
   };
 }

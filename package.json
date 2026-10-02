@@ -1,6 +1,6 @@
 {
   "name": "guarded-browser",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "private": true,
   "description": "Desktop web browser with an AI agent that is architecturally defended against prompt injection",
   "main": "dist/main/main.js",

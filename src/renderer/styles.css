@@ -1,7 +1,10 @@
 :root {
   --bg: #f6f7f9; --fg: #1d2330; --muted: #6b7385; --line: #d9dde5; --card: #fff;
   --accent: #2f5bd3; --danger: #c0392b; --warn: #b7791f; --ok: #2f855a;
-  --top: 84px; --panel: 440px; --rail: 27px; --col: 220px; --status: 32px;
+  /* --rail is MEASURED (docs/target-ui.md + docs/target-mail-ui.md: rail right edge physical 95 =
+     50.8 logical at COSMIC 187%). It was 27, about half the measurement; corrected with the user's
+     approval on 2026-10-02. --col (220) is the browser panel column and was already right. */
+  --top: 84px; --panel: 440px; --rail: 51px; --col: 220px; --status: 32px;
   --radius: 6px; --radius-sm: 4px; --pad: 4px 10px; --font-size: 13px; --accent-fg: #ffffff; --highlight: #fdf0d5;
   font: var(--font-size)/1.4 system-ui, sans-serif;
 }
@@ -155,6 +158,7 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .suggest .sug:hover, .suggest .sug.sel { background: var(--bg); }
 .suggest .kind { font-size: 10px; text-transform: uppercase; color: var(--muted); width: 58px; flex: none; }
 .suggest .u { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side.side-wide { width: calc(100vw - var(--rail)); }
 .side { position: fixed; left: var(--rail); top: var(--top); bottom: var(--status); width: var(--col); background: var(--card); border-right: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; z-index: 4; }
 .side section { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
 .side-head { display: flex; justify-content: space-between; align-items: center; }
@@ -218,6 +222,16 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .rail-btn:hover { background: var(--bg); color: var(--fg); }
 .rail-btn.active { background: var(--accent); color: var(--accent-fg); }
 .rail-btn.rail-bottom-btn { color: var(--muted); }
+/* MAIL (ticket 37): the rail entry point carries the unread badge the reference screenshot shows.
+   The button opens a SEPARATE window; it is never a panel, so no message text ever renders here. */
+/* the mail PANEL button carries the unread chip (ticket 37c) */
+.rail-btn[data-testid=rail-mail] { position: relative; }
+.rail-badge {
+  position: absolute; top: -2px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px;
+  border-radius: 8px; background: #4c8bf5; color: #fff; font-size: 10px; line-height: 14px;
+  text-align: center;
+}
+.rail-badge.hidden { display: none; }
 
 /* ---------- wave 2: start page (ticket 13) ----------
    Drawn as chrome over an about:blank tab, so it is inside the window's own document and the
@@ -268,3 +282,67 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 /* a panel title is a button (it shows the live view), so it must not look like a form control */
 .link-title { border: none; background: none; color: var(--fg); padding: 0; text-align: left; cursor: pointer; }
 .link-title:hover { color: var(--accent); }
+
+/* ---------- mail panel (ticket 37c) ----------
+   Geometry measured from the user's Vivaldi Mail screenshot (docs/target-mail-ui.md): tree 206,
+   list 242, 68 px rows. The panel renders inside the shared column, so no second window. */
+#mail-view { padding: 0; gap: 0; }
+#mail-root { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+#mail-toolbar { display: flex; align-items: center; gap: 4px; padding: 4px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+#m-search { flex: 1; min-width: 90px; }
+#m-columns { flex: 1; display: flex; min-height: 0; }
+#m-tree { width: 206px; min-width: 206px; overflow-y: auto; border-right: 1px solid var(--line); }
+#m-list { width: 242px; min-width: 242px; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+#m-list-head { display: flex; align-items: center; gap: 4px; padding: 3px 6px; border-bottom: 1px solid var(--line); font-size: 11px; }
+#m-rows { flex: 1; overflow-y: auto; }
+#m-reading { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#m-read-head { padding: 6px 8px 2px; border-bottom: 1px solid var(--line); }
+#m-subject { font-size: 14px; margin: 0 0 4px; font-weight: 600; }
+#m-fields .field { display: flex; gap: 6px; font-size: 11px; }
+#m-fields .k { color: var(--muted); min-width: 52px; }
+#m-actions { display: flex; gap: 3px; flex-wrap: wrap; padding: 4px 0 2px; }
+#m-actions button { padding: 1px 5px; font-size: 11px; }
+#m-body { flex: 1; overflow-y: auto; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+#m-attachments { display: flex; gap: 4px; flex-wrap: wrap; padding: 2px 8px; }
+#m-attachments .att { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+#m-composer { border-top: 1px solid var(--line); padding: 4px 6px; }
+#m-reply { width: 100%; height: 46px; resize: none; }
+#m-compose-foot { display: flex; align-items: center; gap: 8px; padding-top: 3px; }
+#m-accounts { display: flex; align-items: center; gap: 4px; padding: 3px 4px; border-top: 1px solid var(--line); font-size: 11px; flex-wrap: wrap; }
+#m-accounts .acct { display: flex; align-items: center; gap: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; }
+#m-accounts .acct button { padding: 0 4px; font-size: 10px; }
+#m-status { padding: 2px 4px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+#mail-view .section { margin-bottom: 1px; }
+#mail-view .section-head { display: flex; align-items: center; gap: 4px; padding: 3px 6px; color: var(--muted); font-weight: 600; cursor: pointer; font-size: 11px; }
+#mail-view .tree-row { display: flex; align-items: center; gap: 5px; padding: 3px 6px 3px 14px; cursor: pointer; border-radius: 4px; font-size: 12px; }
+#mail-view .tree-row:hover { background: var(--card); }
+#mail-view .tree-row.active { background: var(--card); }
+#mail-view .tree-row.hidden-role { opacity: 0.45; }
+#mail-view .tree-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#mail-view .tree-row .chips { margin-left: auto; display: flex; gap: 3px; }
+#mail-view .chip { background: var(--line); border-radius: 8px; padding: 0 5px; font-size: 10px; min-width: 16px; text-align: center; }
+#mail-view .chip.zero { visibility: hidden; }
+#mail-view .row { height: 68px; padding: 4px 6px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; gap: 1px; cursor: pointer; overflow: hidden; }
+#mail-view .row:hover { background: var(--card); }
+#mail-view .row.selected { background: var(--accent); color: var(--accent-fg); }
+#mail-view .row .top { display: flex; gap: 4px; align-items: baseline; font-size: 12px; }
+#mail-view .row .from { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#mail-view .row.unread .from, #mail-view .row.unread .subject { font-weight: 700; }
+#mail-view .row .subject, #mail-view .row .preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+#mail-view .row .preview { color: var(--muted); }
+#mail-view .row .time { color: var(--muted); margin-left: auto; white-space: nowrap; font-size: 10px; }
+#mail-view .row.selected .preview, #mail-view .row.selected .time { color: var(--accent-fg); }
+#mail-view .badges { display: flex; gap: 3px; color: var(--muted); font-size: 10px; }
+#mail-view .notice { background: var(--highlight); border: 1px solid var(--warn); color: var(--warn); padding: 3px 6px; border-radius: 4px; margin: 4px 0; font-size: 11px; }
+#mail-view .modal { position: absolute; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 30; }
+#mail-view .modal-card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; width: 360px; }
+#mail-view .modal-card.wide { width: 520px; max-height: 90%; overflow-y: auto; }
+#mail-view .modal-card h2 { margin: 0 0 6px; font-size: 14px; }
+#mail-view .modal-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+#mail-view .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+#mail-view .grid label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
+#mail-view #m-acct-import { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+#mail-view #m-import-list { margin-top: 6px; max-height: 200px; overflow-y: auto; }
+#mail-view .import-row { display: flex; gap: 6px; align-items: flex-start; padding: 3px 2px; font-size: 11px; }
+#mail-view .import-text { display: flex; flex-wrap: wrap; gap: 3px; align-items: baseline; }
+#mail-view .hidden { display: none !important; }

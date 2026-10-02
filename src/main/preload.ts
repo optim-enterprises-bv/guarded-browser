@@ -11,8 +11,13 @@ const INVOKE = new Set([
   'agent:preview', 'agent:start', 'agent:stop', 'confirm:answer', 'egress:allow', 'settings:get', 'settings:save', 'audit:recent', 'reputation:refresh', 'appearance:get', 'appearance:save', 'theme:import', 'theme:import-file', 'theme:export-file',
   'profiles:list', 'profiles:create', 'profiles:update', 'profiles:open', 'profiles:delete',
   'history:list', 'history:delete', 'history:delete-range', 'history:clear-on-exit', 'history:open', 'bookmarks:tree', 'bookmarks:add', 'bookmarks:add-current', 'bookmarks:add-folder', 'bookmarks:update', 'bookmarks:remove', 'bookmarks:move', 'bookmarks:search', 'bookmarks:set-bar', 'bookmarks:is-bookmarked', 'bookmarks:open', 'bookmarks:import', 'bookmarks:import-file', 'bookmarks:export', 'bookmarks:export-file', 'suggest', 'favicon:get', 'chrome:insets', 'chrome:overlay',
-]);
-const EVENTS = new Set(['state', 'tabs', 'agent:update', 'agent:done', 'confirm:request', 'confirm:clear', 'audit', 'egress', 'fallback', 'reputation', 'geometry', 'appearance', 'site-accent', 'profiles', 'profiles:show-manager', 'bookmarks', 'closed-tabs', 'downloads', 'zoom', 'find:result', 'session:crashed', 'shortcut', 'panels', 'panels:list', 'page:contextmenu', 'stacks', 'workspaces', 'sessions', 'keybindings', 'translate', 'extensions', 'tabstrip', 'gesture', 'history']);
+ // mail, ticket 37c: a panel in this window, so its channels live on the chrome bridge
+ 'mail:state', 'mail:accounts', 'mail:account-save', 'mail:account-remove', 'mail:account-test',
+ 'mail:secret-state', 'mail:secret-mode', 'mail:unlock', 'mail:folders', 'mail:list', 'mail:message',
+ 'mail:search', 'mail:view-set', 'mail:sync', 'mail:sync-all', 'mail:flags', 'mail:move',
+ 'mail:import-scan', 'mail:import-apply',
+ ]);
+const EVENTS = new Set(['state', 'tabs', 'agent:update', 'agent:done', 'confirm:request', 'confirm:clear', 'audit', 'egress', 'fallback', 'reputation', 'geometry', 'appearance', 'site-accent', 'profiles', 'profiles:show-manager', 'bookmarks', 'closed-tabs', 'downloads', 'zoom', 'find:result', 'session:crashed', 'shortcut', 'panels', 'panels:list', 'page:contextmenu', 'stacks', 'workspaces', 'sessions', 'keybindings', 'translate', 'extensions', 'tabstrip', 'gesture', 'history', 'mail']);
 
 contextBridge.exposeInMainWorld('gb', {
   invoke: (channel: string, ...args: unknown[]) => {

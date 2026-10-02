@@ -18,7 +18,7 @@ interface Bridge {
   on(channel: string, fn: (payload: any) => void): void;
 }
 
-export type PanelId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels';
+export type PanelId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail';
 
 export interface PanelDef {
   id: PanelId;
@@ -35,10 +35,17 @@ export const PANELS: PanelDef[] = [
   { id: 'sessions', label: 'Sessions', section: 'sessions-view' },
   { id: 'workspaces', label: 'Workspaces', section: 'workspaces-view' },
   { id: 'webpanels', label: 'Web panels', section: 'webpanels-view' },
+  // MAIL (ticket 37c): a panel in the shared column, NOT a second window.
+  { id: 'mail', label: 'Mail (Ctrl+Shift+M)', section: 'mail-view' },
 ];
 
-/** Geometry, measured from the target screenshot (physical px at COSMIC scale 187%). */
-export const RAIL_WIDTH = 27;
+/** Geometry, MEASURED from the target screenshots (physical px at COSMIC scale 187%).
+ *
+ * `docs/target-ui.md` and `docs/target-mail-ui.md` both put the rail's right edge at physical x = 95,
+ * i.e. 50.8 logical px, with the icons centred near logical 30. The previously shipped 27 was about
+ * half that; the user approved correcting it (2026-10-02). `PANEL_WIDTH` is the BROWSER panel column
+ * (220, unchanged); the mail window's tree column is a different number (206) and lives in mail.css. */
+export const RAIL_WIDTH = 51;
 export const PANEL_WIDTH = 220;
 
 export interface PanelsUi {
@@ -55,6 +62,8 @@ export function initPanels(
     onInset: (left: number) => void;
     /** open/close a section in the shared column; the caller owns the column itself */
     onShow: (id: PanelId | null) => void;
+    /** the MAIL panel refreshes itself when it becomes the visible section (ticket 37c) */
+    onMailShown?: () => void;
   },
 ): PanelsUi {
   const rail = document.getElementById('rail') as HTMLElement;
@@ -105,6 +114,7 @@ export function initPanels(
   function toggle(id: PanelId) {
     activeId = activeId === id ? null : id;
     paint();
+    if (activeId === 'mail') opts.onMailShown?.();
   }
 
   async function load(id: PanelId) {
@@ -257,6 +267,24 @@ export function initPanels(
     void load('workspaces');
   });
 
+  // the badge count arrives as a 'mail' event from main (the unread total across this profile).
+  // The chip lives on the mail PANEL button, so the rail shows the count where the panel is.
+  gb.on('mail', (payload: { unread?: number }) => {
+    const n = Number(payload?.unread ?? 0);
+    const b = buttons.get('mail');
+    if (!b) return;
+    let chip = b.querySelector('.rail-badge') as HTMLElement | null;
+    if (!chip) {
+      chip = document.createElement('span');
+      chip.className = 'rail-badge';
+      chip.setAttribute('data-testid', 'rail-mail-badge');
+      b.append(chip);
+    }
+    chip.textContent = n > 99 ? '99+' : n > 0 ? String(n) : '';
+    chip.classList.toggle('hidden', !(n > 0));
+    chip.dataset.count = String(n);
+  });
+
   paint();
 
   return {
@@ -284,4 +312,5 @@ const RAIL_GLYPH: Record<PanelId, string> = {
   sessions: '\u{1F4C1}',
   workspaces: '\u{1F5C2}',
   webpanels: '\u{1F310}',
+  mail: '\u2709',
 };

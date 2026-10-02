@@ -29,6 +29,12 @@ function channelsAfter(text: string, marker: string): Set<string> {
 
 const preload = src('src/main/preload.ts');
 const main = src('src/main/main.ts');
+/**
+ * Mail (ticket 37c) is a PANEL in the browser window, so its channels are on the CHROME bridge and its
+ * handlers are on the profile's runtime table. `MAIL_CHANNELS` in src/main/mail/controller.ts is the
+ * single declaration of what mail needs; these tests hold the three lists together.
+ */
+const mailController = src('src/main/mail/controller.ts');
 
 const invoke = channelsAfter(preload, 'const INVOKE');
 const events = channelsAfter(preload, 'const EVENTS');
@@ -85,6 +91,38 @@ describe('IPC allowlists agree', () => {
     const unreachable = [...runtimeHandlers].filter((c) => !invoke.has(c)).sort();
     expect(orphans).toEqual([]);
     expect(unreachable).toEqual([]);
+  });
+
+  it('the mail channels are declared once, exposed on the chrome bridge, and all handled', () => {
+    // Mail is a panel in the browser window (ticket 37c), so its channels are declared in
+    // `MAIL_CHANNELS` (controller.ts), exposed by the chrome preload, and registered by runtime.ts.
+    // Drift in any direction is a click that silently does nothing ("No handler registered").
+    const declared = channelsAfter(mailController, 'const MAIL_CHANNELS');
+    expect(declared.size).toBeGreaterThan(10);
+    for (const ch of declared) {
+      expect(invoke.has(ch)).toBe(true);
+      expect(runtimeHandlers.has(ch)).toBe(true);
+      expect(runtimeChannels.has(ch)).toBe(true);
+    }
+    // and a MAIL channel must never be published as an event: mail is request/response, so nothing
+    // pushes message text at the renderer
+    for (const ch of declared) expect(events.has(ch)).toBe(false);
+    for (const ch of [...events]) expect(declared.has(ch)).toBe(false);
+  });
+
+  it('the rail width agrees between panels.ts and styles.css (a drift here moves the page area)', () => {
+    // The rail width is the left inset every pane is laid out against: `RAIL_WIDTH` in panels.ts and
+    // `--rail` in styles.css must be the same number, or the page area and the rail disagree by a few
+    // pixels and every later layout measurement is off by that much.
+    const panels = src('src/renderer/panels.ts');
+    const css = src('src/renderer/styles.css');
+    const fromTs = /export const RAIL_WIDTH = (\d+)/.exec(panels)?.[1];
+    const fromCss = /--rail:\s*(\d+)px/.exec(css)?.[1];
+    expect(fromTs, 'RAIL_WIDTH in panels.ts').toBeTruthy();
+    expect(fromCss, '--rail in styles.css').toBeTruthy();
+    expect(fromTs).toBe(fromCss);
+    // and it is the MEASURED value, not the old eyeballed one
+    expect(Number(fromTs)).toBeGreaterThan(40);
   });
 
   it('every application-menu item names an action that exists in the chord table', () => {

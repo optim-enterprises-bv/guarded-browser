@@ -49,7 +49,10 @@ export type ChordAction =
   | 'session.save'
   | 'workspace.next'
   | 'tab.stripToggle'
-  | 'view.translate';
+  | 'view.translate'
+  // ticket 37: the mail window. One action, so the rail button, the chord and the menu all land on
+  // the ONE dispatcher rather than three code paths that can drift.
+  | 'mail.open';
 
 export interface Chord {
   /** lower-case key as reported by Electron's input event ('t', '=', 'f6', 'tab', '1'..'9') */
@@ -79,6 +82,8 @@ export const DEFAULT_CHORDS: Chord[] = [
   { key: 'h', ctrl: true, action: 'library.history' },
   { key: 'd', ctrl: true, action: 'library.bookmarkPage' },
   { key: 'b', ctrl: true, shift: true, action: 'library.toggleBar' },
+  // Ctrl+Shift+M, the chord the reference product uses for its mail panel
+  { key: 'm', ctrl: true, shift: true, action: 'mail.open' },
   { key: 's', ctrl: true, shift: true, action: 'tiles.tile' },
   { key: 'u', ctrl: true, shift: true, action: 'tiles.untile' },
   { key: 'l', ctrl: true, action: 'nav.focusAddress' },

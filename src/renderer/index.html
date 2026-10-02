@@ -115,6 +115,90 @@
     <p class="muted small">Workspaces share this profile's cookies and storage. They are a view over tabs, not a separate identity.</p>
     <div id="workspaces-list" class="lib-list" data-testid="workspaces-list"></div>
   </section>
+  <section id="mail-view" class="hidden" data-testid="mail-view">
+    <div id="mail-root">
+      <div id="mail-toolbar">
+        <button id="m-check" data-testid="mail-sync" title="Check this account for messages">&#x21bb;</button>
+        <button id="m-check-all" data-testid="mail-sync-all" title="Check every account">&#x21c9;</button>
+        <button id="m-import" data-testid="mail-import" title="Import accounts from your himalaya config">&#x21e5; Import</button>
+        <button id="m-flag" data-testid="mail-flag-filter" title="Flagged only">&#x2691;</button>
+        <input id="m-search" data-testid="mail-search" type="search" placeholder="Mail Search" autocomplete="off" spellcheck="false" />
+        <span id="m-search-state" class="muted small" data-testid="mail-search-state"></span>
+        <div class="spacer"></div>
+        <button id="m-filters" data-testid="mail-filters" title="View Filters">View Filters &#x2699;</button>
+      </div>
+      <div id="m-filter-menu" class="menu hidden" data-testid="mail-filter-menu"></div>
+      <div id="m-columns">
+        <div id="m-tree" data-testid="mail-tree"></div>
+        <div id="m-list">
+          <div id="m-list-head">
+            <span id="m-count" class="muted" data-testid="mail-list-count">0 messages</span>
+            <div class="spacer"></div>
+            <span id="m-sort" class="muted" data-testid="mail-sort">Sort by Date (Threaded) &#x2304;</span>
+          </div>
+          <div id="m-rows" data-testid="mail-rows"></div>
+        </div>
+        <div id="m-reading">
+          <div id="m-read-head">
+            <h1 id="m-subject" data-testid="mail-subject"></h1>
+            <div id="m-fields" data-testid="mail-fields"></div>
+            <div id="m-notice" class="notice hidden" data-testid="mail-notice"></div>
+            <div id="m-actions"></div>
+          </div>
+          <div id="m-body" data-testid="mail-body"></div>
+          <div id="m-attachments" data-testid="mail-attachments"></div>
+          <div id="m-composer">
+            <textarea id="m-reply" data-testid="mail-compose-box" placeholder="Write a quick reply here" spellcheck="false"></textarea>
+            <div id="m-compose-foot">
+              <button id="m-send" data-testid="mail-send" disabled title="Sending ships in ticket 38 (compose, drafts, outbox)">&#x27A4; Send</button>
+              <label class="muted small"><input id="m-quoted" type="checkbox" /> Include Quoted Text</label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="m-accounts" data-testid="mail-accounts"></div>
+      <div id="m-unlock" class="modal hidden" data-testid="mail-unlock">
+        <div class="modal-card">
+          <h2>Unlock mail</h2>
+          <p id="m-unlock-help" class="muted small" data-testid="mail-unlock-help"></p>
+          <input id="m-unlock-pass" type="password" data-testid="mail-master-passphrase" placeholder="Master passphrase" autocomplete="new-password" />
+          <div class="modal-actions">
+            <button id="m-unlock-go" data-testid="mail-unlock-go">Unlock</button>
+            <button id="m-unlock-plain" data-testid="mail-use-plaintext" class="link">Store in plaintext instead</button>
+          </div>
+          <p id="m-unlock-msg" class="small" data-testid="mail-unlock-msg"></p>
+          <p id="m-unlock-warn" class="small warn hidden" data-testid="mail-plaintext-warning"></p>
+        </div>
+      </div>
+      <div id="m-account-form" class="modal hidden" data-testid="mail-account-modal">
+        <div class="modal-card wide">
+          <h2>Add mail account</h2>
+          <div class="grid">
+            <label>Name <input id="m-a-name" data-testid="acct-name" placeholder="Work" /></label>
+            <label>Email address <input id="m-a-address" data-testid="acct-address" placeholder="me@example.com" /></label>
+            <label>Server <input id="m-a-host" data-testid="acct-host" placeholder="imap.example.com" /></label>
+            <label>Port <input id="m-a-port" data-testid="acct-port" type="number" value="993" /></label>
+            <label>Username <input id="m-a-user" data-testid="acct-user" placeholder="me" /></label>
+            <label>Password / app password <input id="m-a-pass" data-testid="acct-pass" type="password" autocomplete="new-password" /></label>
+            <label>Sent folder <input id="m-a-sent" data-testid="acct-sent" placeholder="Sent" /></label>
+            <label>Trash folder <input id="m-a-trash" data-testid="acct-trash" placeholder="Trash" /></label>
+          </div>
+          <p class="small muted">Only an implicit-TLS server (993/995) can be opened: STARTTLS is refused rather than half-implemented, and certificate verification is always on.</p>
+          <div id="m-acct-import">
+            <button id="m-import-scan" data-testid="mail-import-scan">Import accounts from himalaya&#x2026;</button>
+            <div id="m-import-list" data-testid="mail-import-list" class="hidden"></div>
+          </div>
+          <div class="modal-actions">
+            <button id="m-acct-save" data-testid="acct-save">Save account</button>
+            <button id="m-acct-test" data-testid="mail-acct-test" title="Open a connection and check the server">Test</button>
+            <button id="m-acct-cancel" class="link" data-testid="mail-acct-cancel">Cancel</button>
+          </div>
+          <p id="m-acct-msg" class="small" data-testid="acct-msg"></p>
+        </div>
+      </div>
+      <div id="m-status" data-testid="mail-status"></div>
+    </div>
+  </section>
   <section id="webpanels-view" class="hidden" data-testid="webpanels-panel">
     <div class="row"><button id="wp-pin-current" data-testid="webpanel-pin">Pin current site to sidebar</button></div>
     <span id="wp-msg" class="muted small" data-testid="webpanel-msg"></span>

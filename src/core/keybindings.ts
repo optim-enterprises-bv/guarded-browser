@@ -47,7 +47,13 @@ export const ALL_ACTIONS: ChordAction[] = [
   'workspace.next',
   'tab.stripToggle',
   'view.translate',
+  'mail.open',
 ];
+
+/** Default chords for the actions that have one (the map itself is user-editable). */
+export const DEFAULT_ACTION_CHORDS: Partial<Record<ChordAction, string>> = {
+  'mail.open': 'Ctrl+Shift+M',
+};
 
 /** Human labels for the settings UI. */
 export const ACTION_LABELS: Record<ChordAction, string> = {
@@ -88,6 +94,7 @@ export const ACTION_LABELS: Record<ChordAction, string> = {
   'workspace.next': 'Next workspace',
   'tab.stripToggle': 'Cycle tab strip placement',
   'view.translate': 'Translate page',
+  'mail.open': 'Open Mail',
 };
 
 // ---------- chord string parsing ----------

@@ -13,6 +13,7 @@ import { DEFAULT_FEEDS, HostSet, ReputationDb, type FeedBuilder, type FeedConfig
 import type { Guard } from '../core/types';
 import { PROFILE_COLORS, ProfileRegistry, partitionDir, type Profile } from './profiles';
 import { createRuntime, type Runtime } from './runtime';
+
 import { GUARD_MODEL, ensureModel } from './model-store';
 import { testEnv } from './test-hooks';
 
@@ -261,6 +262,11 @@ const RUNTIME_CHANNELS = [
   'nav:go', 'nav:back', 'nav:forward', 'nav:reload', 'agent:preview', 'agent:start', 'agent:stop', 'confirm:answer', 'egress:allow',
   'settings:get', 'settings:save', 'audit:recent', 'reputation:refresh', 'appearance:get', 'appearance:save', 'theme:import', 'theme:import-file', 'theme:export-file',
   'history:list', 'history:delete', 'history:delete-range', 'history:clear-on-exit', 'history:open', 'bookmarks:tree', 'bookmarks:add', 'bookmarks:add-current', 'bookmarks:add-folder', 'bookmarks:update', 'bookmarks:remove', 'bookmarks:move', 'bookmarks:search', 'bookmarks:set-bar', 'bookmarks:is-bookmarked', 'bookmarks:open', 'bookmarks:import', 'bookmarks:import-file', 'bookmarks:export', 'bookmarks:export-file', 'suggest', 'favicon:get', 'chrome:insets', 'chrome:overlay',
+  // mail, ticket 37c: a panel in the browser window, handlers on the runtime table
+  'mail:state', 'mail:accounts', 'mail:account-save', 'mail:account-remove', 'mail:account-test',
+  'mail:secret-state', 'mail:secret-mode', 'mail:unlock', 'mail:folders', 'mail:list', 'mail:message',
+  'mail:search', 'mail:view-set', 'mail:sync', 'mail:sync-all', 'mail:flags', 'mail:move',
+  'mail:import-scan', 'mail:import-apply',
 ];
 
 function registerIpc() {
@@ -382,6 +388,7 @@ function buildMenu() {
         act('Quick Commands…', 'palette.open'),
         act('Reader Mode', 'reader.toggle'),
         act('Translate Page', 'view.translate'),
+        act('Mail', 'mail.open'),
         act('Capture Page…', 'capture.visible'),
         act('Print…', 'view.print'),
         { type: 'separator' },

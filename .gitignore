@@ -10,3 +10,4 @@ dist-pkg/
 
 # openlore analysis artifacts
 .openlore/
+.vitest/

@@ -11,6 +11,8 @@ await build({ ...common, entryPoints: ['src/main/import-worker.ts'], outfile: 'd
 await build({ ...common, entryPoints: ['src/main/tab-preload.ts'], outfile: 'dist/main/tab-preload.js', platform: 'node', format: 'cjs', external });
 await build({ ...common, entryPoints: ['src/main/preload.ts'], outfile: 'dist/main/preload.js', platform: 'node', format: 'cjs', external });
 await build({ ...common, entryPoints: ['src/renderer/renderer.ts'], outfile: 'dist/renderer/renderer.js', platform: 'browser', format: 'iife' });
+// Mail (ticket 37c) is a PANEL inside this same renderer bundle (`src/renderer/mail-panel.ts` is
+// imported by renderer.ts), so there is no separate mail window, preload or CSS to build.
 mkdirSync('dist/renderer', { recursive: true });
 cpSync('src/renderer/index.html', 'dist/renderer/index.html');
 cpSync('src/renderer/styles.css', 'dist/renderer/styles.css');

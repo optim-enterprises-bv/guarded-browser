@@ -6,6 +6,7 @@ import { initAppearance } from './appearance';
 import { initLibrary } from './library';
 import { initStatus } from './status-ui';
 import { initPanels, RAIL_WIDTH } from './panels';
+import { initMailPanel, mailPanel, autoSyncOnOpen } from './mail-panel';
 import { initPalette } from './palette';
 import { initStart } from './start';
 import { initWave2 } from './wave2';
@@ -591,10 +592,17 @@ void library.load();
 const statusUi = initStatus(gb, () => lastTabs.find((t) => t.active)?.id ?? null);
 
 /** the open/close of the section the rail is driving */
+initMailPanel(gb);
 const panelsUi: { active(): string | null; toggle(id: any): void; close(): void; setRailVisible(on: boolean): void } = initPanels(gb, {
   // the rail drives the SAME column history and bookmarks already use — one panel system, not two
   onInset: (left: number) => library.setRailWidth(left),
   onShow: (id) => library.showSection(id as never),
+  // the mail panel lives in the shared column but refreshes itself; and the first time it is shown it
+  // syncs the SELECTED account once, so an empty tree means "no mail" rather than "never synced"
+  onMailShown: () => {
+    void autoSyncOnOpen();
+    void mailPanel.refresh();
+  },
 });
 const paletteUi = initPalette(gb, (item) => wave2Ui.runAction(item));
 
@@ -624,6 +632,11 @@ const wave2Ui = initWave2(gb, {
 const startUi = initStart(gb, (url) => void gb.invoke('nav:go', url));
 // panel shortcuts from main's chord table
 gb.on('shortcut', (what: string) => {
+  // ticket 37c: the mail chord / menu item opens the mail PANEL in this window
+  if (what === 'open-mail') {
+    panelsUi.toggle('mail');
+    return;
+  }
   const m = /^panel:(history|bookmarks|downloads|sessions|workspaces)$/.exec(String(what));
   if (m) panelsUi.toggle(m[1] as never);
   else if (what === 'reader') void openReader();
