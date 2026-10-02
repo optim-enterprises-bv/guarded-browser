@@ -71,7 +71,7 @@ npm run test:packaged   # the packaged app ignores every test-only hook
 Install / uninstall:
 
 ```sh
-sudo dnf install ./dist-pkg/guarded-browser-0.1.0-1.fc44.x86_64.rpm
+sudo dnf install ./dist-pkg/guarded-browser-<version>-1.fc44.x86_64.rpm   # the version in package.json
 guarded-browser                         # or "Guarded Browser" in the application menu
 sudo dnf remove guarded-browser
 ```

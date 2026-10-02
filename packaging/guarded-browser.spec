@@ -56,5 +56,10 @@ gtk-update-icon-cache -q %{_datadir}/icons/hicolor >/dev/null 2>&1 || :
 %{_datadir}/icons/hicolor/*/apps/guarded-browser.png
 
 %changelog
+* Fri Oct 02 2026 Optim Enterprises B.V. - 0.2.2-1
+- Mail client (IMAP over implicit TLS, encrypted secrets, himalaya import, accounts column)
+- Confirmation dialogs show exactly what is approved; task secrets cannot leave by navigation
+- Post-task gate lifts on commit with an unload tombstone; collision-proof confirmation ids
+
 * Mon Sep 28 2026 Optim Enterprises B.V. - 0.1.0-1
 - First package: browser, agent, profiles, split view, themes, history and bookmarks
