@@ -16,8 +16,10 @@
 //    locked-down HTML reading view only (src/main/mail/html-view.ts: JavaScript off, own in-memory
 //    session, every request cancelled). It is never indexed, never previewed, and never returned to
 //    the chrome renderer: main reads it and loads it into that view, nothing else.
-//  * Attachments are METADATA only (name / mime / size / part id). Bytes are never stored here and
-//    are never fetched implicitly — a fetch is an explicit click (ticket 41).
+//  * Attachments are METADATA only (name / mime / size / IMAP section / transfer encoding / Content-ID,
+//    schema v5). Bytes are never stored here and are never fetched implicitly — a fetch is an explicit
+//    click (ticket 41). A draft's attached FILES live in the profile's private `mail-outbox/<draft>/`
+//    directory (0700 / 0600, managed by the controller); this store keeps only their names and sizes.
 //  * No gate, taint or agent-task state can be REPRESENTED: there is no column for it, and a test
 //    reads the schema back and asserts that.
 //  * `seen` and `readFlag` are distinct, because "never displayed" and "displayed but not dealt
@@ -30,7 +32,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const DB_FILE = 'mail.sqlite';
 
 /** hard ceiling on stored messages; a store beyond this refuses writes instead of growing forever */
@@ -97,8 +99,21 @@ export interface DraftRow {
   subject: string;
   body: string;
   includeQuoted: boolean;
+  /** a forward carries the original's attachments (fetched from the server at send time) unless unchecked */
+  forwardAttachments: boolean;
   createdAt: number;
   updatedAt: number;
+}
+
+/** A file attached to a draft (ticket 41): metadata only, the bytes are the controller's private copy. */
+export interface DraftAttachment {
+  id: string;
+  draftId: string;
+  /** sanitized file name, as it will be sent */
+  name: string;
+  mime: string;
+  size: number;
+  createdAt: number;
 }
 
 export type OutboxStatus = 'queued' | 'sending' | 'failed';
@@ -189,10 +204,19 @@ export interface MessageBody {
 }
 
 export interface Attachment {
+  /** the IMAP section number (`2`, `1.3`) the bytes are fetched by */
   partId: string;
   filename: string;
   mime: string;
+  /** decoded size in bytes (an estimate from the encoded size for base64) */
   size: number;
+  /** Content-Transfer-Encoding, so the download decodes the right way */
+  encoding?: string;
+  disposition?: string;
+  /** Content-ID without brackets ('' when none) */
+  contentId?: string;
+  /** an image the HTML body shows through cid: — rendered inline, not listed as an attachment */
+  inline?: boolean;
 }
 
 export interface MessageCounts {
@@ -488,6 +512,34 @@ CREATE TABLE outbox (
 );
 `;
 
+/**
+ * v5 (ticket 41): attachment rows learn their transfer encoding, disposition and Content-ID (the
+ * download and the inline cid: images need them), drafts learn the forward-attachments choice, and a
+ * draft's attached files are listed in `draft_attachment`. Rows written before v5 were numbered by
+ * the MIME walk, not by IMAP section: they are dropped and their messages marked for a re-fetch on the
+ * next OPEN (the text stays), exactly as v3 did for HTML; nothing is fetched in bulk.
+ */
+const SCHEMA_V5_ATTACHMENT_COLUMNS: Array<[string, string]> = [
+  ['encoding', "TEXT NOT NULL DEFAULT ''"],
+  ['disposition', "TEXT NOT NULL DEFAULT ''"],
+  ['contentId', "TEXT NOT NULL DEFAULT ''"],
+  ['inline', 'INTEGER NOT NULL DEFAULT 0'],
+];
+const SCHEMA_V5 = `
+UPDATE message SET bodyFetched = 0 WHERE id IN (SELECT DISTINCT messageId FROM attachment);
+DELETE FROM attachment;
+
+CREATE TABLE IF NOT EXISTS draft_attachment (
+  draftId   TEXT NOT NULL REFERENCES draft(id) ON DELETE CASCADE,
+  id        TEXT NOT NULL,
+  name      TEXT NOT NULL DEFAULT '',
+  mime      TEXT NOT NULL DEFAULT '',
+  size      INTEGER NOT NULL DEFAULT 0,
+  createdAt INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (draftId, id)
+);
+`;
+
 /** v2: the HTML body, apart from the text, for the HTML reading view only (never indexed). */
 const SCHEMA_V2 = `
 CREATE TABLE message_html (
@@ -556,6 +608,13 @@ export class MailStore {
       // the next OPEN fetches the body again and stores its HTML; nothing is fetched in bulk.
       if (v < 3) this.db.exec('UPDATE message SET bodyFetched = 0 WHERE bodyFetched = 1 AND id NOT IN (SELECT messageId FROM message_html)');
       if (v < 4) this.db.exec(SCHEMA_V4);
+      if (v < 5) {
+        // column by column, so a store that already has some of them (a partial earlier upgrade) migrates
+        const has = (table: string, col: string) => !!this.db.prepare(`SELECT 1 AS x FROM pragma_table_info('${table}') WHERE name = ?`).get(col);
+        for (const [col, def] of SCHEMA_V5_ATTACHMENT_COLUMNS) if (!has('attachment', col)) this.db.exec(`ALTER TABLE attachment ADD COLUMN ${col} ${def}`);
+        if (!has('draft', 'forwardAttachments')) this.db.exec('ALTER TABLE draft ADD COLUMN forwardAttachments INTEGER NOT NULL DEFAULT 1');
+        this.db.exec(SCHEMA_V5);
+      }
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       this.db.exec('COMMIT');
     } catch (e) {
@@ -861,13 +920,26 @@ export class MailStore {
 
   setAttachments(messageId: number, items: Attachment[]): void {
     this.db.prepare('DELETE FROM attachment WHERE messageId = ?').run(messageId);
-    const ins = this.db.prepare('INSERT OR REPLACE INTO attachment (messageId, partId, filename, mime, size) VALUES (?,?,?,?,?)');
+    const ins = this.db.prepare('INSERT OR REPLACE INTO attachment (messageId, partId, filename, mime, size, encoding, disposition, contentId, inline) VALUES (?,?,?,?,?,?,?,?,?)');
     let n = 0;
+    let listed = 0;
     for (const a of items) {
       if (n++ >= 200) break; // a message claiming 10 000 parts is hostile
-      ins.run(messageId, clean(a.partId, 64), clean(a.filename, 255), clean(a.mime, 128), Math.max(0, Number(a.size) || 0));
+      ins.run(
+        messageId,
+        clean(a.partId, 64),
+        clean(a.filename, 255),
+        clean(a.mime, 128),
+        Math.max(0, Number(a.size) || 0),
+        clean(a.encoding ?? '', 40).toLowerCase(),
+        clean(a.disposition ?? '', 40).toLowerCase(),
+        clean(a.contentId ?? '', 256),
+        a.inline ? 1 : 0,
+      );
+      if (!a.inline) listed++;
     }
-    this.db.prepare('UPDATE message SET hasAttachments = ? WHERE id = ?').run(items.length ? 1 : 0, messageId);
+    // the list's paperclip means "something to download": inline images do not count
+    this.db.prepare('UPDATE message SET hasAttachments = ? WHERE id = ?').run(listed ? 1 : 0, messageId);
   }
 
   private indexMessage(id: number) {
@@ -898,7 +970,7 @@ export class MailStore {
   body(id: number): MessageBody | null {
     const r = this.db.prepare('SELECT id, bodyText, rawHeader, bodyFetched, remoteContent FROM message WHERE id = ?').get(Number(id)) as Record<string, unknown> | undefined;
     if (!r) return null;
-    const att = this.db.prepare('SELECT partId, filename, mime, size FROM attachment WHERE messageId = ? ORDER BY partId').all(Number(id)) as Record<string, unknown>[];
+    const att = this.db.prepare('SELECT partId, filename, mime, size, encoding, disposition, contentId, inline FROM attachment WHERE messageId = ? ORDER BY rowid').all(Number(id)) as Record<string, unknown>[];
     const hasHtml = !!this.db.prepare('SELECT 1 AS x FROM message_html WHERE messageId = ?').get(Number(id));
     return {
       id: Number(r.id),
@@ -907,7 +979,16 @@ export class MailStore {
       rawHeader: String(r.rawHeader),
       bodyFetched: Number(r.bodyFetched) === 1,
       remoteContent: Number(r.remoteContent) === 1,
-      attachments: att.map((a) => ({ partId: String(a.partId), filename: String(a.filename), mime: String(a.mime), size: Number(a.size) })),
+      attachments: att.map((a) => ({
+        partId: String(a.partId),
+        filename: String(a.filename),
+        mime: String(a.mime),
+        size: Number(a.size),
+        encoding: String(a.encoding),
+        disposition: String(a.disposition),
+        contentId: String(a.contentId),
+        inline: Number(a.inline) === 1,
+      })),
     };
   }
 
@@ -1372,11 +1453,11 @@ export class MailStore {
     const now = nowMs();
     this.db
       .prepare(
-        `INSERT INTO draft (id, accountId, mode, refMessage, toAddrs, ccAddrs, bccAddrs, subject, body, includeQuoted, createdAt, updatedAt)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO draft (id, accountId, mode, refMessage, toAddrs, ccAddrs, bccAddrs, subject, body, includeQuoted, forwardAttachments, createdAt, updatedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET accountId=excluded.accountId, mode=excluded.mode, refMessage=excluded.refMessage,
            toAddrs=excluded.toAddrs, ccAddrs=excluded.ccAddrs, bccAddrs=excluded.bccAddrs, subject=excluded.subject,
-           body=excluded.body, includeQuoted=excluded.includeQuoted, updatedAt=excluded.updatedAt`,
+           body=excluded.body, includeQuoted=excluded.includeQuoted, forwardAttachments=excluded.forwardAttachments, updatedAt=excluded.updatedAt`,
       )
       .run(
         id,
@@ -1389,6 +1470,7 @@ export class MailStore {
         f(d.subject),
         String(d.body ?? '').slice(0, MAX_DRAFT_BODY),
         d.includeQuoted ? 1 : 0,
+        d.forwardAttachments === false ? 0 : 1,
         existing?.createdAt ?? now,
         now,
       );
@@ -1407,6 +1489,7 @@ export class MailStore {
       subject: String(r.subject),
       body: String(r.body),
       includeQuoted: Number(r.includeQuoted) === 1,
+      forwardAttachments: Number(r.forwardAttachments) !== 0,
       createdAt: Number(r.createdAt),
       updatedAt: Number(r.updatedAt),
     };
@@ -1426,6 +1509,34 @@ export class MailStore {
 
   deleteDraft(id: string): number {
     return Number(this.db.prepare('DELETE FROM draft WHERE id = ?').run(String(id ?? '').slice(0, 64)).changes);
+  }
+
+  // ------------------------------------------------------------ draft attachments (ticket 41)
+
+  addDraftAttachment(a: { draftId: string; id: string; name: string; mime: string; size: number }): Result<{ id: string }> {
+    if (!this.getDraft(a.draftId)) return { ok: false, error: 'unknown draft' };
+    try {
+      this.db
+        .prepare('INSERT INTO draft_attachment (draftId, id, name, mime, size, createdAt) VALUES (?,?,?,?,?,?)')
+        .run(String(a.draftId).slice(0, 64), String(a.id).slice(0, 64), clean(a.name, 255), clean(a.mime, 128), Math.max(0, Math.floor(Number(a.size) || 0)), nowMs());
+    } catch (e) {
+      return { ok: false, error: `the attachment could not be recorded: ${(e as Error).message.slice(0, 80)}` };
+    }
+    return { ok: true, id: a.id };
+  }
+
+  listDraftAttachments(draftId: string): DraftAttachment[] {
+    const rows = this.db.prepare('SELECT * FROM draft_attachment WHERE draftId = ? ORDER BY createdAt, rowid').all(String(draftId ?? '').slice(0, 64)) as Record<string, unknown>[];
+    return rows.map((r) => ({ id: String(r.id), draftId: String(r.draftId), name: String(r.name), mime: String(r.mime), size: Number(r.size), createdAt: Number(r.createdAt) }));
+  }
+
+  removeDraftAttachment(draftId: string, id: string): number {
+    return Number(this.db.prepare('DELETE FROM draft_attachment WHERE draftId = ? AND id = ?').run(String(draftId ?? '').slice(0, 64), String(id ?? '').slice(0, 64)).changes);
+  }
+
+  /** every draft id (the controller removes attachment directories that belong to none) */
+  draftIds(): string[] {
+    return (this.db.prepare('SELECT id FROM draft').all() as Array<{ id: string }>).map((r) => String(r.id));
   }
 
   // ------------------------------------------------------------ outbox (ticket 38)

@@ -4,9 +4,9 @@
 // model and the public reputation feeds are shared (passed in through the context). IPC handlers
 // are looked up by main.ts from the SENDER's window, never from an id the renderer sends.
 
-import { app, BrowserWindow, dialog, safeStorage, session, type Session, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, safeStorage, session, shell, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
 import { loadSettings, saveSettings, type Role, type Settings } from '../core/config';
@@ -29,7 +29,7 @@ import { HistoryStore, recordable } from '../core/history';
 import { ClosedTabStore } from '../core/closed-tabs';
 import { SessionStore } from '../core/session-state';
 import { ZoomStore } from '../core/zoom';
-import { DownloadList } from '../core/downloads';
+import { DownloadList, uniquePath } from '../core/downloads';
 import { BookmarkStore } from '../core/bookmarks';
 import { SavedSessionStore } from '../core/saved-sessions';
 import { TrashStore, type SortMode } from '../core/bookmarks-panel';
@@ -982,6 +982,58 @@ const api = {
       // TEST ONLY (GUARDED_TEST=1, unpackaged): trust a throwaway CA for loopback fake mail servers;
       // certificate verification itself stays on
       testTlsCa: mailTestCa(),
+      // ticket 41: an attachment the user clicked goes through the browser's download path — the same
+      // folder rule as a confirmed agent download (the downloads folder, a unique name, never an
+      // overwrite) and the same downloads list with its dangerous-file warning. Written 0600.
+      saveDownload: ({ name, mime, bytes }) => {
+        const dir = testEnv('GUARDED_DOWNLOAD_DIR') || app.getPath('downloads');
+        try {
+          mkdirSync(dir, { recursive: true });
+          for (let tries = 0; ; tries++) {
+            const dest = uniquePath(dir, name);
+            try {
+              writeFileSync(dest, bytes, { flag: 'wx', mode: 0o600 });
+            } catch (e) {
+              // a file appeared under that name between the check and the write: take the next one
+              if ((e as { code?: string }).code === 'EEXIST' && tries < 20) continue;
+              rmSync(dest, { force: true });
+              throw e;
+            }
+            chmodSync(dest, 0o600);
+            downloads.addFile({ filename: name, host: 'mail attachment', path: dest, bytes: bytes.length, mime });
+            return { ok: true as const, path: dest };
+          }
+        } catch (e) {
+          return { ok: false as const, error: `the file could not be saved: ${String((e as Error).message).slice(0, 120)}` };
+        }
+      },
+      // "Open": a native dialog that names the file and its type; an executable / script needs the
+      // extra checkbox ticked as well as the Open button
+      confirmOpen: async ({ name, mime, warning, executable }) => {
+        if (win.isDestroyed()) return false;
+        const r = await dialog.showMessageBox(win, {
+          type: executable ? 'warning' : 'question',
+          buttons: ['Cancel', 'Open'],
+          defaultId: 0,
+          cancelId: 0,
+          title: 'Open attachment',
+          message: `Open "${name}" (${mime}) with the system's default application?`,
+          detail: `${warning ? `WARNING: ${warning}.\n\n` : ''}It came from an email: open it only if you trust the sender and expected this file.`,
+          ...(executable ? { checkboxLabel: 'I understand this file can run programs on this computer', checkboxChecked: false } : {}),
+          noLink: true,
+        });
+        return r.response === 1 && (!executable || r.checkboxChecked === true);
+      },
+      openPath: (p) => shell.openPath(p),
+      // "Attach…": the system file dialog, in MAIN. TEST ONLY (GUARDED_TEST=1, unpackaged): a fixed
+      // file instead of the dialog, so the e2e can attach without driving a native window.
+      pickFiles: async () => {
+        const fixed = testEnv('GUARDED_TEST_ATTACH_FILE');
+        if (fixed) return [fixed];
+        if (win.isDestroyed()) return [];
+        const r = await dialog.showOpenDialog(win, { title: 'Attach files', properties: ['openFile', 'multiSelections', 'dontAddToRecent'] });
+        return r.canceled ? [] : r.filePaths;
+      },
     });
     return mailController;
   },
@@ -1008,6 +1060,8 @@ const api = {
       reputationListed: (url) => !!reputation.check(url)?.listed,
       audit: (detail) => audit.write('mail' as Parameters<AuditLog['write']>[0], detail),
       allowLoopbackForTest: testEnv('GUARDED_TEST_MAIL_LOOPBACK') === '1',
+      // ticket 41: cid: images are parts of the message, fetched by main through the mail gate
+      inlineImages: (id) => api.mail().inlineImages(id),
     });
     return mailView;
   },

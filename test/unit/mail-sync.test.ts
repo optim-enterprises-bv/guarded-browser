@@ -636,7 +636,8 @@ describe('sync — fetchBody opens the folder read-write', () => {
     await syncer.syncAll(['INBOX']);
     const r = await syncer.fetchBody('INBOX', 1, { markRead: true });
     expect(r.ok).toBe(true);
-    expect(server.transcript).toMatch(/SELECT INBOX\r\n[^]*UID FETCH 1 \(BODY\.PEEK\[\]\)/);
+    // ticket 41: the structure first, then only the readable sections (never the whole message)
+    expect(server.transcript).toMatch(/SELECT INBOX\r\n[^]*UID FETCH 1 \(UID BODYSTRUCTURE\)\r\n[^]*UID FETCH 1 \(UID BODY\.PEEK\[HEADER\] BODY\.PEEK\[1\]\)/);
     expect(server.folders[0].messages.find((m) => m.uid === 1)!.flags).toContain('\\Seen');
   });
 });

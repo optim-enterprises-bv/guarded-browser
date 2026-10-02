@@ -364,7 +364,7 @@ describe('mail html: the main-process view', () => {
 
   it('remote images: blocked by default, allowed after the opt-in, still no scripts/xhr/subframes/POST/private hosts, reset on the next message', async () => {
     const v = make();
-    expect(v.show(1)).toEqual({ ok: true, hasHtml: true, remoteImages: true });
+    expect(await v.show(1)).toEqual({ ok: true, hasHtml: true, remoteImages: true });
     expect(await request('https://cdn.example.com/hero.png')).toBe(true); // cancelled
     expect(v.loadRemote(1)).toEqual({ ok: true, hosts: 1 });
     expect(audits.at(-1)).toEqual({ action: 'load-remote-images', message: 1, hosts: 1 });
@@ -421,7 +421,31 @@ describe('mail html: the main-process view', () => {
     expect(opened).toEqual(['https://example.com/article', 'http://example.org/x']);
   });
 
-  it('visible only with a message on display, a rect, and no chrome overlay or confirmation', () => {
+  it('inline cid: images (41): written into the document as data: URLs before it loads; the CSP stays blocked; the data: image is the only thing allowed', async () => {
+    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const v = new MailHtmlView({
+      win: win as any,
+      partition: 'mailview-test',
+      html: () => '<p>logo</p><img src="cid:logo@shop.example"><img src="https://cdn.example.com/x.png">',
+      openLink: () => undefined,
+      canConnect: () => gate,
+      chromeBusy: () => false,
+      reputationListed: () => false,
+      audit: () => undefined,
+      inlineImages: async () => new Map([['logo@shop.example', png]]),
+    });
+    expect(await v.show(1)).toEqual({ ok: true, hasHtml: true, remoteImages: true });
+    const doc = Buffer.from(view().loaded.at(-1).split(',')[1], 'base64').toString('utf8');
+    expect(doc).toContain(`<img src="${png}">`);
+    expect(doc).toContain(CSP_BLOCKED);
+    expect(await request(png)).toBe(false); // the inline image: allowed
+    expect(await request('https://cdn.example.com/x.png')).toBe(true); // remote: still blocked
+    // the opt-in keeps the inline images
+    v.loadRemote(1);
+    expect(Buffer.from(view().loaded.at(-1).split(',')[1], 'base64').toString('utf8')).toContain(png);
+  });
+
+  it('visible only with a message on display, a rect, and no chrome overlay or confirmation', async () => {
     const v = make();
     v.setRect({ x: 10, y: 20, width: 300, height: 200 });
     expect(fake.state.views.length).toBe(0); // created lazily, on the first html message
@@ -438,7 +462,7 @@ describe('mail html: the main-process view', () => {
     v.update();
     expect(view().visible).toBe(true);
     // a message without html clears the view
-    expect(v.show(3)).toEqual({ ok: true, hasHtml: false, remoteImages: false });
+    expect(await v.show(3)).toEqual({ ok: true, hasHtml: false, remoteImages: false });
     expect(view().visible).toBe(false);
   });
 });
@@ -495,7 +519,7 @@ describe('mail html: the store keeps html apart (schema v2)', () => {
     raw.close();
     const again = new MailStore(f);
     expect(again.schemaVersion()).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(4);
+    expect(SCHEMA_VERSION).toBe(5); // ticket 41
     // v3: the text stays, and the message is marked unfetched so the next open stores its HTML
     expect(again.body(r.id)).toMatchObject({ bodyText: 'old text', hasHtml: false, bodyFetched: false });
     again.setBody('a1', 'INBOX', 1, { text: 'old text', html: '<p>new</p>' });

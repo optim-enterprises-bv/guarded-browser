@@ -87,6 +87,11 @@ export class ImapParser {
   /** extraction is not retried until at least this many bytes are buffered (a big literal is not re-scanned per chunk) */
   private need = 0;
   private feeding = false;
+  /**
+   * The literal cap. Raised ONLY for the duration of an explicit attachment download (`uidFetchPart`),
+   * whose own byte cap the caller has already checked against the part's declared size.
+   */
+  maxLiteral = MAX_LITERAL;
   /** thrown-by-callback is not caught here: the caller's handler decides what to do */
   constructor(private readonly onResponse: (r: ImapResponse) => void) {}
 
@@ -147,7 +152,7 @@ export class ImapParser {
       if (m) {
         const n = Number(m[1]);
         if (!Number.isInteger(n) || n < 0) return null;
-        if (n > MAX_LITERAL) throw new Error(`imap: literal of ${n} bytes refused (cap ${MAX_LITERAL})`);
+        if (n > this.maxLiteral) throw new Error(`imap: literal of ${n} bytes refused (cap ${this.maxLiteral})`);
         if (this.buf.length < i + n) {
           this.need = i + n; // wait for the literal
           return null;
@@ -253,6 +258,12 @@ export const isPlaceholder = (v: ImapValue): boolean => typeof v === 'string' &&
 /** Resolve a token to its literal when it is a placeholder, else the token itself. */
 export const literalAt = (v: ImapValue, literals: string[]): string => (isPlaceholder(v) ? (literals[Number(v.slice(1, -1))] ?? '') : typeof v === 'string' ? v : '');
 
+/** Replace every literal placeholder in a token tree by its literal's text (BODYSTRUCTURE strings may be literals). */
+export function resolveLiterals(v: ImapValue, literals: string[], depth = 0): ImapValue {
+  if (Array.isArray(v)) return depth > 40 ? [] : v.map((x) => resolveLiterals(x, literals, depth + 1));
+  return isPlaceholder(v) ? literalAt(v, literals) : v;
+}
+
 /** `\Seen \Answered` -> ['\\Seen', '\\Answered'] */
 export const asFlags = (v: ImapValue | undefined): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
@@ -271,6 +282,8 @@ export interface FetchResult {
   /** the Gmail/Thunderbird-style thread id, when the server offers one */
   threadId?: string;
   envelope?: Envelope;
+  /** the BODYSTRUCTURE as a token tree, literals resolved (attachments.ts `parseBodyStructure` reads it) */
+  bodyStructure?: ImapValue;
 }
 
 export interface Envelope {
@@ -325,6 +338,12 @@ export function parseFetch(untagged: string, literals: string[], literalBytes: B
     }
     if (KEY === 'ENVELOPE') {
       out.envelope = parseEnvelope(val);
+      i++;
+      continue;
+    }
+    // before the BODY[...] branch: `BODYSTRUCTURE` also starts with "BODY"
+    if (KEY === 'BODYSTRUCTURE') {
+      if (Array.isArray(val)) out.bodyStructure = resolveLiterals(val, literals);
       i++;
       continue;
     }
@@ -714,6 +733,33 @@ export class ImapClient {
       if (f && f.uid > 0) out.push(f);
     }
     return out;
+  }
+
+  /**
+   * ONE body part by uid and IMAP section (`2`, `1.3`, `4.2.1`), as the server's BYTES — still in its
+   * transfer encoding; the caller decodes. This is the attachment download, and only an explicit user
+   * click reaches it. `maxBytes` is the largest literal accepted for this one command (the caller has
+   * already refused a part whose declared size is over its cap); the normal cap is restored afterwards.
+   */
+  async uidFetchPart(uid: number, section: string, maxBytes: number, timeoutMs = 300_000): Promise<Buffer | null> {
+    if (!Number.isInteger(uid) || uid <= 0) throw new Error('imap: bad uid');
+    // a section is digits and dots, nothing else: it is interpolated into a command line
+    if (!/^[1-9]\d{0,4}(?:\.[1-9]\d{0,4}){0,15}$/.test(section)) throw new Error('imap: bad section');
+    this.parser.maxLiteral = Math.max(MAX_LITERAL, Math.floor(maxBytes));
+    try {
+      const r = await this.command(`UID FETCH ${uid} (BODY.PEEK[${section}])`, { timeoutMs });
+      if (r.status !== 'OK') throw new Error(`imap: FETCH refused: ${sanitizeDetail(r.detail)}`);
+      for (const res of r.responses ?? []) {
+        const f = parseFetch(res.text, res.literals, res.literalBytes);
+        if (!f || f.uid !== uid) continue;
+        const b = f.sectionBytes[section];
+        if (b) return b;
+        if (section in f.sections) return Buffer.from(f.sections[section], 'utf8');
+      }
+      return null;
+    } finally {
+      this.parser.maxLiteral = MAX_LITERAL;
+    }
   }
 
   /** One message's full text by uid. Returns '' when the server answers NIL. */

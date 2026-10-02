@@ -19,13 +19,17 @@
 //   * invisible to the agent: this view is NOT a TabManager tab or panel, so `tabs.byWebContents`,
 //     `ownsWebContents`, the ElectronDriver, capture, reader mode and the tab preload never see it;
 //     it has no preload, so it cannot send IPC at all, and `isUi` only matches the chrome window.
+//   * inline cid: images (ticket 41): parts OF the message, fetched by main through the mail gate
+//     (`inlineImages`), sniffed to png / jpeg / gif / webp and written into the document as data:
+//     URLs before it is loaded. The view itself still fetches nothing: data: images are what the CSP
+//     (`img-src data:`) and `mailRequestDecision` already allow, with remote content still blocked.
 //   * visibility: drawn only while the chrome reports a reading-pane rect (it sends null whenever a
 //     modal, menu or the address suggestions are up, or the panel closes), AND main has no overlay
 //     and no pending confirmation, AND a message is on display. A native view covers chrome DOM, so a
 //     stale visible view is a hole over the UI — `update()` re-derives visibility from all of these.
 
 import { app, session, WebContentsView, type BrowserWindow, type Session, type WebContents } from 'electron';
-import { dataUrlFor, mailDocument, mailRequestDecision, sanitizeMailHtml, isPrivateHost } from '../../core/mail/html';
+import { dataUrlFor, inlineCidImages, mailDocument, mailRequestDecision, sanitizeMailHtml, isPrivateHost } from '../../core/mail/html';
 
 export interface Rect {
   x: number;
@@ -51,6 +55,8 @@ export interface MailHtmlViewDeps {
   audit: (detail: Record<string, unknown>) => void;
   /** TEST ONLY: allow 127.0.0.1 for the remote-image opt-in (the e2e fixture server) */
   allowLoopbackForTest?: boolean;
+  /** the message's inline cid: images as data: URLs (fetched through the gate; empty when refused) */
+  inlineImages?: (id: number) => Promise<ReadonlyMap<string, string>>;
 }
 
 export class MailHtmlView {
@@ -62,6 +68,10 @@ export class MailHtmlView {
   private documentUrl = '';
   private remoteImages = false;
   private visible = false;
+  /** the inline images of the message on display */
+  private inline: ReadonlyMap<string, string> = new Map();
+  /** bumped by every show(): a slow image fetch for an older show must not load over a newer one */
+  private showSeq = 0;
 
   constructor(private readonly deps: MailHtmlViewDeps) {
     if (deps.partition.startsWith('persist:')) throw new Error('the mail view session must be in-memory');
@@ -187,8 +197,9 @@ export class MailHtmlView {
    * message that was just shown with remote images. Returns hasHtml=false when the message has no
    * HTML or its document would not fit a data: URL — the chrome then shows the text.
    */
-  show(id: number): { ok: boolean; hasHtml: boolean; remoteImages: boolean } {
+  async show(id: number): Promise<{ ok: boolean; hasHtml: boolean; remoteImages: boolean }> {
     this.remoteImages = false;
+    const seq = ++this.showSeq;
     const mid = Math.max(0, Math.floor(Number(id) || 0));
     const html = mid ? this.deps.html(mid) : null;
     if (!html) {
@@ -196,14 +207,26 @@ export class MailHtmlView {
       return { ok: true, hasHtml: false, remoteImages: false };
     }
     const clean = sanitizeMailHtml(html);
-    const url = dataUrlFor(mailDocument(clean.html, { remoteImages: false }));
+    const inline = this.deps.inlineImages ? await this.deps.inlineImages(mid).catch(() => new Map<string, string>()) : new Map<string, string>();
+    if (seq !== this.showSeq) return { ok: true, hasHtml: true, remoteImages: clean.remoteImageHosts.length > 0 };
+    const url = this.documentUrlFor(clean.html, inline, false);
     if (!url) {
       this.clear();
       return { ok: true, hasHtml: false, remoteImages: false };
     }
     this.shownId = mid;
+    this.inline = inline;
     this.load(url);
     return { ok: true, hasHtml: true, remoteImages: clean.remoteImageHosts.length > 0 };
+  }
+
+  /** The document as a data: URL, with the inline images when they fit (else without them, rather than no HTML). */
+  private documentUrlFor(sanitized: string, inline: ReadonlyMap<string, string>, remoteImages: boolean): string | null {
+    if (inline.size) {
+      const withImages = dataUrlFor(mailDocument(inlineCidImages(sanitized, inline), { remoteImages }));
+      if (withImages) return withImages;
+    }
+    return dataUrlFor(mailDocument(sanitized, { remoteImages }));
   }
 
   /** The per-message, per-display opt-in: reload THIS message with remote images allowed. */
@@ -215,7 +238,7 @@ export class MailHtmlView {
     const html = this.deps.html(mid);
     if (!html) return { ok: false, error: 'that message has no HTML body' };
     const clean = sanitizeMailHtml(html);
-    const url = dataUrlFor(mailDocument(clean.html, { remoteImages: true }));
+    const url = this.documentUrlFor(clean.html, this.inline, true);
     if (!url) return { ok: false, error: 'that message is too large to display' };
     this.remoteImages = true;
     this.load(url);
@@ -228,7 +251,7 @@ export class MailHtmlView {
   revokeRemote() {
     if (!this.remoteImages) return;
     this.remoteImages = false;
-    if (this.shownId) this.show(this.shownId);
+    if (this.shownId) void this.show(this.shownId);
   }
 
   private load(url: string) {
@@ -239,7 +262,9 @@ export class MailHtmlView {
   }
 
   clear() {
+    this.showSeq++;
     this.shownId = 0;
+    this.inline = new Map();
     this.remoteImages = false;
     this.documentUrl = '';
     if (this.view && !this.view.webContents.isDestroyed()) void this.view.webContents.loadURL('about:blank').catch(() => undefined);

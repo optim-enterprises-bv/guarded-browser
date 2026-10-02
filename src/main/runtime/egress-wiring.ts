@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { bodyValues, hostKey } from '../../core/egress';
+import { uniquePath } from '../../core/downloads';
 import { originOf } from '../../core/policy';
 import { normalizeHost, safeBrowsingLookup } from '../../core/reputation';
 import type { ConfirmOutcome, ConfirmRequest } from '../../core/types';
@@ -329,17 +330,6 @@ function setupEgress(ses: Session) {
   // No camera / mic / geolocation / notifications etc. for pages in v1.
   ses.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
 }
-
-function uniquePath(dir: string, name: string): string {
-  const safe = name.replace(/[/\\\0]/g, '_').replace(/^\.+/, '_') || 'download';
-  const dot = safe.lastIndexOf('.');
-  const [stem, ext] = dot > 0 ? [safe.slice(0, dot), safe.slice(dot)] : [safe, ''];
-  for (let i = 0; ; i++) {
-    const p = join(dir, i === 0 ? safe : `${stem} (${i})${ext}`);
-    if (!existsSync(p)) return p;
-  }
-}
-
 
 return { setupEgress, sourceOf, handleProceed };
 }

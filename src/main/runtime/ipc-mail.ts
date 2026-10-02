@@ -55,4 +55,9 @@ export function register(on: (channel: string, fn: Handler) => void, rt: Runtime
   on('mail:outbox', (_e, accountId: unknown) => mailCtrl().outbox(accountId));
   on('mail:outbox-retry', (_e, id: unknown) => mailCtrl().retry(id));
   on('mail:outbox-delete', (_e, id: unknown) => mailCtrl().outboxDelete(id));
+  // ---------- ticket 41: attachments. Same table, same sender check; every fetch passes the gate.
+  on('mail:attachment-download', (_e, id: unknown, part: unknown) => mailCtrl().downloadAttachment(id, part));
+  on('mail:attachment-open', (_e, id: unknown, part: unknown) => mailCtrl().openAttachment(id, part));
+  on('mail:attach-pick', (_e, draft: unknown) => mailCtrl().attachPick(draft));
+  on('mail:attach-remove', (_e, draftId: unknown, attId: unknown) => mailCtrl().attachRemove(draftId, attId));
 }

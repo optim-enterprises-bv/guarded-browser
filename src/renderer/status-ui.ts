@@ -19,6 +19,8 @@ interface DownloadEntry {
   agentTask: boolean;
   source: 'user' | 'agent';
   paused: boolean;
+  /** a dangerous-file warning from main (core/downloads.ts fileRisk); text only */
+  warning?: string;
 }
 
 const fmtBytes = (n: number) => {
@@ -126,6 +128,7 @@ export function initStatus(gb: Bridge, getActiveTabId: () => number | null) {
         el('div', { class: 'dl-name', title: d.url }, d.filename),
         el('div', { class: 'dl-meta muted small' },
           `${d.host} · ${status}${d.total ? ` · ${fmtBytes(d.received)}/${fmtBytes(d.total)}` : ''}${d.agentTask ? ' · agent' : ''}`));
+      if (d.warning) row.append(el('div', { class: 'dl-warning small', 'data-testid': 'download-warning' }, `\u26a0 ${d.warning}`));
       const acts = el('div', { class: 'dl-actions' });
       if (d.state === 'progressing' && !d.paused) acts.append(menuBtn('Pause', () => gb.invoke('downloads:action', d.id, 'pause')));
       if (d.state === 'paused') acts.append(menuBtn('Resume', () => gb.invoke('downloads:action', d.id, 'resume')));

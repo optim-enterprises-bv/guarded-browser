@@ -291,6 +291,27 @@ export function sanitizeMailHtml(input: string, max = MAX_BODY_HTML): SanitizeRe
   return { html: out.join(''), remoteImageHosts: [...hosts].slice(0, 500) };
 }
 
+/**
+ * Inline cid: images (ticket 41). Rewrites `src="cid:..."` / `background="cid:..."` in SANITIZED
+ * output to the data: URL main built from that part's bytes. `images` maps a normalised Content-ID
+ * (lower-case, no brackets) to a `data:image/(png|jpeg|gif|webp);base64,...` URL; anything else in the
+ * map is ignored, so this can never introduce a remote URL, an SVG, or a quote that ends the attribute.
+ * A cid: with no image stays as it is and the CSP (img-src data:) blocks it.
+ */
+export function inlineCidImages(sanitized: string, images: ReadonlyMap<string, string>): string {
+  if (!images.size) return sanitized;
+  return sanitized.replace(/ (src|background)="cid:([^"]{1,1000})"/g, (whole, attr: string, ref: string) => {
+    let key = decodeEntities(ref).trim().replace(/^<|>$/g, '');
+    try {
+      key = decodeURIComponent(key);
+    } catch {
+      /* not %-encoded */
+    }
+    const url = images.get(key.toLowerCase());
+    return url && /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+=*$/.test(url) ? ` ${attr}="${url}"` : whole;
+  });
+}
+
 // ---------------------------------------------------------------- the document
 
 export const CSP_BLOCKED = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:";

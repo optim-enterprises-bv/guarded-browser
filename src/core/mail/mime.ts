@@ -111,6 +111,70 @@ export function parseParams(value: string): { value: string; params: Record<stri
   return { value: clean(main, 256).toLowerCase(), params };
 }
 
+/**
+ * RFC 2231 parameter values: `name*=charset'lang'%XX..` (one encoded value) and continuations
+ * `name*0*=utf-8''%E2%82%AC` `name*1*=%20rates` / `name*0="plain" name*1="text"`. Segments are
+ * joined in index order (as BYTES: a UTF-8 sequence may be split across two segments), percent-decoded
+ * where marked, and decoded in the first segment's charset. The assembled value REPLACES a plain
+ * `name=` of the same base name (RFC 2231 section 4: the extended form wins). Keys are lower-case on
+ * input and output; other parameters pass through unchanged. Bounded: 64 segments per name.
+ */
+export function assembleParams(params: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  const segs = new Map<string, Array<{ idx: number; enc: boolean; v: string }>>();
+  for (const [k0, v] of Object.entries(params ?? {})) {
+    const k = k0.toLowerCase();
+    const m = /^([^*]+)\*(?:(\d{1,3})(\*)?)?$/.exec(k);
+    if (!m) {
+      if (!(k in out)) out[k] = v;
+      continue;
+    }
+    const list = segs.get(m[1]) ?? [];
+    if (list.length < 64) list.push({ idx: m[2] === undefined ? 0 : Number(m[2]), enc: m[2] === undefined || m[3] === '*', v: String(v ?? '') });
+    segs.set(m[1], list);
+  }
+  for (const [name, list] of segs) {
+    list.sort((a, b) => a.idx - b.idx);
+    let charset = 'utf-8';
+    const bytes: Buffer[] = [];
+    list.forEach((seg, i) => {
+      let v = seg.v;
+      if (seg.enc && i === 0) {
+        // charset'language'value — only the first segment carries the prefix
+        const a = v.indexOf("'");
+        const b = a >= 0 ? v.indexOf("'", a + 1) : -1;
+        if (a >= 0 && b > a) {
+          charset = v.slice(0, a) || 'utf-8';
+          v = v.slice(b + 1);
+        }
+      }
+      bytes.push(seg.enc ? percentBytes(v) : Buffer.from(v, 'utf8'));
+    });
+    out[name] = clean(bytesToString(Buffer.concat(bytes), charset), 1024);
+  }
+  return out;
+}
+
+function percentBytes(v: string): Buffer {
+  const out: number[] = [];
+  for (let i = 0; i < v.length && out.length < 4096; i++) {
+    if (v[i] === '%' && /^[0-9A-Fa-f]{2}$/.test(v.slice(i + 1, i + 3))) {
+      out.push(Number.parseInt(v.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      out.push(...Buffer.from(v[i], 'utf8'));
+    }
+  }
+  return Buffer.from(out);
+}
+
+/** The file name a part declares: Content-Disposition `filename` (RFC 2231-assembled), else Content-Type `name`, RFC 2047-decoded. */
+export function partFilename(dispositionParams: Record<string, string>, typeParams: Record<string, string>): string {
+  const raw = assembleParams(dispositionParams).filename || assembleParams(typeParams).name || '';
+  // RFC 2047 inside a quoted parameter is not standard, and it is what Outlook and Gmail send
+  return raw.includes('=?') ? decodeWords(raw, MAX_FILENAME) : clean(raw, MAX_FILENAME);
+}
+
 // ---------------------------------------------------------------- encoded words and transfer encodings
 
 const B64_RE = /^[A-Za-z0-9+/\s]*={0,2}$/;
@@ -363,10 +427,7 @@ function parseMimeText(raw: string, depth: number, binary: boolean): MimePart {
   const encRaw = (headerGet(headers, 'content-transfer-encoding') ?? '7bit').toLowerCase().trim();
   const encoding = /^(7bit|8bit|binary|quoted-printable|base64)$/.test(encRaw) ? encRaw : '7bit';
   const disp = parseParams(headerGet(headers, 'content-disposition') ?? '');
-  const filename = clean(
-    disp.params['filename*']?.replace(/^[^']*'[^']*'/, '') || disp.params.filename || params.name || '',
-    MAX_FILENAME,
-  );
+  const filename = partFilename(disp.params, params);
 
   const part: MimePart = {
     headers,
@@ -464,11 +525,18 @@ export function extractContent(root: MimePart): ExtractedContent {
       return;
     }
     if (p.truncated) truncated = true;
+    const ct = p.contentType.toLowerCase();
+    // IMAP section numbers: a multipart's children are 1, 2, ... under its own number (the root has
+    // none); a single-part root is "1". An attached message is ONE attachment (its text is not shown
+    // as this message's text), exactly as the BODYSTRUCTURE path lists it.
+    if (ct === 'message/rfc822' || ct === 'message/global') {
+      attachments.push({ partId: partId || '1', filename: p.filename || 'message.eml', mime: clean(ct, 128), size: 0 });
+      return;
+    }
     if (p.parts.length) {
       p.parts.forEach((child, i) => walk(child, `${partId}${partId ? '.' : ''}${i + 1}`));
       return;
     }
-    const ct = p.contentType.toLowerCase();
     const isAttachment =
       /^attachment$/i.test(String(p.headers.find((h) => h.name.toLowerCase() === 'content-disposition')?.value ?? '').split(';')[0]) ||
       (!!p.filename && !ct.startsWith('text/'));
@@ -489,7 +557,7 @@ export function extractContent(root: MimePart): ExtractedContent {
     // anything else with a filename is still an attachment; anything else without one is dropped
     if (p.filename) attachments.push({ partId: partId || '1', filename: p.filename, mime: clean(ct, 128), size: Buffer.byteLength(p.body, 'utf8') });
   };
-  walk(root, '1');
+  walk(root, '');
 
   let text = cleanBody(texts.join('\n\n'), MAX_BODY_TEXT);
   const html = pickHtml(htmls.join('\n'), text);

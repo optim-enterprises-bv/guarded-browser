@@ -166,8 +166,11 @@
             <div id="m-c-bcc-row" class="c-row hidden"><label for="m-c-bcc">Bcc</label><input id="m-c-bcc" data-testid="compose-bcc" autocomplete="off" spellcheck="false" /></div>
             <div class="c-row"><label for="m-c-subject">Subject</label><input id="m-c-subject" data-testid="compose-subject" autocomplete="off" /></div>
             <textarea id="m-c-body" data-testid="compose-body" spellcheck="true"></textarea>
+            <div id="m-c-atts" class="hidden" data-testid="compose-attachments"></div>
+            <label id="m-c-fwd-att-label" class="muted small hidden"><input id="m-c-fwd-att" type="checkbox" data-testid="compose-fwd-attachments" checked /> Include the original's attachments: <span id="m-c-fwd-att-names" data-testid="compose-fwd-attachment-names"></span></label>
             <div class="c-foot">
               <button id="m-c-send" data-testid="compose-send">&#x27A4; Send</button>
+              <button id="m-c-attach" data-testid="compose-attach" title="Attach files from this computer">&#x1F4CE; Attach&#x2026;</button>
               <button id="m-c-save" data-testid="compose-save">Save Draft</button>
               <button id="m-c-discard" class="link" data-testid="compose-discard">Discard</button>
               <label id="m-c-quoted-label" class="muted small"><input id="m-c-quoted" type="checkbox" data-testid="compose-quoted" /> Include Quoted Text</label>

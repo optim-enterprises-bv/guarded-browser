@@ -44,6 +44,12 @@ export const MAIL_CHANNELS = [
   'mail:outbox',
   'mail:outbox-retry',
   'mail:outbox-delete',
+  // ticket 41: attachments. Download / Open name a message id and a section; Attach asks MAIN to run
+  // the file dialog (the renderer never sends a path or bytes); Remove names a draft and an id.
+  'mail:attachment-download',
+  'mail:attachment-open',
+  'mail:attach-pick',
+  'mail:attach-remove',
 ] as const;
 
 /** Profile management: handled in main.ts itself (it spans profiles), still sender-checked. */

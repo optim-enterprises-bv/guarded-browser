@@ -209,7 +209,7 @@ async function renderDrafts() {
     row.onclick = async () => {
       const r = await gb().invoke('mail:draft-get', d.id);
       if (!r?.ok) return setStatus(r?.error ?? 'could not open the draft');
-      await openCompose({ ...r.draft, draftId: r.draft.id });
+      await openCompose({ ...r.draft, draftId: r.draft.id, attachments: r.attachments, originalAttachments: r.originalAttachments });
     };
     rows.append(row);
   }
@@ -307,16 +307,66 @@ async function openMessage(id: number) {
     body.textContent = m.text || (m.text === '' ? '(no text body)' : '');
   }
   scheduleViewRect();
-  const atts = $('m-attachments');
-  atts.replaceChildren();
-  for (const a of m.attachments ?? []) {
-    // an attachment is metadata here; the bytes are fetched only by an explicit click (ticket 41)
-    atts.append(el('span', 'att', `${a.filename} (${a.mime}, ${Math.round((a.size ?? 0) / 1024)} KB)`));
-  }
+  renderAttachments(id, m.attachments ?? []);
   renderNotice(m, id, !!shown?.hasHtml);
   renderActions(m);
   ($('m-send') as HTMLButtonElement).disabled = false;
   await refreshState();
+}
+
+/** `1.2 MB` / `340 KB` / `12 B` */
+function fmtSize(n: number): string {
+  const v = Math.max(0, Number(n) || 0);
+  if (v >= 1048576) return `${(v / 1048576).toFixed(1)} MB`;
+  if (v >= 1024) return `${Math.round(v / 1024)} KB`;
+  return `${v} B`;
+}
+
+/**
+ * The attachment chips (ticket 41): name, type, size and the dangerous-file warning, all as TEXT
+ * (main already sanitized the name; it is still never markup). Nothing is fetched until a button is
+ * pressed: Download saves through the browser's download path; Open asks main, which shows its own
+ * confirmation naming the file and its type.
+ */
+function renderAttachments(id: number, list: AnyRec[]) {
+  const atts = $('m-attachments');
+  atts.replaceChildren();
+  for (const a of list) {
+    const chip = el('div', `att${a.warning ? ' att-warn' : ''}`);
+    chip.dataset.testid = 'mail-attachment';
+    chip.dataset.part = String(a.partId ?? '');
+    const name = el('span', 'att-name', String(a.name ?? 'attachment'));
+    name.dataset.testid = 'att-name';
+    chip.append(name, el('span', 'att-meta muted', ` ${String(a.mime ?? '')} \u00b7 ${fmtSize(a.size)}`));
+    if (a.warning) {
+      const w = el('span', 'att-warning', ` \u26a0 ${String(a.warning)}`);
+      w.dataset.testid = 'att-warning';
+      chip.append(w);
+    }
+    const dl = button('att-download', 'Download', 'Download this attachment into your downloads folder');
+    dl.onclick = async () => {
+      dl.disabled = true;
+      setStatus(`downloading ${a.name}\u2026`);
+      try {
+        const r = await gb().invoke('mail:attachment-download', id, a.partId);
+        setStatus(r?.ok ? `Saved ${r.name} to your downloads folder.` : (r?.error ?? 'the attachment could not be downloaded'));
+      } finally {
+        dl.disabled = false;
+      }
+    };
+    const op = button('att-open', 'Open', 'Open with the system application (asks first)');
+    op.onclick = async () => {
+      op.disabled = true;
+      try {
+        const r = await gb().invoke('mail:attachment-open', id, a.partId);
+        setStatus(r?.ok ? `Opened ${a.name}.` : (r?.error ?? 'the attachment could not be opened'));
+      } finally {
+        op.disabled = false;
+      }
+    };
+    chip.append(' ', dl, ' ', op);
+    atts.append(chip);
+  }
 }
 
 /**
@@ -748,7 +798,36 @@ async function openCompose(f: AnyRec) {
       ? 'The original message is added below your text as a forwarded message.'
       : '';
   $('m-c-msg').textContent = '';
+  // ticket 41: the draft's attached files, and for a forward the original's attachments + the checkbox
+  renderComposeAttachments(Array.isArray(f.attachments) ? f.attachments : []);
+  const fwd = composing.mode === 'forward';
+  input('m-c-fwd-att').checked = f.forwardAttachments !== false;
+  const orig: AnyRec[] = Array.isArray(f.originalAttachments) ? f.originalAttachments : [];
+  $('m-c-fwd-att-label').classList.toggle('hidden', !fwd || !orig.length);
+  $('m-c-fwd-att-names').textContent = fwd && orig.length ? orig.map((a) => `${a.name} (${fmtSize(a.size)})`).join(', ') : '';
   (reply ? ($('m-c-body') as HTMLTextAreaElement) : input('m-c-to')).focus();
+}
+
+/** The compose form's attachment list: names and sizes (text), and a Remove button each. */
+function renderComposeAttachments(list: AnyRec[]) {
+  const box = $('m-c-atts');
+  box.replaceChildren();
+  for (const a of list) {
+    const row = el('div', `c-att${a.warning ? ' att-warn' : ''}`);
+    row.dataset.testid = 'compose-attachment';
+    row.append(el('span', 'att-name', String(a.name ?? '')), el('span', 'muted', ` ${fmtSize(a.size)}`));
+    if (a.warning) row.append(el('span', 'att-warning', ` \u26a0 ${String(a.warning)}`));
+    const rm = button('compose-attachment-remove', '\u00d7', `Remove ${String(a.name ?? '')}`);
+    rm.onclick = async () => {
+      const c = composing;
+      if (!c?.draftId) return;
+      const r = await gb().invoke('mail:attach-remove', c.draftId, a.id);
+      if (c === composing) renderComposeAttachments(r?.attachments ?? []);
+    };
+    row.append(' ', rm);
+    box.append(row);
+  }
+  box.classList.toggle('hidden', !list.length);
 }
 
 function composeFields(): AnyRec {
@@ -763,6 +842,7 @@ function composeFields(): AnyRec {
     subject: input('m-c-subject').value,
     body: ($('m-c-body') as HTMLTextAreaElement).value,
     includeQuoted: input('m-c-quoted').checked,
+    forwardAttachments: input('m-c-fwd-att').checked,
   };
 }
 
@@ -810,7 +890,7 @@ function wireCompose() {
       void saveDraft(false);
     }, AUTOSAVE_MS);
   };
-  for (const id of ['m-c-to', 'm-c-cc', 'm-c-bcc', 'm-c-subject', 'm-c-body', 'm-c-quoted', 'm-c-from']) {
+  for (const id of ['m-c-to', 'm-c-cc', 'm-c-bcc', 'm-c-subject', 'm-c-body', 'm-c-quoted', 'm-c-from', 'm-c-fwd-att']) {
     $(id).addEventListener('input', onEdit);
     $(id).addEventListener('change', onEdit);
   }
@@ -820,6 +900,20 @@ function wireCompose() {
     if (!row.classList.contains('hidden')) input('m-c-bcc').focus();
   };
   $('m-c-save').onclick = () => void saveDraft(true);
+  // "Attach…": main runs the system file dialog and keeps private copies with the draft; this
+  // document sends the form fields (so the draft exists) and never a path or a byte
+  $('m-c-attach').onclick = async () => {
+    const c = composing;
+    if (!c) return;
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    autosaveTimer = 0;
+    $('m-c-msg').textContent = 'choosing files\u2026';
+    const r = await gb().invoke('mail:attach-pick', composeFields());
+    if (c !== composing) return;
+    if (r?.draftId) c.draftId = r.draftId;
+    renderComposeAttachments(r?.attachments ?? []);
+    $('m-c-msg').textContent = r?.error ?? (r?.cancelled ? '' : 'Attached.');
+  };
   $('m-c-discard').onclick = async () => {
     const id = composing?.draftId;
     if (id) await gb().invoke('mail:draft-delete', id);

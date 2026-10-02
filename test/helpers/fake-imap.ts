@@ -56,6 +56,10 @@ export class FakeImapServer {
   readonly bad: string[] = [];
   /** the literals and SASL responses the client sent, decoded */
   readonly received: string[] = [];
+  /** every BODY[section] the server answered, in order ('' = the whole message, 'HEADER', '2', '1.2' ...) */
+  readonly sectionFetches: Array<{ uid: number; section: string }> = [];
+  /** how many FETCH responses carried a BODYSTRUCTURE */
+  structureFetches = 0;
 
   constructor(private readonly opts: FakeServerOptions = {}) {
     this.folders = opts.folders ?? [
@@ -378,16 +382,18 @@ export class FakeImapServer {
       const hi = r[2] === '*' ? Number.MAX_SAFE_INTEGER : Number(r[2]);
       return folder.messages.filter((m) => m.uid >= lo && m.uid <= hi).map((m) => m.uid);
     });
+    // every BODY[...] / BODY.PEEK[...] item the client asked for, in order (RFC 3501 fetch-att)
+    const sections = [...what.matchAll(/BODY(?:\.PEEK)?\[([^\]]*)\](?:<(\d+)\.(\d+)>)?/gi)].map((m) => ({ section: m[1].toUpperCase(), from: m[2] ? Number(m[2]) : null, len: m[3] ? Number(m[3]) : null }));
+    if (/\bRFC822\b(?!\.)/i.test(what)) sections.push({ section: '', from: null, len: null });
     const lines: Array<string | Buffer> = [];
     let seq = 0;
     for (const m of folder.messages) {
       seq++;
       if (!uids.includes(m.uid)) continue;
-      const wantsBody = /BODY(\.PEEK)?\[\]|RFC822/i.test(what);
-      const wantsHeader = /BODY(\.PEEK)?\[HEADER/i.test(what);
+      const bytes = m.bytes ?? Buffer.from(m.raw, 'utf8');
       const date = /^Date:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? 'Mon, 01 Jan 2024 00:00:00 +0000';
       // a real server always sends INTERNALDATE; without it the store's sort order is the test's clock
-      const attrs = [`UID ${m.uid}`, `FLAGS (${m.flags.join(' ')})`, `RFC822.SIZE ${m.bytes?.length ?? Buffer.byteLength(m.raw)}`, `INTERNALDATE "${date}"`];
+      const attrs = [`UID ${m.uid}`, `FLAGS (${m.flags.join(' ')})`, `RFC822.SIZE ${bytes.length}`, `INTERNALDATE "${date}"`];
       if (/ENVELOPE/i.test(what)) {
         const subject = /^Subject:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? '';
         const fromRaw = /^From:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? '';
@@ -403,16 +409,29 @@ export class FakeImapServer {
         const msgId = /^Message-ID:\s*(<[^>\r\n]*>)/im.exec(m.raw)?.[1] ?? `<${subject.replace(/\s+/g, '.')}@example.com>`;
         attrs.push(`ENVELOPE ("Mon, 01 Jan 2024 00:00:00 +0000" "${subject}" (("${fromName}" NIL "${from.split('@')[0]}" "${from.split('@')[1] ?? ''}")) NIL NIL NIL NIL NIL NIL "${msgId}")`);
       }
-      if (wantsBody || wantsHeader) {
-        // BYTES: `{N}` is an octet count, so a non-ASCII message announces more than its JS length
-        const payload = wantsHeader ? Buffer.from(m.raw.split(/\r?\n\r?\n/)[0] + '\r\n', 'utf8') : (m.bytes ?? Buffer.from(m.raw, 'utf8'));
-        const size = this.lieAboutLiteralSize ?? payload.length;
-        const section = wantsBody && !wantsHeader ? 'BODY[]' : 'BODY[HEADER]';
-        lines.push(Buffer.concat([Buffer.from(`* ${seq} FETCH (${attrs.join(' ')} ${section} {${size}}\r\n`, 'utf8'), payload, Buffer.from(')\r\n')]));
-        this.literals++;
-        continue;
+      const chunks: Buffer[] = [Buffer.from(`* ${seq} FETCH (${attrs.join(' ')}`, 'utf8')];
+      if (/\bBODYSTRUCTURE\b/i.test(what)) {
+        this.structureFetches++;
+        chunks.push(Buffer.from(` BODYSTRUCTURE ${bodyStructure(parseEntity(bytes.toString('latin1')))}`, 'latin1'));
       }
-      lines.push(`* ${seq} FETCH (${attrs.join(' ')})\r\n`);
+      let first = true;
+      for (const sec of sections) {
+        let payload: Buffer | null = sectionOf(bytes, sec.section);
+        if (payload && sec.from !== null) payload = payload.subarray(sec.from, sec.len !== null ? sec.from + sec.len : undefined);
+        this.sectionFetches.push({ uid: m.uid, section: sec.section });
+        const key = `BODY[${sec.section}]${sec.from !== null ? `<${sec.from}>` : ''}`;
+        if (payload === null) {
+          chunks.push(Buffer.from(` ${key} NIL`, 'latin1'));
+          continue;
+        }
+        // BYTES: `{N}` is an octet count, so a non-ASCII message announces more than its JS length
+        const size = first && this.lieAboutLiteralSize !== null ? this.lieAboutLiteralSize : payload.length;
+        first = false;
+        chunks.push(Buffer.from(` ${key} {${size}}\r\n`, 'latin1'), payload);
+        this.literals++;
+      }
+      chunks.push(Buffer.from(')\r\n'));
+      lines.push(Buffer.concat(chunks));
     }
     this.ok(tag, 'FETCH completed', lines);
   }
@@ -443,3 +462,192 @@ export class FakeImapServer {
     return this.log.join('');
   }
 }
+
+// ---------------------------------------------------------------- MIME, as a SERVER sees it
+//
+// An independent, deliberately small MIME splitter (it does NOT reuse src/core/mail/mime.ts: a fake
+// that shares the client's parser would agree with the client's bugs). Everything works on a latin1
+// view of the message BYTES, so offsets and sizes are octets and 8-bit content survives untouched.
+
+interface Entity {
+  /** the header block, without the blank line that ends it */
+  head: string;
+  /** everything after the blank line */
+  body: string;
+  headers: Array<[string, string]>;
+  type: string;
+  subtype: string;
+  /** Content-Type parameters in the order and spelling the header has them (RFC 2231 names kept as-is) */
+  params: Array<[string, string]>;
+  children: Entity[];
+  /** the embedded message of a message/rfc822 part */
+  message: Entity | null;
+}
+
+function splitHead(raw: string): { head: string; body: string } {
+  const m = /\r?\n\r?\n/.exec(raw);
+  if (!m) return { head: raw.replace(/\r?\n$/, ''), body: '' };
+  return { head: raw.slice(0, m.index), body: raw.slice(m.index + m[0].length) };
+}
+
+function headerList(head: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const line of head.split(/\r?\n/)) {
+    if (/^[ \t]/.test(line) && out.length) out[out.length - 1][1] += ` ${line.trim()}`;
+    else {
+      const i = line.indexOf(':');
+      if (i > 0) out.push([line.slice(0, i).trim().toLowerCase(), line.slice(i + 1).trim()]);
+    }
+  }
+  return out;
+}
+
+const hget = (h: Array<[string, string]>, k: string) => h.find(([n]) => n === k)?.[1];
+
+/** `type/sub; a=b; c="d;e"` -> value + ordered params, quotes removed, `\` escapes undone */
+function headerParams(v: string): { value: string; params: Array<[string, string]> } {
+  const parts: string[] = [];
+  let cur = '';
+  let q = false;
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i];
+    if (q && c === '\\') {
+      cur += c + (v[i + 1] ?? '');
+      i++;
+      continue;
+    }
+    if (c === '"') q = !q;
+    if (c === ';' && !q) {
+      parts.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += c;
+  }
+  parts.push(cur);
+  const params: Array<[string, string]> = [];
+  for (const p of parts.slice(1)) {
+    const eq = p.indexOf('=');
+    if (eq <= 0) continue;
+    let val = p.slice(eq + 1).trim();
+    if (val.startsWith('"') && val.endsWith('"') && val.length >= 2) val = val.slice(1, -1).replace(/\\(.)/g, '$1');
+    params.push([p.slice(0, eq).trim(), val]);
+  }
+  return { value: parts[0].trim().toLowerCase(), params };
+}
+
+function parseEntity(raw: string, defaultType = 'text/plain', depth = 0): Entity {
+  const { head, body } = splitHead(raw);
+  const headers = headerList(head);
+  const ctRaw = hget(headers, 'content-type');
+  const ct = ctRaw ? headerParams(ctRaw) : { value: defaultType, params: defaultType === 'text/plain' ? ([['charset', 'us-ascii']] as Array<[string, string]>) : [] };
+  const [type, subtype] = ct.value.includes('/') ? ct.value.split('/', 2) : ['text', 'plain'];
+  const e: Entity = { head, body, headers, type, subtype, params: ct.params, children: [], message: null };
+  if (depth > 20) return e;
+  if (type === 'multipart') {
+    const boundary = ct.params.find(([k]) => k.toLowerCase() === 'boundary')?.[1] ?? '';
+    // RFC 2046: the CRLF before a delimiter belongs to the delimiter, not to the part
+    const delim = new RegExp(`(?:^|\\r?\\n)--${boundary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(--)?[ \\t]*(?:\\r?\\n|$)`, 'g');
+    const marks = [...body.matchAll(delim)];
+    for (let i = 0; i + 1 < marks.length && !marks[i][1]; i++) {
+      const start = marks[i].index! + marks[i][0].length;
+      const end = marks[i + 1].index!;
+      e.children.push(parseEntity(body.slice(start, end), subtype === 'digest' ? 'message/rfc822' : 'text/plain', depth + 1));
+    }
+  } else if (type === 'message' && (subtype === 'rfc822' || subtype === 'global')) {
+    e.message = parseEntity(body, 'text/plain', depth + 1);
+  }
+  return e;
+}
+
+/** An IMAP string: quoted when it can be, a literal when it holds CR / LF / 8-bit bytes, NIL for none. */
+function istr(v: string | undefined | null): string {
+  if (v === undefined || v === null) return 'NIL';
+  if (/[\r\n\x00\x80-\xff]/.test(v)) return `{${Buffer.byteLength(v, 'latin1')}}\r\n${v}`;
+  return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function plist(params: Array<[string, string]>): string {
+  return params.length ? `(${params.map(([k, v]) => `${istr(k)} ${istr(v)}`).join(' ')})` : 'NIL';
+}
+
+function addrList(v: string | undefined): string {
+  if (!v) return 'NIL';
+  const out: string[] = [];
+  for (const a of v.split(',')) {
+    const m = /^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/.exec(a) ?? [a, '', a.trim()];
+    const [mbox, host] = String(m[2]).split('@');
+    out.push(`(${m[1] ? istr(m[1]) : 'NIL'} NIL ${istr(mbox)} ${istr(host ?? '')})`);
+  }
+  return `(${out.join('')})`;
+}
+
+function envelope(e: Entity): string {
+  const h = (k: string) => hget(e.headers, k);
+  const from = addrList(h('from'));
+  return `(${istr(h('date'))} ${istr(h('subject'))} ${from} ${h('sender') ? addrList(h('sender')) : from} ${h('reply-to') ? addrList(h('reply-to')) : from} ${addrList(h('to'))} ${addrList(h('cc'))} ${addrList(h('bcc'))} ${istr(h('in-reply-to'))} ${istr(h('message-id'))})`;
+}
+
+/** body-fld-dsp, body-fld-lang, body-fld-loc: Dovecot sends all three (NIL when absent) */
+function extTail(e: Entity): string {
+  const d = hget(e.headers, 'content-disposition');
+  const dsp = d ? (() => {
+    const p = headerParams(d);
+    return `(${istr(p.value)} ${plist(p.params)})`;
+  })() : 'NIL';
+  return `${dsp} NIL NIL`;
+}
+
+/** RFC 3501 section 7.4.2 BODYSTRUCTURE, extension data included, as Dovecot lays it out. */
+function bodyStructure(e: Entity): string {
+  if (e.type === 'multipart') {
+    // body-type-mpart = 1*body SP media-subtype [SP body-ext-mpart]: NO space between the parts
+    return `(${e.children.map(bodyStructure).join('')} ${istr(e.subtype)} ${plist(e.params)} ${extTail(e)})`;
+  }
+  const enc = (hget(e.headers, 'content-transfer-encoding') ?? '7bit').toLowerCase();
+  const id = hget(e.headers, 'content-id');
+  const desc = hget(e.headers, 'content-description');
+  const fields = `${istr(e.type)} ${istr(e.subtype)} ${plist(e.params)} ${istr(id)} ${istr(desc)} ${istr(enc)} ${Buffer.byteLength(e.body, 'latin1')}`;
+  const lines = (e.body.match(/\n/g) ?? []).length;
+  if (e.type === 'text') return `(${fields} ${lines} NIL ${extTail(e)})`;
+  if (e.message) return `(${fields} ${envelope(e.message)} ${bodyStructure(e.message)} ${lines} NIL ${extTail(e)})`;
+  return `(${fields} NIL ${extTail(e)})`;
+}
+
+/** BODY[section] per RFC 3501 6.4.5: '', HEADER, TEXT, n.n.n, n.MIME, n.HEADER, n.TEXT. Null = no such part. */
+function sectionOf(bytes: Buffer, spec: string): Buffer | null {
+  const raw = bytes.toString('latin1');
+  const out = (s: string) => Buffer.from(s, 'latin1');
+  if (spec === '') return Buffer.from(bytes);
+  const root = parseEntity(raw);
+  if (spec === 'HEADER') return out(`${root.head}\r\n\r\n`);
+  if (spec === 'TEXT') return out(root.body);
+  const toks = spec.split('.');
+  let cur: Entity | null = null;
+  let ctx: Entity = root;
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (/^\d+$/.test(t)) {
+      if (cur) {
+        // a further number addresses INSIDE the current part: a multipart's children, or an attached
+        // message's own parts
+        if (cur.message) ctx = cur.message;
+        else if (cur.type === 'multipart') ctx = cur;
+        else return null;
+      }
+      const n = Number(t);
+      if (ctx.type === 'multipart') cur = ctx.children[n - 1] ?? null;
+      else cur = n === 1 ? ctx : null;
+      if (!cur) return null;
+      continue;
+    }
+    if (!cur || i !== toks.length - 1) return null;
+    if (t === 'MIME') return out(`${cur.head}\r\n\r\n`);
+    if (t === 'HEADER' && cur.message) return out(`${cur.message.head}\r\n\r\n`);
+    if (t === 'TEXT' && cur.message) return out(cur.message.body);
+    return null;
+  }
+  return cur ? out(cur.body) : null;
+}
+
+export { bodyStructure as fakeBodyStructure, parseEntity as fakeParseEntity, sectionOf as fakeSectionOf };

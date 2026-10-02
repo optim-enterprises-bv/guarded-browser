@@ -19,9 +19,14 @@
 // choice for plain text.
 
 import { randomBytes } from 'node:crypto';
+import { MAX_COMPOSE_ATTACHMENT_BYTES, MAX_COMPOSE_ATTACHMENTS, mimeForFilename, sanitizeFilename } from './attachments';
 
-/** a whole message may not exceed this many bytes (the common provider limit) */
-export const MAX_MESSAGE_BYTES = 25 * 1024 * 1024;
+/**
+ * a whole message may not exceed this many bytes. The files a user attaches are capped at 25 MB
+ * (MAX_COMPOSE_ATTACHMENT_BYTES, the common provider limit); base64 makes them a third larger on the
+ * wire, so the encoded message gets that headroom. The server's own SIZE is checked by smtp.ts.
+ */
+export const MAX_MESSAGE_BYTES = 36 * 1024 * 1024;
 /** distinct envelope recipients per message */
 export const MAX_RECIPIENTS = 100;
 /** the raw text of one address field */
@@ -384,8 +389,88 @@ export interface ComposeInput {
   inReplyTo?: string;
   references?: string[];
   date?: Date;
-  /** test seam for the Message-ID's random part */
+  /** files to attach: BYTES, with the name they are sent under (sanitized again here) */
+  attachments?: OutgoingAttachment[];
+  /** test seam for the Message-ID's random part (and the multipart boundary) */
   random?: () => string;
+}
+
+export interface OutgoingAttachment {
+  filename: string;
+  /** the type to declare; from the extension when absent */
+  mime?: string;
+  data: Buffer;
+}
+
+// ---------------------------------------------------------------- attachments (ticket 41)
+
+/** Base64 of the BYTES in 76-character lines (RFC 2045 6.8), CRLF-separated. */
+export function base64Lines(data: Buffer): string {
+  const b64 = data.toString('base64');
+  const out: string[] = [];
+  for (let i = 0; i < b64.length; i += 76) out.push(b64.slice(i, i + 76));
+  return out.join('\r\n');
+}
+
+/** An ASCII stand-in for a non-ASCII name, for clients that ignore RFC 2231. Never empty, never a quote. */
+export function asciiFallbackName(name: string): string {
+  const d = name.lastIndexOf('.');
+  const ext = d > 0 ? name.slice(d).replace(/[^\x21-\x7e]/g, '') : '';
+  const stem = (d > 0 ? name.slice(0, d) : name)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\x20-\x7e]/g, '_')
+    .replace(/["\\]/g, '_')
+    .trim();
+  return `${stem || 'attachment'}${ext.replace(/["\\]/g, '_')}`.slice(0, 120);
+}
+
+/** RFC 2231 percent-encoding of the UTF-8 bytes (attribute-char only; everything else is %XX). */
+function pct2231(name: string): string {
+  let out = '';
+  for (const b of Buffer.from(name, 'utf8')) {
+    const c = String.fromCharCode(b);
+    out += /[A-Za-z0-9!#$&+.^_`|~-]/.test(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, '0')}`;
+  }
+  return out;
+}
+
+/**
+ * The parameter lines for a file name: `name="..."` / `filename="..."` with an ASCII fallback, plus,
+ * for a non-ASCII name, RFC 2231 `filename*` — split into numbered continuations (`filename*0*=`,
+ * `filename*1*=`) so no header line approaches the 998-character limit. Each returned string is one
+ * folded line's content (the caller joins them with `;\r\n `).
+ */
+export function filenameParams(name: string, param: 'filename' | 'name'): string[] {
+  const plain = /^[\x20-\x7e]+$/.test(name) && !/["\\]/.test(name);
+  if (plain) return [`${param}="${name}"`];
+  const out = [`${param}="${asciiFallbackName(name)}"`];
+  if (param === 'name') return out; // the extended form goes on Content-Disposition only
+  const enc = `utf-8''${pct2231(name)}`;
+  if (enc.length <= 60) return [...out, `${param}*=${enc}`];
+  // continuations: never split a %XX triplet
+  const segs: string[] = [];
+  let cur = '';
+  for (let i = 0; i < enc.length; ) {
+    const tok = enc[i] === '%' ? enc.slice(i, i + 3) : enc[i];
+    if (cur.length + tok.length > 60) {
+      segs.push(cur);
+      cur = '';
+    }
+    cur += tok;
+    i += tok.length;
+  }
+  if (cur) segs.push(cur);
+  return [...out, ...segs.map((seg, i) => `${param}*${i}*=${seg}`)];
+}
+
+/** One attachment as a MIME body part (headers + base64 body), CRLF line ends. */
+export function attachmentPart(a: OutgoingAttachment): string {
+  const name = sanitizeFilename(a.filename);
+  const mime = a.mime && /^[a-z0-9!#$&^_.+-]{1,60}\/[a-z0-9!#$&^_.+-]{1,80}$/i.test(a.mime) ? a.mime.toLowerCase() : mimeForFilename(name);
+  const ct = [mime, ...filenameParams(name, 'name')].join(';\r\n ');
+  const cd = ['attachment', ...filenameParams(name, 'filename')].join(';\r\n ');
+  return `Content-Type: ${ct}\r\nContent-Disposition: ${cd}\r\nContent-Transfer-Encoding: base64\r\n\r\n${base64Lines(a.data)}`;
 }
 
 export interface BuiltMessage {
@@ -437,9 +522,28 @@ export function buildMessage(input: ComposeInput): Result<BuiltMessage> {
   if (parent) headers.push(`In-Reply-To: ${parent}`);
   const refs = (input.references ?? []).map(normalizeMessageId).filter((x): x is string => !!x);
   if (refs.length) headers.push(foldTokens('References', refs));
-  headers.push('MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: quoted-printable');
 
-  const raw = `${headers.join('\r\n')}\r\n\r\n${encodeQuotedPrintable(body)}\r\n`;
+  const files = input.attachments ?? [];
+  if (files.length > MAX_COMPOSE_ATTACHMENTS) return { ok: false, error: `at most ${MAX_COMPOSE_ATTACHMENTS} attachments per message` };
+  const fileBytes = files.reduce((n, f) => n + f.data.length, 0);
+  if (fileBytes > MAX_COMPOSE_ATTACHMENT_BYTES) {
+    return { ok: false, error: `the attachments are ${(fileBytes / 1048576).toFixed(1)} MB together; the limit is ${MAX_COMPOSE_ATTACHMENT_BYTES / 1048576} MB` };
+  }
+  let raw: string;
+  if (!files.length) {
+    headers.push('MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: quoted-printable');
+    raw = `${headers.join('\r\n')}\r\n\r\n${encodeQuotedPrintable(body)}\r\n`;
+  } else {
+    // multipart/mixed: the text first, then each file. The boundary is random and cannot occur in
+    // base64 or quoted-printable output (both lack '=_' followed by this run of characters).
+    const boundary = `=_gb_${(input.random ?? (() => randomBytes(18).toString('base64url')))().replace(/[^A-Za-z0-9]/g, '').slice(0, 40) || 'boundary'}`;
+    headers.push('MIME-Version: 1.0', `Content-Type: multipart/mixed;\r\n boundary="${boundary}"`);
+    const parts = [
+      `Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n${encodeQuotedPrintable(body)}`,
+      ...files.map(attachmentPart),
+    ];
+    raw = `${headers.join('\r\n')}\r\n\r\nThis is a multi-part message in MIME format.\r\n${parts.map((p) => `--${boundary}\r\n${p}\r\n`).join('')}--${boundary}--\r\n`;
+  }
   const bytes = Buffer.byteLength(raw, 'utf8');
   if (bytes > MAX_MESSAGE_BYTES) return { ok: false, error: `the message is ${Math.ceil(bytes / 1048576)} MB; the limit is ${MAX_MESSAGE_BYTES / 1048576} MB` };
   return {

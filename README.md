@@ -487,13 +487,54 @@ in-memory session, every request blocked unless you press *Load External Content
   so an expired OAuth account is refused with that message). Bytes the server sends between "ready to
   start TLS" and the handshake (STARTTLS injection) fail the send. Plaintext SMTP and port 25 are
   refused. A rejected recipient aborts the whole send and is reported per recipient; the server's
-  SIZE and a 25 MB cap are enforced on the byte size; every step has a timeout.
+  SIZE and our own 36 MB cap (25 MB of attachments, base64-encoded, plus the text) are enforced on
+  the byte size; every step has a timeout.
 * **Messages are built strictly**: a line break in a subject, name or address is refused (not
   silently stripped), addresses go through a strict linear parser, Bcc is envelope-only (never a
   header), non-ASCII subjects and names are RFC 2047 encoded-words, the body is UTF-8
   quoted-printable, replies carry In-Reply-To / References and `Re: ` / `Fwd: ` without stacking.
 * **Divergence from Vivaldi: plain text only in v1.** There is no rich-text / HTML compose and no
-  inline images. Quoting and forwarding use the original's stored *text* body, never its HTML.
+  inline images in what you write (received inline images are shown, see below). Quoting and
+  forwarding use the original's stored *text* body, never its HTML.
+
+**Attachments** (ticket 41):
+* **Receiving.** When a message is opened, the client asks the server for its **BODYSTRUCTURE** and
+  then fetches only the header and the readable text parts — an attachment's bytes do not cross the
+  network when you open the message (a 200 MB attachment no longer stops a message from opening
+  either). Attachments are listed as chips under the message: name, type, size, and a warning for
+  executable / script types and for a disguised double extension (`invoice.pdf.exe`). File names
+  are decoded (RFC 2231 continuations and charsets, RFC 2047) and then **sanitized** before they are
+  shown or used: no path separators, control characters, bidi overrides (U+202E) or zero-width
+  characters, no leading dots, no Windows device names (`CON`, `NUL`, `COM1`…), capped at 120
+  characters with the extension kept. An attached message (`message/rfc822`) is one `.eml` file.
+* **Download only on a click**: `UID FETCH n BODY.PEEK[section]` for that part alone, decoded as
+  bytes (base64 / quoted-printable / 7bit / 8bit / binary), capped at **50 MB** (a part whose
+  declared size is larger is refused before anything is fetched), and handed to the browser's
+  download path: the downloads folder, a unique name (`report (1).pdf`, never an overwrite), mode
+  0600, and an entry in the downloads list with the same dangerous-file warning a page download
+  gets. The bytes are written nowhere else (not the store, not a cache). Every download is audited
+  with the account, message id, section, size, type and sanitized name — never the content.
+* **Open** downloads the file if needed and then shows a **main-process dialog** naming the file
+  and its type; an executable or script also needs the *I understand this file can run programs*
+  box ticked. Nothing is ever opened automatically.
+* **Sending.** *Attach…* in the compose form asks main to show the system file dialog — the page
+  never supplies a path or any bytes (there is no drag-and-drop, which would need it to). Each chosen
+  file is **copied** into the profile's private `mail-outbox/<draft>/` directory (0700, files 0600), so
+  editing or deleting the original afterwards cannot change what is sent and a restart keeps it; the
+  copy is removed when the draft is discarded or its message is queued for sending (the Outbox then
+  holds the complete message). The attachments are capped at **25 MB together** (the server's SIZE
+  is also honoured). The message is multipart/mixed: the text first, then each file in base64
+  (76-column lines), its type from the extension (default `application/octet-stream`), and an RFC
+  2231 `filename*` (continued when long) plus a plain ASCII fallback name.
+* **Forward** carries the original's attachments (an *Include the original's attachments* checkbox
+  lists them and can drop them). They are fetched from the server **at send time**, through the same
+  gate: during an agent task such a forward is refused and the draft kept, rather than queued.
+* **Inline images** (`cid:` references in an HTML message) are part of the message, not remote
+  content, so they are shown without *Load External Content*: when the message is displayed, main
+  fetches those parts through the gate, accepts them only if their bytes are PNG, JPEG, GIF or WebP
+  (never SVG) and small (512 KB each, 1 MB together), and writes them into the sanitized document as
+  `data:` URLs. The view's CSP stays `img-src data:` and it still fetches nothing itself; the
+  inline images are not listed as attachments.
 
 Security:
 * **The agent cannot read, compose or send mail.** There is no planner tool for mail; the mail
@@ -502,12 +543,19 @@ Security:
   driver or the tab preload imports can reach the SMTP / compose / mail-controller code. Nothing in
   a page or a message can fill the compose fields (a `mailto:` link in an HTML message is ignored).
 * **No mail network activity during an agent task or while a confirmation is pending**: sync, body
-  fetch, flag / move, send and the Sent APPEND are all refused. A message sent during a task stays in
+  fetch, flag / move, send, the Sent APPEND, an attachment download or Open, and the inline-image
+  fetch are all refused (with the reason in the status line). A message sent during a task stays in
   the Outbox with the reason and goes out **only** when you press Send / Retry after the task —
   nothing queued during a task is flushed automatically, and a task starting cancels every pending
   automatic retry.
 * **Every send is audited**: account, recipient *count* and *domains*, byte size, result (and the
   Sent copy's outcome) — never the body, the subject or a full address.
+* **Attachments never reach a model**: their names and bytes are not in any planner / reader / judge
+  input, the agent has no tool that lists downloads or files, and a structural test asserts that
+  nothing on the agent's side imports the attachment code or the downloads list. The four attachment
+  channels (`mail:attachment-download`, `mail:attachment-open`, `mail:attach-pick`,
+  `mail:attach-remove`) are chrome-only like every mail channel (a tab gets `unknown sender`,
+  tested).
 
 ### Split view (tab tiling)
 Tile 2-4 tabs **side by side**, **stacked** or as a **grid** (3 tabs: two on top, one below; 4: 2x2).

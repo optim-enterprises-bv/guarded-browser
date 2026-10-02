@@ -18,8 +18,13 @@
 
 import type { MailAccount } from './accounts';
 import { MailStore, htmlToText, type MessageHeader, type FolderKind } from '../../core/mail/store';
-import { ImapClient, type SocketFactory, type ImapSocket, type FetchResult, sanitizeDetail } from '../../core/mail/imap';
-import { parseHeaders, summaryFromHeaders, extractContent, parseMime, decodeWords, MAX_HEADER_BYTES } from '../../core/mail/mime';
+import { ImapClient, MAX_LITERAL, type SocketFactory, type ImapSocket, type FetchResult, sanitizeDetail } from '../../core/mail/imap';
+import { parseHeaders, summaryFromHeaders, extractContent, parseMime, decodeWords, MAX_HEADER_BYTES, type MimePart, type ExtractedContent } from '../../core/mail/mime';
+import { parseBodyStructure, planParts, referencedCids, isInlineImage, decodedSizeEstimate, partMime, type BodyPart } from '../../core/mail/attachments';
+import type { Attachment } from '../../core/mail/store';
+
+/** readable text parts fetched when a message opens (a hostile structure can claim thousands) */
+const MAX_TEXT_SECTIONS = 20;
 
 export type SyncState = 'offline' | 'connecting' | 'online' | 'error';
 
@@ -351,41 +356,108 @@ export class MailSyncer {
     const ready = await this.ensureClient();
     const c = ready.client;
     if (!c) return { ok: false, error: ready.refused ?? ready.error ?? 'not connected' };
-    let bytes: Buffer;
+    let got: { header: string; content: ExtractedContent; attachments: Attachment[] } | null;
     try {
       // SELECT, not EXAMINE: a read-only mailbox refuses the \Seen STORE below
       await c.select(folder, false);
-      bytes = await c.uidBodyBytes(uid);
+      // ticket 41: the STRUCTURE first, then only the readable text parts — an attachment's bytes do
+      // not cross the network until the user clicks it. A server whose BODYSTRUCTURE cannot be read
+      // gets the old whole-message fetch instead.
+      got = (await this.fetchByStructure(c, uid)) ?? (await this.fetchWhole(c, uid));
     } catch (e) {
       this.lastError = sanitizeDetail((e as Error).message);
       return { ok: false, error: this.lastError };
     }
-    if (!bytes.length) {
+    if (!got) {
       // a NIL body: record that we tried, so the UI does not spin forever
       this.deps.store.setBody(this.account.id, folder, uid, { text: '', rawHeader: '' });
       return { ok: false, error: 'the server returned no message body' };
     }
-    const root = parseMime(bytes);
-    const content = extractContent(root);
-    const headerBlock = bytes.toString('utf8').split(/\r\n\r\n|\n\n/)[0] ?? '';
+    const { content, attachments } = got;
     this.deps.store.setBody(this.account.id, folder, uid, {
       text: content.text,
       // the store's own HTML-to-text pass runs only when there is no plain part, and its
       // remote-content flag is what the UI shows as "remote content was not loaded"
       html: content.html,
-      rawHeader: headerBlock,
-      attachments: content.attachments,
+      rawHeader: got.header,
+      attachments,
     });
     this.deps.store.setFlags([row.id], { seen: true, ...(opts.markRead ? { readFlag: true } : {}) });
     // \Seen is written BACK to the server, but only when the user's action implies it
     if (opts.markRead) await c.uidStore([uid], 'add', ['Seen']).catch(() => undefined);
-    this.deps.audit?.({ kind: 'fetch', detail: `${folder} uid ${uid}: ${content.text.length} chars, ${content.attachments.length} attachment(s)` });
+    const listed = attachments.filter((a) => !a.inline).length;
+    this.deps.audit?.({ kind: 'fetch', detail: `${folder} uid ${uid}: ${content.text.length} chars, ${listed} attachment(s)` });
     return {
       ok: true,
       remoteContent: content.remoteContent || htmlToText(content.html).remoteContent,
-      attachments: content.attachments.length,
+      attachments: listed,
       charsetLossy: content.charsetLossy,
     };
+  }
+
+  /**
+   * BODYSTRUCTURE, then `BODY.PEEK[HEADER]` and each readable text section in ONE command. Each text
+   * section is decoded per the charset and transfer encoding the structure declares. Attachments are
+   * METADATA from the structure (section, type, encoding, size, Content-ID); an image the HTML shows
+   * through cid: is recorded `inline` and not listed. Null when the structure is unusable.
+   */
+  private async fetchByStructure(c: ImapClient, uid: number): Promise<{ header: string; content: ExtractedContent; attachments: Attachment[] } | null> {
+    const res = (await c.uidFetch(String(uid), '(UID BODYSTRUCTURE)')).find((f) => f.uid === uid);
+    const root = parseBodyStructure(res?.bodyStructure);
+    if (!root) return null;
+    const plan = planParts(root);
+    const text = plan.text.filter((p) => p.size <= MAX_LITERAL).slice(0, MAX_TEXT_SECTIONS);
+    const items = ['BODY.PEEK[HEADER]', ...text.map((p) => `BODY.PEEK[${p.section}]`)];
+    const got = (await c.uidFetch(String(uid), `(UID ${items.join(' ')})`)).find((f) => f.uid === uid);
+    if (!got) return null;
+    const bytesOf = (key: string) => got.sectionBytes[key] ?? Buffer.from(got.sections[key] ?? '', 'utf8');
+    const header = bytesOf('HEADER');
+    const leaves = text.map((p) => textLeaf(p, bytesOf(p.section)));
+    if (!header.toString('latin1').trim() && leaves.every((l) => !l.body.trim())) return null;
+    const content = extractContent({ headers: [], contentType: 'multipart/mixed', params: {}, encoding: '7bit', body: '', parts: leaves, filename: '', contentId: '', truncated: plan.text.length > text.length });
+    const cids = referencedCids(content.html);
+    const attachments: Attachment[] = plan.attachments.slice(0, 200).map((p) => ({
+      partId: p.section,
+      filename: p.filename || (p.type === 'message' ? 'message.eml' : ''),
+      mime: partMime(p),
+      size: decodedSizeEstimate(p.encoding, p.size),
+      encoding: p.encoding,
+      disposition: p.disposition,
+      contentId: p.id,
+      inline: isInlineImage(p, cids),
+    }));
+    return { header: header.toString('utf8').replace(/(\r?\n)+$/, ''), content, attachments };
+  }
+
+  /** The pre-ticket-41 path: the whole message in one literal, parsed locally. */
+  private async fetchWhole(c: ImapClient, uid: number): Promise<{ header: string; content: ExtractedContent; attachments: Attachment[] } | null> {
+    const bytes = await c.uidBodyBytes(uid);
+    if (!bytes.length) return null;
+    const content = extractContent(parseMime(bytes));
+    return { header: bytes.toString('utf8').split(/\r\n\r\n|\n\n/)[0] ?? '', content, attachments: content.attachments };
+  }
+
+  /**
+   * ONE attachment's bytes, still transfer-encoded (the caller decodes). Gated like every other
+   * network action, opened read-only (EXAMINE: BODY.PEEK changes no flag), and audited by section and
+   * size only. `maxEncodedBytes` bounds the literal the client will accept for this command.
+   */
+  async fetchPart(folder: string, uid: number, section: string, maxEncodedBytes: number): Promise<{ ok: true; bytes: Buffer } | { ok: false; error: string; refused?: boolean }> {
+    const no = this.refused('attachment fetch');
+    if (no) return { ok: false, error: no, refused: true };
+    const ready = await this.ensureClient();
+    const c = ready.client;
+    if (!c) return { ok: false, error: ready.refused ?? ready.error ?? 'not connected', refused: !!ready.refused };
+    try {
+      await c.select(folder, true);
+      const bytes = await c.uidFetchPart(uid, section, maxEncodedBytes);
+      if (!bytes) return { ok: false, error: 'the server returned nothing for that part' };
+      this.deps.audit?.({ kind: 'fetch', detail: `${folder} uid ${uid} part ${section}: ${bytes.length} bytes` });
+      return { ok: true, bytes };
+    } catch (e) {
+      this.lastError = sanitizeDetail((e as Error).message);
+      return { ok: false, error: this.lastError };
+    }
   }
 
   /** Mark messages read / unread / flagged, locally and on the server. */
@@ -527,4 +599,18 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener('abort', done, { once: true });
   });
+}
+
+/**
+ * A readable text part as a MIME leaf: the section's BYTES behind a synthetic header that carries ONLY
+ * the structure's charset and transfer encoding (both re-validated, so a server string cannot add a
+ * header line), decoded by mime.ts exactly as a part of a whole message would be. `us-ascii` is read
+ * as UTF-8, its superset: a mislabelled 8-bit body then shows its letters instead of mojibake.
+ */
+function textLeaf(p: BodyPart, bytes: Buffer): MimePart {
+  const cs0 = String(p.params.charset ?? '').toLowerCase();
+  const charset = /^[a-z0-9._:-]{1,40}$/.test(cs0) && cs0 !== 'us-ascii' && cs0 !== 'ascii' ? cs0 : 'utf-8';
+  const enc = /^(7bit|8bit|binary|quoted-printable|base64)$/.test(p.encoding) ? p.encoding : '7bit';
+  const head = Buffer.from(`Content-Type: text/${p.subtype === 'html' ? 'html' : 'plain'}; charset=${charset}\r\nContent-Transfer-Encoding: ${enc}\r\n\r\n`, 'latin1');
+  return parseMime(Buffer.concat([head, bytes]));
 }

@@ -26,12 +26,28 @@
 //   * reply / forward text is quoted from the STORED TEXT body (`finalBody`), never from HTML and
 //     never from anything the renderer sends.
 
-import { readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import { decodeWords } from '../../core/mail/mime';
-import { MailStore, DB_FILE, type MessageRow, type DraftMode } from '../../core/mail/store';
+import { MailStore, DB_FILE, type MessageRow, type DraftMode, type Attachment } from '../../core/mail/store';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_COMPOSE_ATTACHMENT_BYTES,
+  MAX_COMPOSE_ATTACHMENTS,
+  MAX_INLINE_IMAGE_BYTES,
+  MAX_INLINE_TOTAL_BYTES,
+  attachmentName,
+  decodeTransfer,
+  mimeForFilename,
+  normalizeCid,
+  referencedCids,
+  sanitizeFilename,
+  sniffImage,
+} from '../../core/mail/attachments';
+import { fileRisk } from '../../core/downloads';
 import { SecretStore, SECRETS_FILE, plaintextWarning, keychainBackend } from './secrets';
 import { normalizeAccount, testAccount, type MailAccount } from './accounts';
 import { MailSyncer } from './sync';
@@ -41,6 +57,7 @@ import { smtpSend, type SmtpAuth, type SmtpResult, type SmtpSocketFactory } from
 import {
   buildMessage,
   buildReferences,
+  type OutgoingAttachment,
   forwardBlock,
   forwardSubject,
   formatAddressForInput,
@@ -83,7 +100,33 @@ export interface MailControllerDeps {
   retryBaseMs?: number;
   /** per-step SMTP timeout (tests shorten it) */
   smtpTimeoutMs?: number;
+  /**
+   * Ticket 41: write a downloaded attachment through the browser's download path (the downloads
+   * folder, a unique never-overwriting name, the downloads list with its dangerous-file warning).
+   * Absent = downloads unavailable.
+   */
+  saveDownload?: (f: { name: string; mime: string; bytes: Buffer }) => { ok: true; path: string } | { ok: false; error: string };
+  /** the "Open" confirmation, shown by MAIN (a native dialog): true only for an explicit yes */
+  confirmOpen?: (q: { name: string; mime: string; warning: string; executable: boolean }) => Promise<boolean>;
+  /** open a saved file with the system handler; resolves '' on success, else the error */
+  openPath?: (path: string) => Promise<string>;
+  /** the system file picker, run by MAIN; resolves the chosen paths ([] = cancelled). The renderer never supplies a path. */
+  pickFiles?: () => Promise<string[]>;
 }
+
+/** where a draft's attached files are kept: `<profile>/mail-outbox/<draft id>/<attachment id>` */
+export const OUTBOX_DIR = 'mail-outbox';
+const SAFE_ID = /^[A-Za-z0-9_-]{8,64}$/;
+
+/** The largest literal a part with this decoded cap can arrive in (base64 is 4/3 + line breaks; QP up to 3x). */
+function encodedCap(encoding: string | undefined, decodedCap: number): number {
+  const e = String(encoding ?? '').toLowerCase();
+  if (e === 'base64') return Math.ceil((decodedCap * 4) / 3 / 76) * 78 + 1024;
+  if (e === 'quoted-printable') return decodedCap * 3 + 1024;
+  return decodedCap + 1024;
+}
+
+const mb = (n: number) => `${(n / 1048576).toFixed(1)} MB`;
 
 /** automatic retries per outbox item (transient failures only); the user's Retry is never limited */
 export const MAX_AUTO_ATTEMPTS = 5;
@@ -107,6 +150,8 @@ export interface ComposeFields {
   subject: string;
   body: string;
   includeQuoted: boolean;
+  /** a forward carries the original's attachments unless the user unticked it */
+  forwardAttachments: boolean;
 }
 
 export function composeFields(input: unknown): ComposeFields {
@@ -126,6 +171,7 @@ export function composeFields(input: unknown): ComposeFields {
     subject: str(o.subject, MAX_SUBJECT_CHARS),
     body: str(o.body, MAX_BODY_CHARS),
     includeQuoted: o.includeQuoted === true,
+    forwardAttachments: o.forwardAttachments !== false,
   };
 }
 
@@ -174,6 +220,10 @@ export class MailController {
   private readonly sendingDrafts = new Set<string>();
   /** set by dispose(): nothing may reopen the store or a connection afterwards */
   private disposed = false;
+  /** attachments saved this session (message id + section -> path), so Open reuses the download */
+  private readonly downloaded = new Map<string, string>();
+  /** inline cid: images per message (data: URLs), so redisplaying a message does not refetch them */
+  private readonly inlineCache = new Map<number, Map<string, string>>();
 
   constructor(private readonly deps: MailControllerDeps) {}
 
@@ -188,6 +238,8 @@ export class MailController {
       this.store.recoverOutbox();
       // subjects / names stored still encoded (before sync decoded the ENVELOPE) are fixed once
       this.store.repairEncodedHeaders((v) => decodeWords(v));
+      // attachment copies of drafts that no longer exist (discarded while the app was down, an account removed)
+      this.pruneDraftDirs();
       for (const a of this.store.listAccounts()) {
         const norm = this.accountFor(a.id);
         if (norm) this.accounts.set(a.id, norm);
@@ -387,7 +439,9 @@ export class MailController {
       text: body?.bodyText ?? '',
       hasHtml: !!html,
       remoteImages,
-      attachments: body?.attachments ?? [],
+      // listed attachments only (an inline cid: image is part of the HTML view), names sanitized,
+      // with the dangerous-file warning; the BYTES are fetched only by mail:attachment-download
+      attachments: attachmentsView(body?.attachments ?? []),
       remoteContent: body?.remoteContent ?? false,
       notice: html ? (remoteImages ? REMOTE_IMAGES_NOTICE : '') : externalContentNotice(body?.remoteContent ?? false),
       flagged: fresh.flagged,
@@ -401,6 +455,279 @@ export class MailController {
   /** The stored HTML body of a message, for the main-process HTML view ONLY (never returned over IPC). */
   htmlFor(id: number): string | null {
     return this.db().html(Number(id));
+  }
+
+  // ------------------------------------------------------------ attachments (ticket 41)
+
+  /**
+   * One stored attachment's BYTES, decoded: the gate first (refused during a task, with the reason),
+   * then the size cap against the DECLARED size (nothing is fetched for a part that is too big), then
+   * `UID FETCH n BODY.PEEK[section]` through the syncer, transfer-decoded as bytes and capped again.
+   */
+  private async attachmentBytes(id: number, partId: string, cap: number): Promise<
+    | { ok: true; row: MessageRow; meta: Attachment; name: string; bytes: Buffer }
+    | { ok: false; error: string; refused?: boolean }
+  > {
+    const row = this.db().byId(Number(id));
+    if (!row) return { ok: false, error: 'unknown message' };
+    const meta = this.db().body(row.id)?.attachments.find((a) => a.partId === partId);
+    if (!meta) return { ok: false, error: 'that message has no such attachment' };
+    const name = attachmentName(meta.filename, meta.mime);
+    const gate = this.deps.canConnect();
+    if (!gate.ok) return { ok: false, refused: true, error: `attachments are not downloaded while ${gate.reason ?? 'mail cannot connect'}` };
+    if (meta.size > cap) return { ok: false, error: `"${name}" is about ${mb(meta.size)}; attachments larger than ${cap / 1048576} MB are not downloaded` };
+    const s = this.syncerFor(row.accountId);
+    if (!s) return { ok: false, error: 'unknown account' };
+    const r = await s.fetchPart(row.folder, row.uid, meta.partId, encodedCap(meta.encoding, cap));
+    if (!r.ok) return { ok: false, error: r.refused ? `attachments are not downloaded while ${r.error}` : r.error, refused: r.refused };
+    const bytes = decodeTransfer(meta.encoding ?? '7bit', r.bytes);
+    if (bytes.length > cap) return { ok: false, error: `"${name}" is ${mb(bytes.length)}; attachments larger than ${cap / 1048576} MB are not downloaded` };
+    return { ok: true, row, meta, name, bytes };
+  }
+
+  /**
+   * The Download click: fetch the part and hand it to the browser's download path. The bytes go
+   * NOWHERE else (not the store, not a cache), and the audit line names the account, the message id,
+   * the size, the type and the sanitized name — never the content.
+   */
+  async downloadAttachment(id: unknown, partId: unknown): Promise<{ ok: boolean; error?: string; refused?: boolean; name?: string; path?: string; bytes?: number }> {
+    const part = String(partId ?? '').slice(0, 64);
+    const got = await this.attachmentBytes(Number(id), part, MAX_ATTACHMENT_BYTES);
+    if (!got.ok) {
+      this.deps.audit('mail', { action: 'attachment-download', message: Number(id) || 0, part, result: got.refused ? 'refused' : 'failed' });
+      return got;
+    }
+    const save = this.deps.saveDownload;
+    const saved = save ? save({ name: got.name, mime: got.meta.mime, bytes: got.bytes }) : ({ ok: false, error: 'downloads are not available here' } as const);
+    this.deps.audit('mail', {
+      action: 'attachment-download',
+      account: got.row.accountId,
+      message: got.row.id,
+      part,
+      bytes: got.bytes.length,
+      mime: got.meta.mime,
+      name: got.name,
+      result: saved.ok ? 'saved' : 'failed',
+    });
+    if (!saved.ok) return { ok: false, error: saved.error };
+    this.downloaded.set(`${got.row.id}:${part}`, saved.path);
+    return { ok: true, name: got.name, path: saved.path, bytes: got.bytes.length };
+  }
+
+  /**
+   * Open: never automatic. The file is downloaded first if it was not this session, then MAIN asks
+   * (a dialog naming the file and its type); an executable or script needs the extra explicit
+   * confirmation the dialog carries. Refused while an agent task runs or a confirmation is pending.
+   */
+  async openAttachment(id: unknown, partId: unknown): Promise<{ ok: boolean; error?: string; refused?: boolean; cancelled?: boolean }> {
+    const part = String(partId ?? '').slice(0, 64);
+    const gate = this.deps.canConnect();
+    if (!gate.ok) return { ok: false, refused: true, error: `attachments are not opened while ${gate.reason ?? 'mail cannot connect'}` };
+    if (!this.deps.confirmOpen || !this.deps.openPath) return { ok: false, error: 'opening files is not available here' };
+    const row = this.db().byId(Number(id));
+    if (!row) return { ok: false, error: 'unknown message' };
+    const meta = this.db().body(row.id)?.attachments.find((a) => a.partId === part);
+    if (!meta) return { ok: false, error: 'that message has no such attachment' };
+    let path = this.downloaded.get(`${row.id}:${part}`);
+    if (!path || !existsSync(path)) {
+      const d = await this.downloadAttachment(row.id, part);
+      if (!d.ok || !d.path) return { ok: false, error: d.error ?? 'the attachment could not be saved', refused: d.refused };
+      path = d.path;
+    }
+    const name = basename(path);
+    const risk = fileRisk(name, meta.mime);
+    const yes = await this.deps.confirmOpen({ name, mime: meta.mime, warning: risk.warning, executable: risk.executable });
+    this.deps.audit('mail', { action: 'attachment-open', account: row.accountId, message: row.id, part, mime: meta.mime, name, executable: risk.executable, result: yes ? 'confirmed' : 'declined' });
+    if (!yes) return { ok: false, cancelled: true, error: 'not opened' };
+    // a task may have started while the dialog was up
+    const again = this.deps.canConnect();
+    if (!again.ok) return { ok: false, refused: true, error: `attachments are not opened while ${again.reason ?? 'mail cannot connect'}` };
+    const err = await this.deps.openPath(path);
+    return err ? { ok: false, error: `the system could not open it: ${err.slice(0, 160)}` } : { ok: true };
+  }
+
+  /**
+   * Inline cid: images for the HTML view: the images the HTML references by Content-ID, fetched
+   * through the gate when the message is DISPLAYED (they are part of the message, not remote content,
+   * so this is no tracking risk), sniffed against png / jpeg / gif / webp (never SVG), size-capped,
+   * and returned as data: URLs keyed by normalised Content-ID. Refused (empty) during a task.
+   */
+  async inlineImages(id: number): Promise<Map<string, string>> {
+    const mid = Number(id) || 0;
+    const cached = this.inlineCache.get(mid);
+    if (cached) return cached;
+    const empty = new Map<string, string>();
+    const html = mid ? this.db().html(mid) : null;
+    if (!html) return empty;
+    const cids = referencedCids(html);
+    if (!cids.size) return empty;
+    const parts = (this.db().body(mid)?.attachments ?? []).filter((a) => a.inline && a.contentId && cids.has(normalizeCid(a.contentId)));
+    if (!parts.length || !this.deps.canConnect().ok) return empty;
+    const out = new Map<string, string>();
+    let total = 0;
+    for (const p of parts.slice(0, 20)) {
+      if (p.size > MAX_INLINE_IMAGE_BYTES || total + p.size > MAX_INLINE_TOTAL_BYTES) continue;
+      const got = await this.attachmentBytes(mid, p.partId, MAX_INLINE_IMAGE_BYTES);
+      if (!got.ok) {
+        if (got.refused) return empty;
+        continue;
+      }
+      const type = sniffImage(got.bytes);
+      if (!type || total + got.bytes.length > MAX_INLINE_TOTAL_BYTES) continue;
+      total += got.bytes.length;
+      out.set(normalizeCid(p.contentId ?? ''), `data:${type};base64,${got.bytes.toString('base64')}`);
+    }
+    this.deps.audit('mail', { action: 'inline-images', message: mid, images: out.size, bytes: total });
+    this.inlineCache.set(mid, out);
+    while (this.inlineCache.size > 16) this.inlineCache.delete(this.inlineCache.keys().next().value as number);
+    return out;
+  }
+
+  // ---- a draft's attached files: private copies in <profile>/mail-outbox/<draft id>/ (0700 / 0600)
+
+  private outboxRoot(): string {
+    const root = join(this.deps.profileDir, OUTBOX_DIR);
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    chmodSync(root, 0o700);
+    return root;
+  }
+
+  /** The directory of a draft that EXISTS in the store; null for any other id (it is used in a path). */
+  private draftDir(draftId: string, create: boolean): string | null {
+    if (!SAFE_ID.test(draftId) || !this.db().getDraft(draftId)) return null;
+    const dir = join(this.outboxRoot(), draftId);
+    if (create) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      chmodSync(dir, 0o700);
+    }
+    return dir;
+  }
+
+  private removeDraftDir(draftId: string) {
+    if (!SAFE_ID.test(draftId)) return;
+    rmSync(join(this.deps.profileDir, OUTBOX_DIR, draftId), { recursive: true, force: true });
+  }
+
+  private pruneDraftDirs() {
+    const root = join(this.deps.profileDir, OUTBOX_DIR);
+    if (!existsSync(root) || !this.store) return;
+    const keep = new Set(this.store.draftIds());
+    for (const d of readdirSync(root)) if (!keep.has(d)) rmSync(join(root, d), { recursive: true, force: true });
+  }
+
+  /** The draft's attachments as the compose form lists them (names and sizes; never a path). */
+  draftAttachments(draftId: unknown) {
+    const id = String(draftId ?? '');
+    return this.db()
+      .listDraftAttachments(id)
+      .map((a) => ({ id: a.id, name: a.name, mime: a.mime, size: a.size, warning: fileRisk(a.name, a.mime).warning }));
+  }
+
+  /**
+   * "Attach…": MAIN opens the system file dialog and copies each chosen file into the draft's private
+   * directory, so a later edit or deletion of the original cannot change what is sent and a restart
+   * keeps it. The renderer sends only the compose fields (to save the draft first) — never a path.
+   */
+  async attachPick(input: unknown): Promise<{ ok: boolean; error?: string; draftId?: string; attachments?: ReturnType<MailController['draftAttachments']>; cancelled?: boolean }> {
+    const saved = this.draftSave(input);
+    if (!saved.ok) return { ok: false, error: saved.error };
+    const draftId = saved.id;
+    if (!this.deps.pickFiles) return { ok: false, error: 'attaching files is not available here', draftId };
+    const paths = (await this.deps.pickFiles()).slice(0, MAX_COMPOSE_ATTACHMENTS);
+    if (!paths.length) return { ok: true, cancelled: true, draftId, attachments: this.draftAttachments(draftId) };
+    const dir = this.draftDir(draftId, true);
+    if (!dir) return { ok: false, error: 'unknown draft', draftId };
+    const errors: string[] = [];
+    let added = 0;
+    let addedBytes = 0;
+    for (const p of paths) {
+      const existing = this.db().listDraftAttachments(draftId);
+      const name = sanitizeFilename(basename(String(p)));
+      if (existing.length >= MAX_COMPOSE_ATTACHMENTS) {
+        errors.push(`at most ${MAX_COMPOSE_ATTACHMENTS} attachments per message`);
+        break;
+      }
+      let st;
+      try {
+        st = statSync(p);
+      } catch {
+        errors.push(`"${name}" could not be read`);
+        continue;
+      }
+      if (!st.isFile()) {
+        errors.push(`"${name}" is not a regular file`);
+        continue;
+      }
+      const used = existing.reduce((n, a) => n + a.size, 0);
+      if (used + st.size > MAX_COMPOSE_ATTACHMENT_BYTES) {
+        errors.push(`"${name}" (${mb(st.size)}) would take the attachments over ${MAX_COMPOSE_ATTACHMENT_BYTES / 1048576} MB`);
+        continue;
+      }
+      const attId = randomUUID();
+      const dest = join(dir, attId);
+      try {
+        const bytes = readFileSync(p);
+        if (used + bytes.length > MAX_COMPOSE_ATTACHMENT_BYTES) throw new Error('it grew while it was being read');
+        writeFileSync(dest, bytes, { flag: 'wx', mode: 0o600 });
+        chmodSync(dest, 0o600);
+        const r = this.db().addDraftAttachment({ draftId, id: attId, name, mime: mimeForFilename(name), size: bytes.length });
+        if (!r.ok) throw new Error(r.error);
+        added++;
+        addedBytes += bytes.length;
+      } catch (e) {
+        rmSync(dest, { force: true });
+        errors.push(`"${name}" could not be attached: ${String((e as Error).message).slice(0, 80)}`);
+      }
+    }
+    this.deps.audit('mail', { action: 'attachment-add', files: added, bytes: addedBytes, refused: errors.length });
+    return { ok: errors.length === 0, error: errors.join('; ') || undefined, draftId, attachments: this.draftAttachments(draftId) };
+  }
+
+  attachRemove(draftId: unknown, attId: unknown) {
+    const d = String(draftId ?? '');
+    const a = String(attId ?? '');
+    const dir = this.draftDir(d, false);
+    if (!dir || !/^[0-9a-f-]{36}$/.test(a)) return { ok: false as const, error: 'unknown attachment' };
+    const n = this.db().removeDraftAttachment(d, a);
+    rmSync(join(dir, a), { force: true });
+    return { ok: n > 0, attachments: this.draftAttachments(d) };
+  }
+
+  /** The draft's private copies, as bytes for compose.ts. */
+  private draftFiles(draftId: string): { ok: true; files: OutgoingAttachment[] } | { ok: false; error: string } {
+    const list = SAFE_ID.test(draftId) ? this.db().listDraftAttachments(draftId) : [];
+    if (!list.length) return { ok: true, files: [] };
+    const dir = join(this.deps.profileDir, OUTBOX_DIR, draftId);
+    const files: OutgoingAttachment[] = [];
+    for (const a of list) {
+      try {
+        files.push({ filename: a.name, mime: a.mime, data: readFileSync(join(dir, a.id)) });
+      } catch {
+        return { ok: false, error: `the attached copy of "${a.name}" is missing; remove it and attach the file again` };
+      }
+    }
+    return { ok: true, files };
+  }
+
+  /** A forward's original attachments, fetched from the server NOW (send time), through the gate. */
+  private async forwardFiles(refMessage: number, budget: number): Promise<{ ok: true; files: OutgoingAttachment[] } | { ok: false; error: string; refused?: boolean }> {
+    const parent = this.db().byId(refMessage);
+    if (!parent) return { ok: true, files: [] };
+    const listed = (this.db().body(parent.id)?.attachments ?? []).filter((a) => !a.inline);
+    if (!listed.length) return { ok: true, files: [] };
+    const declared = listed.reduce((n, a) => n + a.size, 0);
+    if (declared > budget) return { ok: false, error: `the original's attachments (about ${mb(declared)}) would take this message over ${MAX_COMPOSE_ATTACHMENT_BYTES / 1048576} MB; untick "Include attachments" to forward without them` };
+    const gate = this.deps.canConnect();
+    if (!gate.ok) {
+      return { ok: false, refused: true, error: `not sent: the original's attachments are fetched from the server, which is refused while ${gate.reason ?? 'mail cannot connect'}. The draft is kept; send it when that is over, or untick "Include attachments"` };
+    }
+    const files: OutgoingAttachment[] = [];
+    for (const a of listed) {
+      const got = await this.attachmentBytes(parent.id, a.partId, MAX_COMPOSE_ATTACHMENT_BYTES);
+      if (!got.ok) return { ok: false, error: `the original attachment could not be fetched: ${got.error}`, refused: got.refused };
+      files.push({ filename: got.name, mime: a.mime, data: got.bytes });
+    }
+    return { ok: true, files };
   }
 
   async sync(accountId: string) {
@@ -555,6 +882,7 @@ export class MailController {
     for (const o of this.db().listOutbox(aid)) this.clearRetry(o.id);
     this.sec().remove(aid);
     const r = this.db().removeAccount(aid);
+    this.pruneDraftDirs();
     this.deps.audit('mail', { action: 'account-remove', account: aid, messages: r.removed });
     this.counts();
     return { ok: true, removed: r.removed };
@@ -608,6 +936,9 @@ export class MailController {
       subject: mode === 'forward' ? forwardSubject(row.subject) : replySubject(row.subject),
       body: '',
       includeQuoted: mode !== 'forward',
+      forwardAttachments: true,
+      // what a forward would carry (names and sizes; the bytes are fetched at send time)
+      originalAttachments: mode === 'forward' ? attachmentsView(this.db().body(row.id)?.attachments ?? []) : [],
     };
   }
 
@@ -637,7 +968,7 @@ export class MailController {
 
   draftSave(input: unknown) {
     const f = composeFields(input);
-    const r = this.db().saveDraft({ id: f.draftId || undefined, accountId: f.accountId, mode: f.mode, refMessage: f.refMessage, to: f.to, cc: f.cc, bcc: f.bcc, subject: f.subject, body: f.body, includeQuoted: f.includeQuoted });
+    const r = this.db().saveDraft({ id: f.draftId || undefined, accountId: f.accountId, mode: f.mode, refMessage: f.refMessage, to: f.to, cc: f.cc, bcc: f.bcc, subject: f.subject, body: f.body, includeQuoted: f.includeQuoted, forwardAttachments: f.forwardAttachments });
     return r.ok ? { ok: true as const, id: r.id } : r;
   }
 
@@ -652,11 +983,17 @@ export class MailController {
 
   draftGet(id: unknown) {
     const d = this.db().getDraft(String(id ?? ''));
-    return d ? { ok: true as const, draft: d } : { ok: false as const, error: 'unknown draft' };
+    if (!d) return { ok: false as const, error: 'unknown draft' };
+    const orig = d.mode === 'forward' && d.refMessage ? attachmentsView(this.db().body(d.refMessage)?.attachments ?? []) : [];
+    return { ok: true as const, draft: d, attachments: this.draftAttachments(d.id), originalAttachments: orig };
   }
 
+  /** Discard: the draft row, its attachment rows (cascade) and its private file copies. */
   draftDelete(id: unknown) {
-    return { ok: true as const, deleted: this.db().deleteDraft(String(id ?? '')) };
+    const did = String(id ?? '');
+    const deleted = this.db().deleteDraft(did);
+    this.removeDraftDir(did);
+    return { ok: true as const, deleted };
   }
 
   outbox(accountId?: unknown) {
@@ -702,6 +1039,20 @@ export class MailController {
     const acc = this.accounts.get(f.accountId) ?? this.accountFor(f.accountId);
     if (!acc) return { ok: false, error: 'choose the account to send from' };
     if (acc.kind === 'local') return { ok: false, error: 'this account has no server to send through' };
+    // ticket 41: the draft's private copies, then (a forward) the original's attachments from the server
+    const own = this.draftFiles(f.draftId);
+    if (!own.ok) return { ok: false, error: own.error };
+    const files = [...own.files];
+    if (f.mode === 'forward' && f.forwardAttachments && f.refMessage) {
+      const used = files.reduce((n, x) => n + x.data.length, 0);
+      const fw = await this.forwardFiles(f.refMessage, MAX_COMPOSE_ATTACHMENT_BYTES - used);
+      if (!fw.ok) {
+        // nothing is queued: the message cannot be built without them, and the draft keeps the work
+        if (f.draftId) this.draftSave(f);
+        return { ok: false, error: fw.error, refused: fw.refused ? fw.error : undefined };
+      }
+      files.push(...fw.files);
+    }
     const built = buildMessage({
       from: { name: acc.name, address: acc.address },
       to: f.to,
@@ -710,6 +1061,7 @@ export class MailController {
       subject: f.subject,
       body: this.finalBody(f),
       ...this.threading(f),
+      attachments: files,
     });
     if (!built.ok) return { ok: false, error: built.error };
     const q = this.db().addOutbox({
@@ -723,7 +1075,12 @@ export class MailController {
       bytes: built.bytes,
     });
     if (!q.ok) return { ok: false, error: q.error };
-    if (f.draftId) this.db().deleteDraft(f.draftId);
+    // the Outbox now holds the complete message (attachments included, as sent): the draft and its
+    // private file copies are no longer needed
+    if (f.draftId) {
+      this.db().deleteDraft(f.draftId);
+      this.removeDraftDir(f.draftId);
+    }
     return this.deliver(q.id, 'user');
   }
 
@@ -956,6 +1313,17 @@ export class MailController {
     this.store = null;
     this.secrets = null;
   }
+}
+
+/** What the reading pane lists: no inline cid: images, names sanitized, the dangerous-file warning. */
+function attachmentsView(list: Attachment[]) {
+  return list
+    .filter((a) => !a.inline)
+    .map((a) => {
+      const name = attachmentName(a.filename, a.mime);
+      const risk = fileRisk(name, a.mime);
+      return { partId: a.partId, name, mime: a.mime, size: a.size, warning: risk.warning, executable: risk.executable };
+    });
 }
 
 function reportFolders(r: unknown): number {

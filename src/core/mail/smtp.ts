@@ -24,8 +24,8 @@ export const SMTP_TIMEOUT_MS = 30_000;
 export const SMTP_DATA_TIMEOUT_MS = 120_000;
 export const MAX_REPLY_LINE = 4_096;
 export const MAX_REPLY_LINES = 200;
-/** our own ceiling, whatever the server's SIZE says */
-export const SMTP_MAX_BYTES = 25 * 1024 * 1024;
+/** our own ceiling, whatever the server's SIZE says (25 MB of attachments, base64-encoded, plus the text) */
+export const SMTP_MAX_BYTES = 36 * 1024 * 1024;
 /** the EHLO argument: an address literal, so the client does not announce the machine's hostname */
 export const EHLO_NAME = '[127.0.0.1]';
 
