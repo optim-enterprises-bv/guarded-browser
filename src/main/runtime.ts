@@ -4,22 +4,20 @@
 // model and the public reputation feeds are shared (passed in through the context). IPC handlers
 // are looked up by main.ts from the SENDER's window, never from an id the renderer sends.
 
-import { app, BrowserWindow, clipboard, dialog, safeStorage, session, type Session, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, safeStorage, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
-import { loadSettings, saveSettings, MAX_WEB_PANELS, type Role, type Settings } from '../core/config';
+import { loadSettings, saveSettings, type Role, type Settings } from '../core/config';
 import { EgressController, hostKey, startProxy, type ProxyHandle } from '../core/egress';
 import { LlmClient } from '../core/llm';
 import { originOf, originsInTask } from '../core/policy';
 import { LocalLists, type FeedConfig, type ReputationChecker, type ReputationDb } from '../core/reputation';
-import type { ConfirmOutcome, ConfirmRequest, Guard } from '../core/types';
+import type { ConfirmRequest, Guard } from '../core/types';
 import { ConfirmBroker } from './confirm';
 import { ElectronDriver, TabManager, type Tab } from './tabs';
-import type { TileLayout } from './tile-layout';
 import { ISOLATED_WORLD } from './page-scripts';
-import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type Theme } from '../core/theme';
+import { BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type Theme } from '../core/theme';
 import type { Profile } from './profiles';
 import { testEnv } from './test-hooks';
 // ticket 37c: the mail controller is per PROFILE and its handlers live on this runtime's `on()` table,
@@ -28,29 +26,28 @@ import { MailController } from './mail/controller';
 import { HistoryStore, recordable } from '../core/history';
 import { ClosedTabStore } from '../core/closed-tabs';
 import { SessionStore } from '../core/session-state';
-import { ZoomStore, clampZoom, stepZoom } from '../core/zoom';
-import { SEARCH_ENGINES, searchUrl, SearchSettingsSchema } from '../core/search';
+import { ZoomStore } from '../core/zoom';
 import { DownloadList } from '../core/downloads';
-import { BAR_ID, BookmarkStore, OTHER_ID, type ParsedImport } from '../core/bookmarks';
+import { BookmarkStore } from '../core/bookmarks';
 import { SavedSessionStore } from '../core/saved-sessions';
-import { SortModeSchema, sortTree, TrashStore, type SortMode } from '../core/bookmarks-panel';
+import { TrashStore, type SortMode } from '../core/bookmarks-panel';
 import { WorkspaceStore } from '../core/workspaces';
 import { StackModel } from '../core/tab-stacks';
-import { PageActionsSchema, PageActionsStore, defaultPageActions, pageActionCss, affectsAgentSnapshot, describePageActions, type PageActions } from '../core/page-actions';
-import { planSweep, decideHibernation, HibernationSettingsSchema, type HibernationFacts } from '../core/hibernation';
-import { validateBindings, defaultKeybindings, KeybindingsSchema, ACTION_LABELS, formatChord } from '../core/keybindings';
-import { resolveGesture, pathFrom, type Point } from '../core/gestures';
-import { clampItems, type PaletteItem } from '../core/quick-commands';
-import { buildBundle, dryRun, parseBundle, MAX_BUNDLE_BYTES } from '../core/profile-bundle';
-import { CaptureRequestSchema, clampRect, clampFullHeight, captureFilename, writeCapture } from './capture';
-import { EXTRACT_ARTICLE_JS, normalizeArticle } from './reader-mode';
-import { canTranslate, chunkText, cloudStatus, translatePrompt, TRANSLATE_SYSTEM, TranslateSettingsSchema, LANGUAGES, defaultTranslate } from './translate';
-import { ExtensionList, EXTENSION_WARNING, extensionListFile, loadExtensions } from './extensions';
+import { PageActionsStore, pageActionCss, affectsAgentSnapshot, describePageActions } from '../core/page-actions';
+import { planSweep, decideHibernation, type HibernationFacts } from '../core/hibernation';
+import { ACTION_LABELS, formatChord } from '../core/keybindings';
+import type { Point } from '../core/gestures';
+import type { PaletteItem } from '../core/quick-commands';
+import { ExtensionList, extensionListFile } from './extensions';
 import { createEgressWiring, PROCEED_PREFIX } from './runtime/egress-wiring';
 import { createChords } from './runtime/chords';
 import type { RuntimeDeps } from './runtime/deps';
-import { Worker } from 'node:worker_threads';
-import { lookup } from 'node:dns/promises';
+import { register as registerTabsIpc } from './runtime/ipc-tabs';
+import { register as registerLibraryIpc } from './runtime/ipc-library';
+import { register as registerSettingsIpc } from './runtime/ipc-settings';
+import { register as registerAgentIpc } from './runtime/ipc-agent';
+import { register as registerMailIpc } from './runtime/ipc-mail';
+import { register as registerMiscIpc } from './runtime/ipc-misc';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Handler = (e: any, ...args: any[]) => unknown;
@@ -265,6 +262,9 @@ const rt: RuntimeDeps = {
   get settings() {
     return settings;
   },
+  set settings(v) {
+    settings = v;
+  },
   get tabs() {
     return tabs;
   },
@@ -286,16 +286,65 @@ const rt: RuntimeDeps = {
   get deniedFlows() {
     return deniedFlows;
   },
+  get gestureTrail() {
+    return gestureTrail;
+  },
+  set gestureTrail(v) {
+    gestureTrail = v;
+  },
+  get bookmarkSort() {
+    return bookmarkSort;
+  },
+  set bookmarkSort(v) {
+    bookmarkSort = v;
+  },
+  ctx,
+  handlers,
   profileDir,
   settingsFile,
-  downloads,
+  feeds,
+  localLists,
+  reputation,
+  history,
+  bookmarks,
+  bookmarkTrash,
+  closedTabs,
+  sessionState,
   zoom,
+  downloads,
+  savedSessions,
+  workspaces,
+  stacks,
+  pageActions,
+  extensions,
+  faviconCache,
+  get lastFindQuery() {
+    return lastFindQuery;
+  },
   sendUI,
+  state,
+  reputationState,
   stopTask,
+  startTask,
+  previewOrigins,
   closeTab,
   reopenClosed,
   liftGateOnCommit,
   printTab,
+  saveSessionSoon,
+  updateSiteAccent,
+  importTheme,
+  applyPageActions,
+  commandItems,
+  hibernationSweep,
+  scheduleHibernation,
+  // declared further down (const arrows / destructured): reached lazily, after they exist
+  panelState: () => panelState(),
+  openPanel: (url) => openPanel(url),
+  runChord: (input) => runChord(input),
+  runAction: (action) => runAction(action),
+  chordTable: () => chordTable(),
+  mail: () => api.mail(),
 };
 const { setupEgress, sourceOf, handleProceed } = createEgressWiring(rt);
 const { installShortcuts, runChord, runAction, chordTable, tabStartUrl } = createChords(rt);
@@ -821,1011 +870,12 @@ function registerIpc() {
   const on = (channel: string, fn: Handler) => {
     handlers[channel] = fn;
   };
-  on('state:get', () => state());
-  on('tabs:new', (_e, url?: string) => {
-    const t = tabs.create(url || 'about:blank');
-    t.navSource = 'user';
-    return t.id;
-  });
-  on('tabs:close', (_e, id: number) => closeTab(Number(id)));
-  on('tabs:reopen', () => reopenClosed());
-  on('tabs:closed-list', () => closedTabs.list());
-  /**
-   * The active tab's security state, for the chrome UI and for tests. Read-only, and it reports
-   * booleans and origins rather than granting any capability.
-   */
-  on('tabs:guard-state', () => {
-    const t = tabs.active();
-    if (!t) return { gated: false, origins: [], agentTab: false, taskRunning: !!current };
-    const s = tabs.guardStateOf(t.id);
-    return { gated: s?.gate === 'post-task', origins: s?.gateOrigins ?? [], agentTab: s?.agentTab ?? false, taskRunning: !!current };
-  });
-  on('tabs:activate', (_e, id: number) => {
-    tabs.activate(Number(id));
-    tabs.noteActivated(Number(id));
-    saveSessionSoon();
-    void updateSiteAccent();
-  });
-  on('tabs:move', (_e, id: unknown, to: unknown) => {
-    const order = tabs.move(Number(id), Number(to));
-    saveSessionSoon();
-    return order;
-  });
-  on('tabs:duplicate', (_e, id: unknown) => {
-    const target = id === undefined || id === null ? tabs.active()?.id : Number(id);
-    const t = tabs.duplicate(target ?? -1);
-    saveSessionSoon();
-    return t?.id ?? null;
-  });
-  on('tabs:close-others', (_e, id: unknown) => {
-    const n = tabs.closeOthers(Number(id), !!current);
-    saveSessionSoon();
-    return n;
-  });
-  on('tabs:close-right', (_e, id: unknown) => {
-    const n = tabs.closeRight(Number(id), !!current);
-    saveSessionSoon();
-    return n;
-  });
-  on('tabs:mute', (_e, id: unknown, muted: unknown) => {
-    const wasMuted = tabs.byId(Number(id))?.wc.isAudioMuted() ?? false;
-    tabs.setAudioMuted(Number(id), typeof muted === 'boolean' ? muted : !wasMuted);
-    sendUI('tabs', tabs.list());
-  });
-
-  // ---------- zoom (view property; per origin) ----------
-  on('zoom:get', () => {
-    const t = tabs.active();
-    if (!t) return { factor: 1, origin: null };
-    return { factor: t.wc.getZoomFactor(), origin: originOf(t.wc.getURL()) };
-  });
-  on('zoom:set', (_e, factor: unknown) => {
-    const t = tabs.active();
-    if (!t) return { factor: 1 };
-    const f = clampZoom(Number(factor) || 1);
-    t.wc.setZoomFactor(f);
-    const o = originOf(t.wc.getURL());
-    if (o) zoom.set(o, f);
-    sendUI('zoom', { tab: t.id, factor: f });
-    return { factor: f };
-  });
-  on('zoom:step', (_e, dir: unknown) => {
-    const t = tabs.active();
-    if (!t) return { factor: 1 };
-    const f = stepZoom(t.wc.getZoomFactor(), Number(dir) === 1 ? 1 : -1);
-    t.wc.setZoomFactor(f);
-    const o = originOf(t.wc.getURL());
-    if (o) zoom.set(o, f);
-    sendUI('zoom', { tab: t.id, factor: f });
-    return { factor: f };
-  });
-  on('zoom:reset', () => {
-    const t = tabs.active();
-    if (!t) return { factor: 1 };
-    t.wc.setZoomFactor(1);
-    const o = originOf(t.wc.getURL());
-    if (o) zoom.clear(o);
-    sendUI('zoom', { tab: t.id, factor: 1 });
-    return { factor: 1 };
-  });
-
-  // ---------- find in page (Chromium reports counts, never content) ----------
-  on('find:start', (_e, query: unknown, opts: unknown) => {
-    const t = tabs.active();
-    if (!t) return { requestId: 0 };
-    const q = String(query ?? '').slice(0, 200);
-    const o = (opts ?? {}) as { forward?: boolean; findNext?: boolean; matchCase?: boolean };
-    const prev = lastFindQuery.get(t.id);
-    lastFindQuery.set(t.id, q);
-    if (!q) {
-      tabs.stopFind(t.id);
-      return { requestId: 0, cleared: true };
-    }
-    // The FIRST request of a find session must carry findNext:true (Electron's own docs); only
-    // repeat requests within the same query use findNext:false. A fresh query resets the session.
-    const freshQuery = prev !== q;
-    const rid = tabs.findInPage(t.id, q, { ...o, findNext: freshQuery ? true : o.findNext === true });
-    return { requestId: rid };
-  });
-  on('find:stop', () => {
-    const t = tabs.active();
-    if (t) tabs.stopFind(t.id, 'clearSelection');
-  });
-
-  // ---------- print (chrome-initiated only) ----------
-  on('page:print', async () => {
-    const t = tabs.active();
-    if (!t) return { ok: false, error: 'no active tab' };
-    return { ok: await printTab(t) };
-  });
-
-  // ---------- downloads panel (observes the transfer; never decides) ----------
-  on('downloads:list', () => downloads.list());
-  on('downloads:action', (_e, id: unknown, what: unknown) => downloads.action(Number(id), String(what) as 'pause' | 'resume' | 'cancel' | 'remove'));
-  on('downloads:clear', () => {
-    downloads.clearFinished();
-    return downloads.list();
-  });
-
-  // ---------- search engine setting ----------
-  on('search:get', () => ({ engines: SEARCH_ENGINES, current: settings.general.search }));
-
-  // ---------- session restore ----------
-  on('session:info', () => {
-    const r = sessionState.restorableTabs();
-    return { tabs: r.tabs, activeIndex: r.activeIndex, crashed: sessionState.crashed, startup: settings.general.startup };
-  });
-  on('tabs:select', (_e, id: number, on?: boolean) => tabs.toggleSelected(Number(id), typeof on === 'boolean' ? on : undefined));
-  const LAYOUTS = new Set(['columns', 'rows', 'grid']);
-  const layoutArg = (l: unknown): TileLayout => (LAYOUTS.has(String(l)) ? (String(l) as TileLayout) : 'columns');
-  on('tiles:tile', (_e, ids: unknown, layout: unknown) => tabs.tile(Array.isArray(ids) ? ids.map(Number) : undefined, layoutArg(layout)));
-  on('tiles:untile', () => tabs.untile());
-  on('tiles:layout', (_e, layout: unknown) => tabs.setTileLayout(layoutArg(layout)));
-  on('tiles:drag', (_e, phase: unknown, key: unknown, at: unknown) => {
-    if (phase === 'start') tabs.setDragging(true);
-    else if (phase === 'move' && typeof key === 'string' && /^(col|row|c\d|r\d)$/.test(key)) tabs.dragDivider(key as never, Number(at));
-    else if (phase === 'end') tabs.setDragging(false);
-  });
-  on('tiles:state', () => tabs.tileState());
-  on('nav:go', (_e, input: string) => {
-    const t = tabs.active();
-    if (!t) return;
-    if (!current) liftGateOnCommit(t); // the user took the tab back (lifted when the load commits)
-    t.navSource = 'user';
-    let url = input.trim();
-    const nick = bookmarks.byNickname(url);
-    if (nick) url = nick.url; // a bookmark nickname typed in the address bar
-    else if (!/^[a-z]+:/i.test(url)) url = /^[\w.-]+(:\d+)?(\/|$)/.test(url) ? `http://${url}` : searchUrl(url, settings.general.search);
-    void t.wc.loadURL(url).catch(() => undefined);
-  });
-
-  // ---------- history & bookmarks: chrome UI only ----------
-  const libraryChanged = () => sendUI('bookmarks', { roots: bookmarks.tree(), showBar: bookmarks.showBar });
-  /** open through the normal navigation path: reputation, proxy and every gate apply */
-  const openUrl = (url: string, newTab: boolean) => {
-    if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'only http(s) URLs' };
-    if (newTab) {
-      const t = tabs.create(url);
-      t.navSource = 'user';
-    } else {
-      const t = tabs.active();
-      if (!t) return { ok: false };
-      if (!current) liftGateOnCommit(t);
-      t.navSource = 'user';
-      void t.wc.loadURL(url).catch(() => undefined);
-    }
-    return { ok: true };
-  };
-  const wrap = <T>(fn: () => T) => {
-    try {
-      const r = fn();
-      libraryChanged();
-      return { ok: true, result: r };
-    } catch (e) {
-      return { ok: false, error: (e as Error).message.slice(0, 200) };
-    }
-  };
-  /** Parse in a worker with a time budget; only the (re-validated) result touches the store. */
-  const importInWorker = (html: string, folder: string) =>
-    new Promise<{ ok: boolean; error?: string; result?: unknown }>((resolve) => {
-      if (html.length > 5 * 1024 * 1024) return resolve({ ok: false, error: 'bookmark file larger than 5 MB' });
-      const w = new Worker(join(__dirname, 'import-worker.js'), { workerData: { html } });
-      const timer = setTimeout(() => {
-        void w.terminate();
-        resolve({ ok: false, error: 'import took too long and was stopped' });
-      }, 5000);
-      w.once('message', (m: { ok: boolean; parsed?: ParsedImport; error?: string }) => {
-        clearTimeout(timer);
-        void w.terminate();
-        if (!m.ok || !m.parsed) return resolve({ ok: false, error: m.error ?? 'import failed' });
-        resolve(wrap(() => bookmarks.importParsed(m.parsed!, folder)));
-      });
-      w.once('error', (e) => {
-        clearTimeout(timer);
-        resolve({ ok: false, error: (e as Error).message.slice(0, 200) });
-      });
-    });
-  const RANGES = new Set(['hour', 'day', 'week', 'all']);
-  const SOURCES = new Set(['user', 'page', 'agent']);
-  on('history:list', (_e, q: unknown, source: unknown) => ({
-    groups: history.grouped(String(q ?? '').slice(0, 200), SOURCES.has(String(source)) ? (String(source) as 'user') : undefined),
-    clearOnExit: history.clearOnExit,
-  }));
-  on('history:delete', (_e, url: unknown) => ({ ok: true, removed: history.deleteUrl(String(url)) }));
-  on('history:delete-range', (_e, range: unknown) => (RANGES.has(String(range)) ? { ok: true, removed: history.deleteRange(String(range) as 'all') } : { ok: false }));
-  on('history:clear-on-exit', (_e, v: unknown) => {
-    history.setClearOnExit(v === true);
-    return { ok: true };
-  });
-  on('history:open', (_e, url: unknown, newTab: unknown) => openUrl(String(url), newTab === true));
-  on('bookmarks:tree', () => ({ roots: bookmarks.tree(), showBar: bookmarks.showBar }));
-  on('bookmarks:add', async (_e, parent: unknown, title: unknown, url: unknown, nickname: unknown) =>
-    (await nicknameResolves(nickname))
-      ? { ok: false, error: `"${String(nickname)}" resolves as a host name on this network; choose another nickname` }
-      : wrap(() => bookmarks.addBookmark(String(parent ?? BAR_ID), String(title ?? ''), String(url ?? ''), nickname ? String(nickname) : undefined)),
-  );
-  on('bookmarks:add-current', () => {
-    const t = tabs.active();
-    const url = t?.wc.getURL() ?? '';
-    const existing = bookmarks.isBookmarked(url);
-    if (existing) return { ok: true, result: { id: existing, existed: true } };
-    return wrap(() => bookmarks.addBookmark(BAR_ID, t?.wc.getTitle() ?? url, url));
-  });
-  on('bookmarks:add-folder', (_e, parent: unknown, title: unknown) => wrap(() => bookmarks.addFolder(String(parent ?? OTHER_ID), String(title ?? ''))));
-  /** a nickname must not be a word that resolves as a host on this network (e.g. an intranet name) */
-  const nicknameResolves = async (nick: unknown): Promise<boolean> => {
-    if (typeof nick !== 'string' || !nick) return false;
-    try {
-      await Promise.race([lookup(nick), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 500))]);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  on('bookmarks:update', async (_e, id: unknown, patch: unknown) => {
-    const p = (patch ?? {}) as Record<string, unknown>;
-    if (await nicknameResolves(p.nickname)) return { ok: false, error: `"${String(p.nickname)}" resolves as a host name on this network; choose another nickname` };
-    return wrap(() =>
-      bookmarks.update(String(id), {
-        ...(p.title !== undefined ? { title: String(p.title) } : {}),
-        ...(p.url !== undefined ? { url: String(p.url) } : {}),
-        ...(p.nickname !== undefined ? { nickname: p.nickname === null || p.nickname === '' ? null : String(p.nickname) } : {}),
-      }),
-    );
-  });
-  on('bookmarks:remove', (_e, id: unknown) => wrap(() => bookmarks.remove(String(id))));
-  on('bookmarks:move', (_e, id: unknown, parent: unknown, index: unknown) => wrap(() => bookmarks.move(String(id), String(parent), Number(index))));
-  on('bookmarks:search', (_e, q: unknown) => bookmarks.search(String(q ?? '').slice(0, 200)));
-  on('bookmarks:set-bar', (_e, v: unknown) => wrap(() => bookmarks.setShowBar(v === true)));
-  on('bookmarks:is-bookmarked', () => bookmarks.isBookmarked(tabs.active()?.wc.getURL() ?? ''));
-  on('bookmarks:open', (_e, id: unknown, newTab: unknown) => {
-    const b = bookmarks.all().find((x) => x.id === String(id));
-    return b ? openUrl(b.url, newTab === true) : { ok: false, error: 'no such bookmark' };
-  });
-  on('bookmarks:import', async (_e, html: unknown, folder: unknown) => {
-    if (typeof html !== 'string') return { ok: false, error: 'expected text' };
-    return importInWorker(html, folder ? String(folder) : 'Imported');
-  });
-  on('bookmarks:import-file', async () => {
-    const r = await dialog.showOpenDialog(win, { title: 'Import bookmarks (HTML)', filters: [{ name: 'Bookmarks HTML', extensions: ['html', 'htm'] }], properties: ['openFile'] });
-    if (r.canceled || !r.filePaths[0]) return { ok: false, error: 'cancelled' };
-    if (statSync(r.filePaths[0]).size > 5 * 1024 * 1024) return { ok: false, error: 'file larger than 5 MB' };
-    return importInWorker(readFileSync(r.filePaths[0], 'utf8'), 'Imported');
-  });
-  on('bookmarks:export', () => bookmarks.exportNetscape());
-  on('bookmarks:export-file', async () => {
-    const r = await dialog.showSaveDialog(win, { title: 'Export bookmarks', defaultPath: 'bookmarks.html' });
-    if (r.canceled || !r.filePath) return { ok: false, error: 'cancelled' };
-    writeFileSync(r.filePath, bookmarks.exportNetscape());
-    return { ok: true };
-  });
-  on('suggest', (_e, q: unknown) => {
-    const query = String(q ?? '').slice(0, 200);
-    const nick = bookmarks.byNickname(query);
-    const bms = bookmarks.search(query, 5);
-    return {
-      bookmarks: (nick ? [nick, ...bms.filter((b) => b.id !== nick.id)] : bms).slice(0, 5).map((b) => ({ title: b.title, url: b.url, nickname: b.nickname })),
-      history: history.suggest(query, 5).map((h) => ({ title: h.title, url: h.url })),
-    };
-  });
-  on('favicon:get', (_e, url: unknown) => {
-    const o = originOf(String(url ?? ''));
-    return o ? faviconCache.get(o) ?? null : null;
-  });
-  on('chrome:insets', (_e, top: unknown, left: unknown, bottom: unknown) => {
-    const t = Math.max(0, Math.min(400, Math.round(Number(top) || 0)));
-    const l = Math.max(0, Math.min(600, Math.round(Number(left) || 0)));
-    const b = Math.max(0, Math.min(200, Math.round(Number(bottom) || 0)));
-    tabs.setInsets(t, l, b);
-  });
-  on('chrome:overlay', (_e, on: unknown) => tabs.setOverlay(on === true));
-  // The chrome window's own keydown handler forwards keystrokes here, so the chord table applies
-  // whether a page or the chrome has focus. Only a key event is accepted; the payload is a plain
-  // description, never anything page-derived.
-  // ---------- mail (ticket 37c): same sender-resolved table as every other chrome channel ----------
-  // The controller is created on first call, so a profile with no mail never opens a store.
-  const mailCtrl = () => api.mail();
-  on('mail:state', () => mailCtrl().state());
-  on('mail:accounts', () => {
-    const st = mailCtrl().state();
-    return { accounts: st.accounts, keychain: st.keychain };
-  });
-  on('mail:folders', (_e, accountId: unknown) => mailCtrl().folders(String(accountId ?? '')));
-  on('mail:list', (_e, opts: unknown) => mailCtrl().list((opts ?? {}) as { accountId?: string; folder?: string }));
-  on('mail:search', (_e, q: unknown, opts: unknown) => mailCtrl().search(String(q ?? ''), (opts ?? {}) as { accountId?: string }));
-  on('mail:message', (_e, id: unknown, opts: unknown) => mailCtrl().message(Number(id), (opts ?? {}) as { markRead?: boolean }));
-  on('mail:sync', (_e, id: unknown) => mailCtrl().sync(String(id ?? '')));
-  on('mail:sync-all', () => mailCtrl().syncAll());
-  on('mail:flags', (_e, ids: unknown, patch: unknown) => mailCtrl().setFlags(ids, patch));
-  on('mail:move', (_e, ids: unknown, to: unknown) => mailCtrl().move(ids, String(to ?? '')));
-  on('mail:view-set', (_e, patch: unknown) => mailCtrl().viewSet(patch));
-  on('mail:unlock', (_e, pass: unknown) => mailCtrl().unlock(String(pass ?? '')));
-  on('mail:secret-state', () => {
-    const st = mailCtrl().state();
-    return { mode: st.secretMode, locked: st.locked, keychain: st.keychain, warning: st.warning };
-  });
-  on('mail:secret-mode', (_e, mode: unknown, pass: unknown) => mailCtrl().secretMode(String(mode ?? ''), String(pass ?? '')));
-  on('mail:account-save', (_e, input: unknown, secret: unknown) => mailCtrl().saveAccount(input, secret));
-  on('mail:account-remove', (_e, id: unknown) => mailCtrl().removeAccount(String(id ?? '')));
-  on('mail:account-test', (_e, id: unknown) => mailCtrl().testAccount(String(id ?? '')));
-  on('mail:import-scan', (_e, path: unknown) => mailCtrl().importScan(typeof path === 'string' ? path : undefined));
-  on('mail:import-apply', (_e, path: unknown, ids: unknown) => mailCtrl().importApply(typeof path === 'string' ? path : undefined, ids));
-
-  on('chord', (_e, key: unknown, mods: unknown) => {
-    const m = (mods ?? {}) as { ctrl?: boolean; shift?: boolean; alt?: boolean };
-    if (typeof key !== 'string' || key.length > 32) return { handled: false };
-    return { handled: runChord({ key, control: m.ctrl === true, shift: m.shift === true, alt: m.alt === true, type: 'keyDown' }) };
-  });
-  const userNav = (fn: (wc: WebContents) => void) => {
-    const t = tabs.active();
-    if (!t) return;
-    if (!current) liftGateOnCommit(t);
-    t.navSource = 'user';
-    fn(t.wc);
-  };
-  on('nav:back', () => userNav((wc) => wc.navigationHistory.goBack()));
-  on('nav:forward', () => userNav((wc) => wc.navigationHistory.goForward()));
-  on('nav:reload', () => userNav((wc) => wc.reload()));
-  on('agent:preview', (_e, text: string) => previewOrigins(String(text)));
-  on('agent:start', (_e, text: string, origins?: string[]) => startTask(String(text), Array.isArray(origins) ? origins.map(String) : undefined));
-  // asked synchronously by the tab preload at document start: is an agent task driving this tab?
-  handlers['tab:agent-active'] = (e) => !!current && current.tab.wc === e.sender;
-  on('agent:stop', () => stopTask());
-  on('confirm:answer', (_e, id: string, outcome: ConfirmOutcome) => {
-    if (['approve', 'deny', 'stop'].includes(outcome)) broker.answer(id, outcome);
-    if (outcome === 'stop') stopTask();
-  });
-  on('egress:allow', (_e, host: string) => {
-    if (!current) return;
-    egress.allowHost(host);
-    audit.write('egress', { taskId: current.task.id, layer: 'proxy', decision: 'allow', host, method: '-', reason: 'user allowed host for this task' });
-  });
-  on('settings:get', () => ({ ...settings, guard: { ...ctx.sharedGuard() }, reputation: { ...settings.reputation, feeds: ctx.sharedFeeds() } }));
-  on('settings:save', (_e, s: Settings) => {
-    // appearance has its own validated path; never take it from the generic settings form
-    s = { ...s, appearance: settings.appearance };
-    settings = s;
-    saveSettings(settingsFile, s);
-    egress.setDenylist(s.egress.denylist);
-    egress.reputation = s.reputation.enabled ? reputation : null;
-    // app-wide values: the feed LIST (public data) and the guard model settings apply to every profile
-    ctx.setSharedFeeds(s.reputation.feeds);
-    ctx.setSharedGuard(s.guard);
-    return true;
-  });
-  // ---------- appearance (themes for the chrome UI only) ----------
-  on('appearance:get', () => ({ appearance: settings.appearance, builtins: BUILTIN_THEMES }));
-  on('appearance:save', (_e, a: unknown) => {
-    const r = AppearanceSchema.safeParse(a);
-    if (!r.success) return { ok: false, error: r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ').slice(0, 300) };
-    settings.appearance = r.data;
-    saveSettings(settingsFile, settings);
-    sendUI('appearance', settings.appearance);
-    void updateSiteAccent();
-    return { ok: true };
-  });
-  on('theme:import', (_e, json: unknown) => importTheme(json));
-  on('theme:import-file', async () => {
-    const r = await dialog.showOpenDialog(win, { title: 'Import theme', filters: [{ name: 'Theme JSON', extensions: ['json'] }], properties: ['openFile'] });
-    if (r.canceled || !r.filePaths[0]) return { ok: false, error: 'cancelled' };
-    if (statSync(r.filePaths[0]).size > 64 * 1024) return { ok: false, error: 'theme file larger than 64 KB' };
-    return importTheme(readFileSync(r.filePaths[0], 'utf8'));
-  });
-  on('theme:export-file', async (_e, name: unknown) => {
-    const t = [...BUILTIN_THEMES, ...settings.appearance.custom].find((x) => x.name === String(name));
-    if (!t) return { ok: false, error: 'no such theme' };
-    const r = await dialog.showSaveDialog(win, { title: 'Export theme', defaultPath: `${t.name.replace(/[^\w.-]/g, '_')}.theme.json` });
-    if (r.canceled || !r.filePath) return { ok: false, error: 'cancelled' };
-    writeFileSync(r.filePath, JSON.stringify(t, null, 2) + '\n');
-    return { ok: true };
-  });
-
-  on('reputation:refresh', async () => {
-    localLists.reload();
-    await feeds.refresh(true);
-    return reputationState();
-  });
-  on('audit:recent', () => audit.read().slice(-400));
-
-  // ================================ wave 2 (tickets 14-33) ================================
-
-  // ---------- 15: remappable keybindings ----------
-  on('keybindings:get', () => ({ bindings: settings.keybindings, chords: chordTable() }));
-  on('keybindings:save', (_e, b: unknown) => {
-    const r = KeybindingsSchema.safeParse(b);
-    if (!r.success) return { ok: false, error: r.error.issues[0]?.message ?? 'invalid' };
-    const problems = validateBindings(r.data.bindings);
-    if (problems.length) return { ok: false, error: problems.map((p) => `${p.action}: ${p.problem}`).join('; ').slice(0, 300) };
-    settings.keybindings = r.data;
-    saveSettings(settingsFile, settings);
-    sendUI('keybindings', settings.keybindings);
-    return { ok: true };
-  });
-  on('keybindings:reset', () => {
-    settings.keybindings = defaultKeybindings();
-    saveSettings(settingsFile, settings);
-    sendUI('keybindings', settings.keybindings);
-    return { ok: true, bindings: settings.keybindings };
-  });
-
-  // ---------- 16: gestures ----------
-  // The trail is fed from the page view's own input events (below), never by page script. A gesture
-  // is REFUSED while a task runs: it could otherwise move the agent's tab out from under the gate.
-  on('gesture:trail', (_e, phase: unknown, x: unknown, y: unknown) => {
-    if (settings.gestures.enabled !== true) return { action: null };
-    if (phase === 'start') gestureTrail = [{ x: Number(x) || 0, y: Number(y) || 0 }];
-    else if (phase === 'move') gestureTrail.push({ x: Number(x) || 0, y: Number(y) || 0 });
-    else if (phase === 'end') {
-      // The final point IS part of the path: a flick sends start then end, with no 'move' in
-      // between, so dropping the end point left a one-point trail and no gesture ever resolved.
-      gestureTrail.push({ x: Number(x) || 0, y: Number(y) || 0 });
-      const path = pathFrom(gestureTrail);
-      gestureTrail = [];
-      const r = resolveGesture(path, { suppressed: !!current });
-      if ('suppressed' in r) {
-        sendUI('gesture', { path, suppressed: true, reason: 'an agent task is running' });
-        return { suppressed: true };
-      }
-      if (r.action) runAction(r.action);
-      return { action: r.action };
-    }
-    return { action: null };
-  });
-
-  // ---------- 17/18: panels ----------
-  on('panel:refresh', (_e, which: unknown) => {
-    if (which === 'history') sendUI('history', { groups: history.grouped('', undefined), clearOnExit: history.clearOnExit });
-    if (which === 'bookmarks') libraryChanged();
-    if (which === 'downloads') sendUI('downloads', downloads.list());
-    return { ok: true };
-  });
-  // The renderer asks for this on boot, and boot happens BEFORE `tabs` exists (the UI is loaded
-  // first so the window paints early). So this must not assume a TabManager; the real geometry is
-  // pushed by sendUI('geometry') once there is one.
-  on('panels:state', () => ({
-    railVisible: settings.general.railVisible,
-    statusBar: settings.general.statusBar,
-    tabStrip: settings.general.tabStrip,
-    inset: tabs?.insets() ?? { top: 0, left: 0, bottom: 0 },
-  }));
-
-  // ---------- 18: web panels ----------
-  // A panel is a website pinned into the sidebar. It is NOT a strip tab, it is never `active()`, and
-  // `setAgentTab` refuses a panel id — so a panel cannot become the agent's tab and cannot be an
-  // escape hatch around a task's allowlist. Its requests still pass through the same session, proxy,
-  // host allowlist, reputation feed and webRequest content filter as any tab.
-
-  on('panels:list', () => panelState());
-  /** the chrome reports where the sidebar column landed; panels are drawn exactly there */
-  on('panels:rect', (_e, r: unknown) => {
-    const o = (r ?? null) as { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | null;
-    if (!o) {
-      tabs.setPanelRect(null);
-      return { ok: true };
-    }
-    tabs.setPanelRect({
-      x: Math.max(0, Math.round(Number(o.x) || 0)),
-      y: Math.max(0, Math.round(Number(o.y) || 0)),
-      width: Math.max(0, Math.round(Number(o.width) || 0)),
-      height: Math.max(0, Math.round(Number(o.height) || 0)),
-    });
-    return { ok: true };
-  });
-  /** show a panel in the column (or none). Only http(s) URLs can ever be shown. */
-  on('panels:show', (_e, url: unknown) => {
-    const u = url === null ? null : String(url ?? '');
-    if (u !== null && !tabs.panelList().some((t) => (t.intendedUrl || t.wc.getURL()) === u)) return { ok: false, error: 'no such panel' };
-    tabs.setPanelShown(u);
-    return { ok: true };
-  });
-  /** pin the active tab into the sidebar AND show it immediately */
-  on('panels:show-view', (_e, id: unknown) => {
-    const t = tabs.panelList().find((x) => x.id === Number(id));
-    if (!t) return { ok: false, error: 'no such panel' };
-    tabs.setPanelShown(t.intendedUrl || t.wc.getURL());
-    return { ok: true };
-  });
-  on('panels:add', (_e, url: unknown) => {
-    const u = String(url ?? '');
-    if (!/^https?:\/\//i.test(u)) return { ok: false, error: 'a panel must be an http(s) site' };
-    if (settings.general.webPanels.length >= MAX_WEB_PANELS) return { ok: false, error: `no more than ${MAX_WEB_PANELS} panels` };
-    if (!settings.general.webPanels.some((p) => p.url === u)) {
-      settings.general.webPanels.push({ url: u.slice(0, 2048), title: '' });
-      saveSettings(settingsFile, settings);
-    }
-    const r = openPanel(u);
-    if (r.ok) sendUI('panels:list', panelState());
-    return r;
-  });
-  on('panels:open-current', () => {
-    const t = tabs.active();
-    const u = t?.wc.getURL() ?? '';
-    if (!/^https?:\/\//i.test(u)) return { ok: false, error: 'the active tab is not an http(s) site' };
-    if (settings.general.webPanels.length >= MAX_WEB_PANELS) return { ok: false, error: `no more than ${MAX_WEB_PANELS} panels` };
-    if (!settings.general.webPanels.some((p) => p.url === u)) {
-      settings.general.webPanels.push({ url: u.slice(0, 2048), title: t?.wc.getTitle() ?? '' });
-      saveSettings(settingsFile, settings);
-    }
-    const r = openPanel(u);
-    sendUI('panels:list', panelState());
-    return r;
-  });
-  on('panels:remove', (_e, url: unknown) => {
-    const u = String(url ?? '');
-    settings.general.webPanels = settings.general.webPanels.filter((p) => p.url !== u);
-    saveSettings(settingsFile, settings);
-    const open = tabs.panelList().find((t) => (t.intendedUrl || t.wc.getURL()) === u);
-    if (open) tabs.closePanel(open.id);
-    audit.write('panel', { url: u, open: false });
-    sendUI('panels:list', panelState());
-    return { ok: true };
-  });
-  on('panels:close', (_e, id: unknown) => {
-    const n = Number(id);
-    // a panel is closed through the SAME reporting path as a tab, so it lands on the reopen stack
-    tabs.closePanel(n, (url, title, pos) => {
-      closedTabs.push(url, title, pos);
-      sendUI('closed-tabs', closedTabs.list());
-    });
-    sendUI('panels:list', panelState());
-    return { ok: true };
-  });
-
-  // ---------- 14: quick commands ----------
-  on('commands:search', () => clampItems(commandItems()));
-  /** Run a bound action by NAME. The palette reaches actions through this, so it cannot do anything
-   *  a chord cannot, and there is a single dispatch path (runAction). */
-  on('action:run', (_e, action: unknown) => ({ ok: runAction(String(action ?? '')) }));
-
-  // ---------- 19: tab stacks ----------
-  on('stacks:list', () => stacks.list());
-  on('stacks:create', (_e, ids: unknown, name: unknown) => {
-    const live = tabs.list().map((t) => t.id);
-    const r = stacks.create(Array.isArray(ids) ? ids.map(Number).filter((n) => live.includes(n)) : [], String(name ?? ''));
-    stacks.flush(join(profileDir, 'tab-stacks.json'));
-    sendUI('stacks', stacks.list());
-    return r;
-  });
-  on('stacks:collapse', (_e, id: unknown, collapsed: unknown) => {
-    const ok = stacks.toggleCollapsed(String(id), typeof collapsed === 'boolean' ? collapsed : undefined);
-    stacks.flush(join(profileDir, 'tab-stacks.json'));
-    sendUI('stacks', stacks.list());
-    return { ok };
-  });
-  on('stacks:rename', (_e, id: unknown, name: unknown) => {
-    const ok = stacks.rename(String(id), String(name ?? ''));
-    stacks.flush(join(profileDir, 'tab-stacks.json'));
-    sendUI('stacks', stacks.list());
-    return { ok };
-  });
-  on('stacks:color', (_e, id: unknown, index: unknown) => {
-    const ok = stacks.setColor(String(id), Number(index) || 0);
-    stacks.flush(join(profileDir, 'tab-stacks.json'));
-    sendUI('stacks', stacks.list());
-    return { ok };
-  });
-  on('stacks:dissolve', (_e, id: unknown) => {
-    const ok = stacks.dissolve(String(id));
-    stacks.flush(join(profileDir, 'tab-stacks.json'));
-    sendUI('stacks', stacks.list());
-    return { ok };
-  });
-  /**
-   * "Close stack" resolves to a list of ids and runs them through the ORDINARY close path, so every
-   * tab is captured to the closed-tab stack and a gated tab keeps its gate until it is closed.
-   * There is deliberately no bulk close that bypasses closeTab().
-   */
-  on('stacks:close', (_e, id: unknown) => {
-    const ids = stacks.members(String(id));
-    let n = 0;
-    for (const tid of ids) {
-      // never close the agent's pane out from under a running task
-      if (current && tabs.agentTab === tid) continue;
-      closeTab(tid);
-      n++;
-    }
-    stacks.dissolve(String(id));
-    stacks.flush(join(profileDir, 'tab-stacks.json'));
-    sendUI('stacks', stacks.list());
-    return { ok: true, closed: n };
-  });
-
-  // ---------- 20: workspaces ----------
-  on('workspaces:list', () => ({ workspaces: workspaces.list(), activeId: workspaces.activeId }));
-  on('workspaces:create', (_e, name: unknown, colorIndex: unknown) => {
-    const r = workspaces.create(String(name ?? ''), Number(colorIndex) || 0);
-    sendUI('workspaces', { workspaces: workspaces.list(), activeId: workspaces.activeId });
-    return r;
-  });
-  on('workspaces:rename', (_e, id: unknown, name: unknown) => {
-    const ok = workspaces.rename(String(id), String(name ?? ''));
-    sendUI('workspaces', { workspaces: workspaces.list(), activeId: workspaces.activeId });
-    return { ok };
-  });
-  on('workspaces:delete', (_e, id: unknown) => {
-    const r = workspaces.remove(String(id));
-    sendUI('workspaces', { workspaces: workspaces.list(), activeId: workspaces.activeId });
-    return r;
-  });
-  /**
-   * Switching workspaces is REFUSED while an agent task runs. The agent's tab belongs to the
-   * workspace the task started in; letting a switch hide it would make the security UI describe a
-   * state that is no longer on screen (the same reasoning as "untile shows the agent's tab").
-   */
-  on('workspaces:switch', (_e, id: unknown) => {
-    if (current) return { ok: false, error: 'a workspace cannot be switched while an agent task is running: the agent tab would leave the screen' };
-    const currentTabs = tabs.list().map((t) => ({ url: t.url, title: t.title }));
-    const r = workspaces.switchTo(String(id), currentTabs);
-    if (!r.ok) return r;
-    // open the target workspace's tabs: close the non-agent tabs, then create the saved set
-    const keep = tabs.agentTab;
-    for (const t of tabs.list()) if (t.id !== keep) closeTab(t.id);
-    for (const x of r.tabs) {
-      const t = tabs.create(x.url);
-      t.navSource = 'user';
-    }
-    // Only fall back to a blank tab when the switch genuinely left nothing on screen. A workspace
-    // with no saved tabs used to add a blank ON TOP of the tab that was already there.
-    if (!tabs.list().length) {
-      const t = tabs.create('about:blank');
-      t.navSource = 'user';
-    }
-    saveSessionSoon();
-    sendUI('workspaces', { workspaces: workspaces.list(), activeId: workspaces.activeId });
-    void tabs.layout();
-    return { ok: true };
-  });
-
-  // ---------- 21: tab strip placement ----------
-  on('tabstrip:set', (_e, placement: unknown) => {
-    const OK = new Set(['top', 'left', 'right', 'bottom']);
-    const p = OK.has(String(placement)) ? (String(placement) as 'top') : 'top';
-    settings.general.tabStrip = p;
-    saveSettings(settingsFile, settings);
-    sendUI('tabstrip', { placement: p });
-    return { ok: true, placement: p };
-  });
-
-  // ---------- 22: saved sessions ----------
-  on('sessions:list', () => ({ sessions: savedSessions.list() }));
-  on('sessions:save', (_e, name: unknown) => {
-    const list = tabs.list().map((t) => ({ url: t.url, title: t.title }));
-    const r = savedSessions.save(String(name ?? ''), list);
-    sendUI('sessions', { sessions: savedSessions.list() });
-    return r;
-  });
-  on('sessions:restore', (_e, id: unknown) => {
-    const r = savedSessions.restorableTabs(String(id));
-    if (!r.length) return { ok: false, error: 'that session has no restorable tabs' };
-    const created: number[] = [];
-    for (const t of r) {
-      const tab = tabs.create(t.url);
-      // a restored session's tabs start CLEAN: navSource 'user' records history as a user action,
-      // and there is no gate state to resurrect because none is stored
-      tab.navSource = 'user';
-      created.push(tab.id);
-    }
-    saveSessionSoon();
-    return { ok: true, opened: created.length };
-  });
-  on('sessions:rename', (_e, id: unknown, name: unknown) => {
-    const ok = savedSessions.rename(String(id), String(name ?? ''));
-    sendUI('sessions', { sessions: savedSessions.list() });
-    return { ok };
-  });
-  on('sessions:delete', (_e, id: unknown) => {
-    const ok = savedSessions.remove(String(id));
-    sendUI('sessions', { sessions: savedSessions.list() });
-    return { ok };
-  });
-  on('sessions:export', () => savedSessions.toJson());
-
-  // ---------- 23: hibernation ----------
-  on('hibernation:state', () => ({ settings: settings.hibernation, hibernated: tabs.hibernatedIds() }));
-  on('hibernation:set', (_e, patch: unknown) => {
-    const r = HibernationSettingsSchema.safeParse({ ...settings.hibernation, ...(patch as object) });
-    if (!r.success) return { ok: false, error: r.error.issues[0]?.message ?? 'invalid' };
-    settings.hibernation = r.data;
-    saveSettings(settingsFile, settings);
-    scheduleHibernation();
-    return { ok: true, settings: r.data };
-  });
-  /** Sweep now. The decision is delegated to planSweep — this handler does not decide anything. */
-  on('hibernation:sweep', () => ({ swept: hibernationSweep() }));
-
-  // ---------- 24: reader mode (HUMAN-ONLY output) ----------
-  on('reader:open', async () => {
-    const t = tabs.active();
-    if (!t) return { ok: false, error: 'no active tab' };
-    if (t.wc.getURL() === '' || t.wc.getURL() === 'about:blank') return { ok: false, error: 'nothing to read' };
-    try {
-      // runs in the page's own ISOLATED WORLD; its output is text and is shown to the human only
-      const raw = await t.wc.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD, [{ code: EXTRACT_ARTICLE_JS }]);
-      const article = normalizeArticle(raw);
-      if (!article.ok) return { ok: false, error: article.error ?? 'no readable content' };
-      // NOTE, and it is the point of this ticket: this NEVER calls runReader, never touches taint,
-      // and never reaches the planner. Reader mode is not a text channel into any model.
-      audit.write('reader', { taskId: current?.task.id, url: t.wc.getURL(), blocks: article.blocks.length, humanOnly: true });
-      return { ok: true, article };
-    } catch (e) {
-      return { ok: false, error: (e as Error).message.slice(0, 200) };
-    }
-  });
-
-  // ---------- 25: translate (opt-in, off by default, refused during a task) ----------
-  on('translate:state', () => ({ settings: settings.translate, languages: LANGUAGES, status: cloudStatus(settings.translate) }));
-  on('translate:set', (_e, patch: unknown) => {
-    const r = TranslateSettingsSchema.safeParse({ ...settings.translate, ...(patch as object) });
-    if (!r.success) return { ok: false, error: r.error.issues[0]?.message ?? 'invalid' };
-    settings.translate = r.data;
-    saveSettings(settingsFile, settings);
-    sendUI('translate', { settings: r.data, status: cloudStatus(r.data) });
-    return { ok: true, settings: r.data, status: cloudStatus(r.data) };
-  });
-  on('translate:run', async (_e, langCode: unknown) => {
-    const gate = canTranslate(settings.translate, { taskRunning: !!current });
-    if (!gate.ok) return { ok: false, error: gate.error };
-    const t = tabs.active();
-    if (!t) return { ok: false, error: 'no active tab' };
-    const target = String(langCode ?? settings.translate.targetLang);
-    const label = LANGUAGES.find((l) => l.code === target)?.label ?? target;
-    try {
-      const text = String(await t.wc.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD, [{ code: '(() => (document.body && document.body.innerText) || "")()' }]) ?? '');
-      const chunks = chunkText(text);
-      if (!chunks.length) return { ok: false, error: 'nothing to translate' };
-      const out: string[] = [];
-      for (const c of chunks.slice(0, 10)) {
-        const r = await fetch(settings.translate.endpoint, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            model: settings.translate.model || undefined,
-            messages: [
-              { role: 'system', content: TRANSLATE_SYSTEM },
-              { role: 'user', content: translatePrompt(c, label) },
-            ],
-          }),
-        });
-        if (!r.ok) return { ok: false, error: `endpoint returned ${r.status}` };
-        const j = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
-        out.push(String(j.choices?.[0]?.message?.content ?? '').slice(0, 20_000));
-      }
-      // deliberately NOT recorded as taint: this text went to the user's OWN configured endpoint for
-      // the user, and marking the page tainted would silently change the agent's behaviour on it
-      audit.write('translate', { taskId: current?.task.id, url: t.wc.getURL(), target: label, chunks: out.length, taint: false });
-      return { ok: true, text: out.join('\n\n'), target: label, status: cloudStatus(settings.translate) };
-    } catch (e) {
-      return { ok: false, error: (e as Error).message.slice(0, 200) };
-    }
-  });
-
-  // ---------- 26: capture ----------
-  on('capture:run', async (_e, req: unknown) => {
-    // (1) chrome-initiated only: there is no path from a page to this handler. (2) never while a
-    // confirmation is pending — that would photograph the security UI.
-    if (broker.pendingCount() > 0) return { ok: false, error: 'a confirmation dialog is open; a capture now would include the security UI' };
-    const parsed = CaptureRequestSchema.safeParse(req);
-    if (!parsed.success) return { ok: false, error: 'bad capture request' };
-    const t = tabs.active();
-    if (!t || t.wc.isDestroyed()) return { ok: false, error: 'no active tab' };
-    try {
-      const b = tabs.paneBounds(t.id);
-      const w = b.width;
-      const h = b.height;
-      let image: Electron.NativeImage;
-      if (parsed.data.mode === 'visible') {
-        image = await t.wc.capturePage();
-      } else {
-        const rect = parsed.data.mode === 'region' && parsed.data.rect ? clampRect(parsed.data.rect, { width: w, height: h }) : { x: 0, y: 0, width: w, height: h };
-        if (parsed.data.mode === 'full') {
-          // a page can report an enormous scroll height; cap it and say so rather than OOM
-          const { height, clipped } = clampFullHeight(h, w);
-          image = await t.wc.capturePage({ x: 0, y: 0, width: w, height });
-          if (clipped) audit.write('capture', { taskId: current?.task.id, mode: 'full', clipped: true, height });
-        } else {
-          image = await t.wc.capturePage(rect);
-        }
-      }
-      const png = image.toPNG();
-      const save = await dialog.showSaveDialog(win, { title: 'Save capture', defaultPath: captureFilename(originOf(t.wc.getURL())?.replace(/^https?:\/\//, '') ?? 'page') });
-      if (save.canceled || !save.filePath) return { ok: false, error: 'cancelled', bytes: png.length };
-      const w2 = writeCapture(save.filePath, png);
-      audit.write('capture', { taskId: current?.task.id, mode: parsed.data.mode, bytes: png.length, ok: w2.ok });
-      return { ok: w2.ok, bytes: png.length, file: save.filePath, error: w2.ok ? undefined : w2.error };
-    } catch (e) {
-      return { ok: false, error: (e as Error).message.slice(0, 200) };
-    }
-  });
-  on('capture:to-clipboard', async (_e, req: unknown) => {
-    if (broker.pendingCount() > 0) return { ok: false, error: 'a confirmation dialog is open; a capture now would include the security UI' };
-    const parsed = CaptureRequestSchema.safeParse(req);
-    if (!parsed.success) return { ok: false, error: 'bad capture request' };
-    const t = tabs.active();
-    if (!t || t.wc.isDestroyed()) return { ok: false, error: 'no active tab' };
-    try {
-      const bb = tabs.paneBounds(t.id);
-      const image = await t.wc.capturePage(parsed.data.rect ? clampRect(parsed.data.rect, bb) : undefined);
-      const png = image.toPNG();
-      // Electron 44 removed Clipboard.writeImage; the supported path is the async ClipboardItem API
-      // the DOM lib also declares ClipboardItem with an incompatible getType signature, so this
-      // goes through unknown; at runtime it is Electron's own ClipboardItem the module expects
-      const item = new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) }) as unknown as Electron.ClipboardItem;
-      await clipboard.write([item]);
-      audit.write('capture', { taskId: current?.task.id, mode: 'clipboard', bytes: png.length });
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: (e as Error).message.slice(0, 200) };
-    }
-  });
-
-  // ---------- 27: page actions ----------
-  on('pageactions:get', () => {
-    const o = originOf(tabs.active()?.wc.getURL() ?? '');
-    return { actions: o ? pageActions.byOrigin(o) : defaultPageActions(), custom: o ? pageActions.byOrigin(o).customCss : '' };
-  });
-  on('pageactions:set', (_e, patch: unknown) => {
-    const t = tabs.active();
-    if (!t) return { ok: false, error: 'no active tab' };
-    const o = originOf(t.wc.getURL());
-    if (!o) return { ok: false, error: 'this page has no origin to remember actions for' };
-    const r = PageActionsSchema.safeParse({ ...pageActions.byOrigin(o), ...(patch as object) });
-    if (!r.success) return { ok: false, error: r.error.issues[0]?.message ?? 'invalid' };
-    pageActions.set(o, r.data);
-    applyPageActions(t, o);
-    return { ok: true, actions: r.data };
-  });
-
-  // ---------- 28: status bar ----------
-  on('status:set', (_e, on: unknown) => {
-    settings.general.statusBar = on !== false;
-    saveSettings(settingsFile, settings);
-    return { ok: true, on: settings.general.statusBar };
-  });
-  on('rail:set', (_e, on: unknown) => {
-    settings.general.railVisible = on !== false;
-    saveSettings(settingsFile, settings);
-    return { ok: true, on: settings.general.railVisible };
-  });
-
-  // ---------- 29: ephemeral window ----------
-  on('profiles:create-ephemeral', (_e, name: unknown) => {
-    const p = ctx.profile();
-    if (p.ephemeral) return { ok: false, error: 'this window is already ephemeral' };
-    return { ok: true, hint: 'create it from the profile manager; the window is removed when it closes' };
-  });
-
-  // ---------- 30: profile bundle ----------
-  on('bundle:export', (): string => {
-    const b = buildBundle({
-      settings: { general: settings.general, hibernation: settings.hibernation, translate: settings.translate, gestures: settings.gestures, extensions: settings.extensions },
-      themes: { custom: settings.appearance.custom as unknown as Array<Record<string, unknown>>, activeId: settings.appearance.theme },
-      bookmarks: bookmarks.tree() as never,
-      keybindings: settings.keybindings.bindings,
-      savedSessions: savedSessions.list().map((s) => ({ name: s.name, createdAt: s.createdAt, tabs: s.tabs })),
-      workspaces: workspaces.list().map((w) => ({ name: w.name, colorIndex: w.colorIndex, tabs: w.tabs })),
-    });
-    return JSON.stringify(b, null, 2) + '\n';
-  });
-  on('bundle:dry-run', (_e, text: unknown) => dryRun(String(text ?? '')));
-  on('bundle:import', (_e, text: unknown) => {
-    const r = parseBundle(String(text ?? ''));
-    if (!r.ok) return { ok: false, error: r.error };
-    const b = r.bundle;
-    const applied: string[] = [];
-    // validated as a whole before anything is touched; a bundle that fails anywhere changes nothing
-    if (b.settings) {
-      const g = b.settings.general as Settings['general'] | undefined;
-      if (g && typeof g === 'object') {
-        settings.general = { ...settings.general, startup: g.startup === 'last-session' ? 'last-session' : settings.general.startup, tabStrip: settings.general.tabStrip };
-        applied.push('settings');
-      }
-    }
-    if (b.keybindings) {
-      const merged = { version: 1 as const, bindings: { ...defaultKeybindings().bindings, ...b.keybindings } };
-      const problems = validateBindings(merged.bindings);
-      if (!problems.length) {
-        settings.keybindings = merged;
-        applied.push('keybindings');
-      }
-    }
-    if (b.savedSessions) {
-      for (const s of b.savedSessions) savedSessions.save(s.name, s.tabs);
-      applied.push(`sessions (${b.savedSessions.length})`);
-    }
-    if (b.workspaces) {
-      for (const w of b.workspaces) {
-        const c = workspaces.create(w.name, w.colorIndex);
-        if (c.ok) workspaces.remember(w.tabs, c.workspace.id);
-      }
-      applied.push(`workspaces (${b.workspaces.length})`);
-    }
-    saveSettings(settingsFile, settings);
-    audit.write('bundle', { taskId: current?.task.id, applied: applied.join(', '), bookmarks: b.bookmarks?.length ?? 0 });
-    return { ok: true, applied };
-  });
-  on('bundle:export-file', async () => {
-    const save = await dialog.showSaveDialog(win, { title: 'Export profile bundle', defaultPath: 'guarded-browser-profile.json' });
-    if (save.canceled || !save.filePath) return { ok: false, error: 'cancelled' };
-    const text = JSON.stringify(
-      buildBundle({
-        settings: { general: settings.general, hibernation: settings.hibernation, translate: settings.translate, gestures: settings.gestures, extensions: settings.extensions },
-        themes: { custom: settings.appearance.custom as unknown as Array<Record<string, unknown>>, activeId: settings.appearance.theme },
-        bookmarks: bookmarks.tree() as never,
-        keybindings: settings.keybindings.bindings,
-        savedSessions: savedSessions.list().map((s) => ({ name: s.name, createdAt: s.createdAt, tabs: s.tabs })),
-        workspaces: workspaces.list().map((w) => ({ name: w.name, colorIndex: w.colorIndex, tabs: w.tabs })),
-      }),
-      null,
-      2,
-    );
-    if (text.length > MAX_BUNDLE_BYTES) return { ok: false, error: 'bundle too large to write' };
-    writeFileSync(save.filePath, text, { mode: 0o600 });
-    return { ok: true };
-  });
-  on('bundle:import-file', async () => {
-    const open = await dialog.showOpenDialog(win, { title: 'Import profile bundle', filters: [{ name: 'Bundle JSON', extensions: ['json'] }], properties: ['openFile'] });
-    if (open.canceled || !open.filePaths[0]) return { ok: false, error: 'cancelled' };
-    if (statSync(open.filePaths[0]).size > MAX_BUNDLE_BYTES) return { ok: false, error: 'file too large' };
-    return handlers['bundle:import']({}, readFileSync(open.filePaths[0], 'utf8')) as { ok: boolean };
-  });
-
-  // ---------- 32: unpacked extensions ----------
-  on('extensions:list', () => ({ entries: extensions.list(), warning: EXTENSION_WARNING, enabled: settings.extensions.enabled }));
-  on('extensions:add', (_e, dir: unknown) => {
-    const r = extensions.add(String(dir ?? ''));
-    sendUI('extensions', { entries: extensions.list(), warning: EXTENSION_WARNING });
-    return r;
-  });
-  on('extensions:enable', (_e, dir: unknown, on: unknown) => {
-    const ok = extensions.setEnabled(String(dir), on !== false);
-    sendUI('extensions', { entries: extensions.list(), warning: EXTENSION_WARNING });
-    return { ok };
-  });
-  on('extensions:remove', (_e, dir: unknown) => {
-    const ok = extensions.remove(String(dir));
-    sendUI('extensions', { entries: extensions.list(), warning: EXTENSION_WARNING });
-    return { ok };
-  });
-  on('extensions:pick', async () => {
-    const r = await dialog.showOpenDialog(win, { title: 'Add an unpacked extension', properties: ['openDirectory'] });
-    if (r.canceled || !r.filePaths[0]) return { ok: false, error: 'cancelled' };
-    const added = extensions.add(r.filePaths[0]);
-    sendUI('extensions', { entries: extensions.list(), warning: EXTENSION_WARNING });
-    return added;
-  });
-  on('extensions:set-enabled', (_e, on: unknown) => {
-    settings.extensions.enabled = on !== false;
-    saveSettings(settingsFile, settings);
-    return { ok: true, enabled: settings.extensions.enabled };
-  });
-
-  // ---------- 33: bookmarks panel extras ----------
-  on('bookmarks:set-description', (_e, id: unknown, text: unknown) => wrap(() => bookmarks.update(String(id), { description: String(text ?? '').slice(0, 2000) })));
-  on('bookmarks:set-speeddial', (_e, id: unknown, on: unknown) => wrap(() => bookmarks.update(String(id), { speedDial: on === true })));
-  on('bookmarks:sort', (_e, mode: unknown) => {
-    const r = SortModeSchema.safeParse(mode);
-    if (!r.success) return { ok: false, error: 'unknown sort mode' };
-    bookmarkSort = r.data;
-    saveSettings(settingsFile, settings);
-    return { ok: true, mode: bookmarkSort, tree: sortTree(bookmarks.tree(), bookmarkSort) };
-  });
-  on('bookmarks:tree-sorted', () => ({ roots: sortTree(bookmarks.tree(), bookmarkSort), showBar: bookmarks.showBar, sort: bookmarkSort }));
-  on('bookmarks:trash', () => ({ entries: bookmarkTrash.list().map((e) => ({ id: e.node.id, title: e.node.title, type: e.node.type, deletedAt: e.deletedAt })), count: bookmarkTrash.count() }));
-  on('bookmarks:trash-restore', (_e, id: unknown) => {
-    const e = bookmarkTrash.get(String(id));
-    if (!e) return { ok: false, error: 'not in the trash' };
-    const parent = bookmarks.tree().find((f) => f.id === e.parentId) ?? bookmarks.tree()[0];
-    bookmarkTrash.remove(e.node.id);
-    // restore through the ordinary add path so the store's own validation still applies
-    const n = e.node;
-    if (n.type === 'bookmark') return wrap(() => bookmarks.addBookmark(parent.id, n.title, n.url));
-    return wrap(() => bookmarks.addFolder(parent.id, e.node.title));
-  });
-  on('bookmarks:trash-empty', (_e, confirm: unknown) => {
-    const r = bookmarkTrash.empty(confirm === true);
-    audit.write('bundle', { taskId: current?.task.id, action: 'empty bookmarks trash', wouldDiscard: r.wouldDiscard, ok: r.ok });
-    return r;
-  });
+  registerTabsIpc(on, rt);
+  registerLibraryIpc(on, rt);
+  registerSettingsIpc(on, rt);
+  registerAgentIpc(on, rt);
+  registerMailIpc(on, rt);
+  registerMiscIpc(on, rt);
 }
 
 
