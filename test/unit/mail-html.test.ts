@@ -486,10 +486,31 @@ describe('mail html: the store keeps html apart (schema v2)', () => {
     raw.close();
     const again = new MailStore(f);
     expect(again.schemaVersion()).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(2);
-    expect(again.body(r.id)).toMatchObject({ bodyText: 'old text', hasHtml: false });
+    expect(SCHEMA_VERSION).toBe(3);
+    // v3: the text stays, and the message is marked unfetched so the next open stores its HTML
+    expect(again.body(r.id)).toMatchObject({ bodyText: 'old text', hasHtml: false, bodyFetched: false });
     again.setBody('a1', 'INBOX', 1, { text: 'old text', html: '<p>new</p>' });
     expect(again.html(r.id)).toBe('<p>new</p>');
+    again.close();
+  });
+
+  it('migrates a v2 store: text-only fetched bodies are re-marked unfetched, bodies WITH html are left alone', () => {
+    const f = join(tmp(), DB_FILE);
+    const s = new MailStore(f);
+    s.addAccount(account);
+    const a = s.upsertMessage(header(1));
+    const b = s.upsertMessage(header(2));
+    if (!a.ok || !b.ok) throw new Error('upsert');
+    s.setBody('a1', 'INBOX', 1, { text: 'text only' });
+    s.setBody('a1', 'INBOX', 2, { text: 'has html', html: '<p>x</p>' });
+    s.close();
+    const raw = new DatabaseSync(f);
+    raw.exec('PRAGMA user_version = 2');
+    raw.close();
+    const again = new MailStore(f);
+    expect(again.schemaVersion()).toBe(3);
+    expect(again.body(a.id)).toMatchObject({ bodyText: 'text only', bodyFetched: false });
+    expect(again.body(b.id)).toMatchObject({ bodyText: 'has html', bodyFetched: true, hasHtml: true });
     again.close();
   });
 });

@@ -244,10 +244,13 @@ export class MailController {
     let body = this.db().body(row.id);
     // fetch on demand: opening a message is what pulls its text, never a sync pass
     if (!body?.bodyFetched) {
+      // text kept from before HTML was stored (schema v3 re-marks those unfetched): if the re-fetch
+      // cannot happen, the message still opens with that text instead of failing
+      const cached = !!body?.bodyText;
       // a fetch is network: refused during a task (an already-fetched message is local and still opens)
       const gate = this.deps.canConnect();
-      if (!gate.ok) return { ok: false as const, error: gate.reason ?? 'mail cannot connect right now', refused: true };
-      const s = this.syncerFor(row.accountId);
+      if (!gate.ok && !cached) return { ok: false as const, error: gate.reason ?? 'mail cannot connect right now', refused: true };
+      const s = gate.ok ? this.syncerFor(row.accountId) : null;
       if (s) {
         const r = await s.fetchBody(row.folder, row.uid, { markRead: opts.markRead !== false });
         if (r.ok) body = this.db().body(row.id);

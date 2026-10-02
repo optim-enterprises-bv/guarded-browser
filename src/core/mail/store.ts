@@ -29,7 +29,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const DB_FILE = 'mail.sqlite';
 
 /** hard ceiling on stored messages; a store beyond this refuses writes instead of growing forever */
@@ -444,6 +444,9 @@ export class MailStore {
       }
       // existing messages simply have no row here and keep showing their text
       if (v < 2) this.db.exec(SCHEMA_V2);
+      // v3: bodies fetched before HTML was kept have text only. Mark them unfetched (the text stays) so
+      // the next OPEN fetches the body again and stores its HTML; nothing is fetched in bulk.
+      if (v < 3) this.db.exec('UPDATE message SET bodyFetched = 0 WHERE bodyFetched = 1 AND id NOT IN (SELECT messageId FROM message_html)');
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       this.db.exec('COMMIT');
     } catch (e) {

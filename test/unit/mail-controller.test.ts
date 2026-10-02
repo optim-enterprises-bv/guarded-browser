@@ -69,6 +69,24 @@ describe('mail controller — the task gate covers every network action', () => 
     expect(server.transcript).toBe(before);
   });
 
+  it('a message re-marked for an HTML fetch still opens with its kept text when the fetch is refused', async () => {
+    const { ctl, server, setRunning } = setup();
+    ctl.unlock('correct horse battery');
+    await ctl.saveAccount(account, { password: 'pw' });
+    await ctl.sync('work');
+    const id = (ctl.list({ accountId: 'work', folder: 'INBOX' }).rows[0] as { id: number }).id;
+    expect((await ctl.message(id)).ok).toBe(true); // fetched once
+    // what the v3 migration does to a body fetched before HTML was kept
+    const store = (ctl as unknown as { db(): import('../../src/core/mail/store').MailStore }).db();
+    (store as unknown as { db: { exec(s: string): void } }).db.exec(`UPDATE message SET bodyFetched = 0 WHERE id = ${id}`);
+    setRunning(true);
+    const before = server.transcript;
+    const open = await ctl.message(id);
+    expect(open.ok).toBe(true);
+    expect(String((open as { text?: string }).text ?? '').length).toBeGreaterThan(0);
+    expect(server.transcript).toBe(before); // nothing went to the server during the task
+  });
+
   it('disconnectAll drops a connection opened before the task; the next sync reconnects', async () => {
     const { ctl, server, ended } = setup();
     ctl.unlock('correct horse battery');
