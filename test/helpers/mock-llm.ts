@@ -17,11 +17,15 @@ export interface MockCall {
   transcript: string;
 }
 
-export type MockReply =
+export type MockReply = (
   | { tool: string; args: Record<string, unknown> }
   | { json: unknown }
   | { content: string }
-  | { status: number };
+  | { status: number }
+) & {
+  /** hold the HTTP reply this long, so a test can observe state WHILE the model is thinking */
+  delayMs?: number;
+};
 
 export type Responder = (call: MockCall) => MockReply;
 
@@ -64,7 +68,7 @@ export async function startMockLlm(): Promise<MockLlm> {
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c) => chunks.push(c));
-    req.on('end', () => {
+    req.on('end', async () => {
       if (req.url?.endsWith('/models')) {
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ data: [{ id: 'default' }] }));
         return;
@@ -86,6 +90,7 @@ export async function startMockLlm(): Promise<MockLlm> {
       } catch (e) {
         reply = { content: `mock script error: ${(e as Error).message}` };
       }
+      if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
       if ('status' in reply) {
         res.writeHead(reply.status).end('mock error');
         return;

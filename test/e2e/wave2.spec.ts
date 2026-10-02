@@ -178,7 +178,9 @@ test('SECURITY: a workspace switch is refused while an agent task is running', a
   const created = await a.ui.evaluate(() => (window as any).gb.invoke('workspaces:create', 'Work'));
   // a task that takes a while: the refusal has to be observed WHILE it runs, so an instant task
   // would make this test vacuous (it would pass because the task had already ended)
-  mock.script('planner', sequence({ json: { steps: [{ action: 'navigate', args: { url: `${site}/slow` } }] } }, { json: { steps: [{ action: 'done', answer: 'ok' }] } }));
+  // the planner takes 3 s to answer, so the task is deterministically still running when the switch
+  // is asked for (an instant planner made this a race between two IPC round trips)
+  mock.script('planner', sequence({ json: { steps: [{ action: 'navigate', args: { url: `${site}/slow` } }] }, delayMs: 3000 }, { json: { steps: [{ action: 'done', answer: 'ok' }] } }));
   mock.script('judge', () => ({ json: { verdict: 'allow', reason: 'ok' } }));
   await runTask(a.ui, 'go slowly', [site]);
   // while the task is up, the switch must be refused. Assert the task really IS running in the same
@@ -365,7 +367,9 @@ test('mouse gestures are refused while a task runs and do nothing when no task i
   expect(idle.action).toBe('nav.back');
 
   // a task that stays in flight, so "refused during a task" is observable
-  mock.script('planner', sequence({ json: { steps: [{ action: 'navigate', args: { url: `${site}/slow` } }] } }, { json: { steps: [{ action: 'done', answer: 'ok' }] } }));
+  // the planner takes 3 s to answer, so the task is deterministically still running when the switch
+  // is asked for (an instant planner made this a race between two IPC round trips)
+  mock.script('planner', sequence({ json: { steps: [{ action: 'navigate', args: { url: `${site}/slow` } }] }, delayMs: 3000 }, { json: { steps: [{ action: 'done', answer: 'ok' }] } }));
   mock.script('judge', () => ({ json: { verdict: 'allow', reason: 'ok' } }));
   await runTask(a.ui, 'idle', [site]);
   const during = await a.ui.evaluate((fx) => {
@@ -463,7 +467,9 @@ test('SECURITY: the agent always works in a STRIP tab, never in a panel', async 
   expect(pinned.ok).toBe(true);
   const panelId = pinned.id;
 
-  mock.script('planner', sequence({ json: { steps: [{ action: 'navigate', args: { url: `${site}/slow` } }] } }, { json: { steps: [{ action: 'done', answer: 'ok' }] } }));
+  // the planner takes 3 s to answer, so the task is deterministically still running when the switch
+  // is asked for (an instant planner made this a race between two IPC round trips)
+  mock.script('planner', sequence({ json: { steps: [{ action: 'navigate', args: { url: `${site}/slow` } }] }, delayMs: 3000 }, { json: { steps: [{ action: 'done', answer: 'ok' }] } }));
   mock.script('judge', () => ({ json: { verdict: 'allow', reason: 'ok' } }));
   await runTask(a.ui, 'work in a tab', [site]);
 

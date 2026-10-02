@@ -638,6 +638,11 @@ gb.on('shortcut', (what: string) => {
     panelsUi.toggle('mail');
     return;
   }
+  // a link clicked in an HTML message opened a new tab: get the mail panel out of its way
+  if (what === 'close-mail') {
+    if (panelsUi.active() === 'mail') panelsUi.close();
+    return;
+  }
   const m = /^panel:(history|bookmarks|downloads|sessions|workspaces)$/.exec(String(what));
   if (m) panelsUi.toggle(m[1] as never);
   else if (what === 'reader') void openReader();

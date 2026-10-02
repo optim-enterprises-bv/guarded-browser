@@ -201,6 +201,9 @@ test('a link click opens a NEW normal tab; the view itself never navigates', asy
   await expect.poll(async () => (await mailView(a!))?.visible).toBe(true);
   await expect.poll(async () => (await mailView(a!))?.url).toMatch(/^data:/);
   const v = (await mailView(a))!;
+  // click only once the document has finished loading and painted, or the click can land on nothing
+  await expect.poll(() => a!.app.evaluate(({ webContents }, id) => !webContents.fromId(id)!.isLoading(), v.id)).toBe(true);
+  await a.ui.waitForTimeout(150);
   // the link is a 300x80 block at the top-left of the body (10px / 8px body padding)
   await a.app.evaluate(async ({ webContents }, id) => {
     const wc = webContents.fromId(id)!;
@@ -214,6 +217,8 @@ test('a link click opens a NEW normal tab; the view itself never navigates', asy
     .toContainEqual(`${fx.site}/article.html`);
   const st = await a.ui.evaluate(() => (window as any).gb.invoke('state:get'));
   expect(st.tabs).toHaveLength(2);
+  // the full-width mail panel steps aside so the new tab is actually in view
+  await expect(a.ui.locator('[data-testid=mail-view]')).toBeHidden();
   // the view still shows the message
   const after = (await mailView(a))!;
   expect(after.url).toMatch(/^data:text\/html/);

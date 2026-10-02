@@ -973,7 +973,11 @@ const api = {
       partition: `mailview-${profile().id}`,
       html: (id) => api.mail().htmlFor(id),
       // a link in a message: a NEW normal tab through the user navigation path (reputation, proxy, gates)
-      openLink: (url) => api.openUrl(url),
+      // ...and the full-width mail panel steps aside, or the new tab would open unseen behind it
+      openLink: (url) => {
+        api.openUrl(url);
+        sendUI('shortcut', 'close-mail');
+      },
       canConnect: () => (current ? { ok: false, reason: 'an agent task is running: remote content stays blocked until it ends' } : { ok: true }),
       chromeBusy: () => !!tabs?.overlayOn || broker.pendingCount() > 0,
       reputationListed: (url) => !!reputation.check(url)?.listed,
