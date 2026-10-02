@@ -291,7 +291,10 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 #mail-toolbar { display: flex; align-items: center; gap: 4px; padding: 4px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 #m-search { flex: 1; min-width: 90px; }
 #m-columns { flex: 1; display: flex; min-height: 0; }
-#m-tree { width: 206px; min-width: 206px; overflow-y: auto; border-right: 1px solid var(--line); }
+/* the left column: ACCOUNTS first (user's call 2026-10-02: accounts live in the left column, not in a
+   bottom strip), then the selected account's folder tree below them */
+#m-left { width: 206px; min-width: 206px; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
+#m-tree { flex: 1; min-height: 0; overflow-y: auto; }
 #m-list { width: 242px; min-width: 242px; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
 #m-list-head { display: flex; align-items: center; gap: 4px; padding: 3px 6px; border-bottom: 1px solid var(--line); font-size: 11px; }
 #m-rows { flex: 1; overflow-y: auto; }
@@ -308,9 +311,16 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 #m-composer { border-top: 1px solid var(--line); padding: 4px 6px; }
 #m-reply { width: 100%; height: 46px; resize: none; }
 #m-compose-foot { display: flex; align-items: center; gap: 8px; padding-top: 3px; }
-#m-accounts { display: flex; align-items: center; gap: 4px; padding: 3px 4px; border-top: 1px solid var(--line); font-size: 11px; flex-wrap: wrap; }
-#m-accounts .acct { display: flex; align-items: center; gap: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; }
-#m-accounts .acct button { padding: 0 4px; font-size: 10px; }
+#m-accounts { flex: 0 0 auto; max-height: 45%; overflow-y: auto; border-bottom: 1px solid var(--line); padding-bottom: 2px; font-size: 11px; }
+#m-accounts .acct { display: flex; align-items: center; gap: 5px; padding: 3px 6px; cursor: pointer; border-radius: 4px; }
+#m-accounts .acct:hover { background: var(--card); }
+#m-accounts .acct.active { background: var(--card); font-weight: 600; }
+#m-accounts .acct .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#m-accounts .acct .chips { margin-left: auto; display: flex; gap: 3px; }
+#m-accounts .acct-tools { display: flex; gap: 3px; padding: 0 6px 3px 18px; }
+#m-accounts .acct-tools button { padding: 0 4px; font-size: 10px; }
+#m-accounts .acct-foot { display: flex; flex-direction: column; gap: 2px; padding: 3px 6px 0; }
+#m-accounts .acct-foot button { align-self: flex-start; font-size: 11px; padding: 1px 6px; }
 #m-status { padding: 2px 4px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 #mail-view .section { margin-bottom: 1px; }
 #mail-view .section-head { display: flex; align-items: center; gap: 4px; padding: 3px 6px; color: var(--muted); font-weight: 600; cursor: pointer; font-size: 11px; }

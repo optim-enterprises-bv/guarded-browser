@@ -47,6 +47,20 @@ if (process.env.GB_SHOT_IMPORT === '1') {
   await ui.click('[data-testid=mail-import]');
   await ui.waitForSelector('[data-testid=mail-import-list] .import-row', { timeout: 15_000 });
   await new Promise((r) => setTimeout(r, 400));
+  // GB_SHOT_APPLY=1 also applies the import and opens the first account that has mail, so the
+  // ACCOUNTS column and a synced folder tree are what the screenshot shows (connects to real servers)
+  if (process.env.GB_SHOT_APPLY === '1') {
+    await ui.click('[data-testid=mail-import-apply]');
+    // the modal closes itself on success; if it is still up (some accounts refused), dismiss it
+    await ui.waitForSelector('[data-testid=mail-account-modal].hidden', { state: 'attached', timeout: 30_000 }).catch(() => ui.click('[data-testid=mail-acct-cancel]'));
+    await ui.waitForSelector('[data-testid=account-chip]', { timeout: 15_000 });
+    const pick = process.env.GB_SHOT_ACCOUNT;
+    if (pick) await ui.click(`[data-testid=account-chip][data-account-id="${pick}"]`);
+    await ui.click('[data-testid=mail-sync]');
+    await ui.waitForSelector('[data-testid=mail-rows] .row', { timeout: 60_000 });
+    await ui.click('[data-testid=mail-rows] .row');
+    await new Promise((r) => setTimeout(r, 1500));
+  }
 }
 await new Promise((r) => setTimeout(r, 800));
 await ui.screenshot({ path: out });

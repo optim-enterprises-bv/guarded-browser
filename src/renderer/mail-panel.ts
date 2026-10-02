@@ -210,46 +210,87 @@ function renderActions(m: AnyRec) {
 
 // ---------------------------------------------------------------- accounts
 
+/**
+ * The ACCOUNTS section at the top of the left column (the user's call: accounts belong in the left
+ * column, not in a strip under the panel). One row per account, the selected one highlighted; the
+ * folder tree under it is the selected account's. Clicking a row switches account, so every account
+ * is reachable, not only the first.
+ */
 function renderAccounts() {
   const box = $('m-accounts');
   box.replaceChildren();
+  const head = el('div', 'section-head');
+  head.append(el('span', undefined, '\u25be Accounts'));
+  box.append(head);
+  // two accounts with the same display name (e.g. a personal and a work address under one person's
+  // name) are told apart by their address, so every row says which mailbox it is
+  const names = new Map<string, number>();
+  for (const a of state.accounts ?? []) names.set(a.name || '', (names.get(a.name || '') ?? 0) + 1);
   for (const a of state.accounts ?? []) {
-    const chip = el('span', 'acct');
-    chip.dataset.testid = 'account-chip';
-    chip.dataset.accountId = a.id;
-    chip.append(el('span', undefined, `${a.name || a.address || a.id}`));
-    const check = button('acct-check', 'Check', 'Check for new messages');
-    check.onclick = async () => {
-      setStatus(`checking ${a.host}\u2026`);
-      const r = await gb().invoke('mail:sync', a.id);
-      setStatus(r?.ok ? `checked ${a.host}` : (r?.refused ?? r?.error ?? 'check failed'));
+    const row = el('div', 'acct');
+    row.dataset.testid = 'account-chip';
+    row.dataset.accountId = a.id;
+    if (selectedAccount === a.id) row.classList.add('active');
+    row.title = a.address ? `${a.address} \u2014 ${a.host ?? ''}` : a.id;
+    const label = a.name && (names.get(a.name) ?? 0) < 2 ? a.name : a.address || a.name || a.id;
+    row.append(el('span', undefined, '\u2709'), el('span', 'label', label));
+    const chips = el('div', 'chips');
+    const unread = Number(a.unread ?? 0);
+    chips.append(el('span', `chip${unread ? '' : ' zero'}`, String(unread)));
+    row.append(chips);
+    row.onclick = async () => {
+      if (selectedAccount === a.id) return;
+      selectedAccount = a.id;
+      selectedFolder = '';
+      selectedMessageId = 0;
+      renderAccounts();
       await refreshTree();
       await refreshList();
     };
-    const test = button('acct-test-chip', 'Test', 'Test the connection');
-    test.onclick = async () => {
-      const r = await gb().invoke('mail:account-test', a.id);
-      setStatus(`${r.step}: ${r.message}`);
-    };
-    const del = button('acct-remove', 'Remove', 'Remove this account and its stored mail');
-    del.onclick = async () => {
-      await gb().invoke('mail:account-remove', a.id);
-      if (selectedAccount === a.id) selectedAccount = '';
+    box.append(row);
+    // the per-account actions sit under the SELECTED row only, so the column stays a list
+    if (selectedAccount !== a.id) continue;
+    const tools = el('div', 'acct-tools');
+    const check = button('acct-check', 'Check', 'Check for new messages');
+    check.onclick = async (e) => {
+      e.stopPropagation();
+      setStatus(`checking ${a.host}\u2026`);
+      const r = await gb().invoke('mail:sync', a.id);
+      setStatus(r?.ok ? `checked ${a.host}` : (r?.refused ?? r?.error ?? 'check failed'));
       await refreshState();
       await refreshTree();
       await refreshList();
     };
-    chip.append(check, test, del);
-    box.append(chip);
+    const test = button('acct-test-chip', 'Test', 'Test the connection');
+    test.onclick = async (e) => {
+      e.stopPropagation();
+      const r = await gb().invoke('mail:account-test', a.id);
+      setStatus(`${r.step}: ${r.message}`);
+    };
+    const del = button('acct-remove', 'Remove', 'Remove this account and its stored mail');
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      await gb().invoke('mail:account-remove', a.id);
+      if (selectedAccount === a.id) selectedAccount = '';
+      await refreshState();
+      if (!selectedAccount) selectedAccount = (state.accounts ?? [])[0]?.id ?? '';
+      renderAccounts();
+      await refreshTree();
+      await refreshList();
+    };
+    tools.append(check, test, del);
+    box.append(tools);
   }
+  const foot = el('div', 'acct-foot');
   const add = button('acct-add', '+ Add mail account');
   add.onclick = () => {
     $('m-account-form').classList.remove('hidden');
     $('m-acct-msg').textContent = '';
   };
-  box.append(add);
+  foot.append(add);
   // the keyring report is shown where the choice is made, not buried
-  box.append(el('span', 'muted small', `secret storage: ${state.secretMode ?? '?'}${state.keychain?.backend ? ` (keyring: ${state.keychain.backend})` : ''}`));
+  foot.append(el('span', 'muted small', `secret storage: ${state.secretMode ?? '?'}${state.keychain?.backend ? ` (keyring: ${state.keychain.backend})` : ''}`));
+  box.append(foot);
 }
 
 function renderUnlock() {
@@ -306,12 +347,7 @@ function wire() {
     await refreshTree();
     await refreshList();
   };
-  $('m-filters').onclick = () => {
-    const menu = $('m-filter-menu');
-    menu.classList.toggle('hidden');
-  };
   $('m-send').onclick = () => setStatus('Compose and sending ship in ticket 38 (compose, drafts, outbox).');
-  $('m-import').onclick = () => setStatus('Compose ships in ticket 38.');
   // One click from the toolbar: open the account panel and run the scan straight away, so configuring
   // eighteen accounts is not "find the right modal first".
   $('m-import').onclick = () => {
@@ -441,10 +477,10 @@ export interface MailPanelUi {
 }
 
 async function main() {
-  wire();
   await refreshState();
   const first = (state.accounts ?? [])[0];
   if (first) selectedAccount = first.id;
+  renderAccounts(); // now that a selection exists, so the row is highlighted and its tools shown
   await refreshTree();
   await refreshList();
   setStatus(summary());
