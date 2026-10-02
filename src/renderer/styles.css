@@ -340,7 +340,11 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 #mail-view .tree-row .chips { margin-left: auto; display: flex; gap: 3px; }
 #mail-view .chip { background: var(--line); border-radius: 8px; padding: 0 5px; font-size: 10px; min-width: 16px; text-align: center; }
 #mail-view .chip.zero { visibility: hidden; }
-#mail-view .row { height: 68px; padding: 4px 6px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; gap: 1px; cursor: pointer; overflow: hidden; }
+/* the global .row (toolbar rows) centres and wraps its items; in this COLUMN row that centring made each
+   line as wide as its text and clipped it on both sides, so mail rows stretch and never wrap */
+#mail-view .row { height: 68px; padding: 4px 6px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; align-items: stretch; flex-wrap: nowrap; gap: 1px; cursor: pointer; overflow: hidden; }
+#mail-view .row > * { min-width: 0; max-width: 100%; }
+#mail-view .row .top > .from { min-width: 0; flex: 1 1 auto; }
 #mail-view .row:hover { background: var(--card); }
 #mail-view .row.selected { background: var(--accent); color: var(--accent-fg); }
 #mail-view .row .top { display: flex; gap: 4px; align-items: baseline; font-size: 12px; }

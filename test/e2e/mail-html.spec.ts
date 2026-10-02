@@ -52,6 +52,9 @@ async function openMailWithMessages(): Promise<App> {
   s.setBody('news', 'INBOX', 1, { text: 'plain fallback of the newsletter', html: newsletter(fx.site) });
   s.upsertMessage({ accountId: 'news', folder: 'INBOX', uid: 2, subject: 'Plain message', fromName: 'Friend', fromAddr: 'friend@example.com', toAddrs: 'news@example.com', receivedAt: now - 60_000 });
   s.setBody('news', 'INBOX', 2, { text: 'just text, no html' });
+  // long sender, subject and preview: the row layout must truncate these, not overflow the column
+  s.upsertMessage({ accountId: 'news', folder: 'INBOX', uid: 3, subject: 'A very long subject line that is much wider than the message list column ever is', fromName: 'Developer Relations Department With A Long Display Name', fromAddr: 'devrel@example.com', toAddrs: 'news@example.com', receivedAt: now - 120_000 });
+  s.setBody('news', 'INBOX', 3, { text: 'Read the latest tutorials and news curated for you, with a preview line far wider than the list column' });
   s.close();
   await app.ui.evaluate(() => (window as any).gb.invoke('chord', 'm', { ctrl: true, shift: true }));
   await expect(app.ui.locator('[data-testid=mail-rows]')).toBeVisible();
@@ -94,6 +97,15 @@ test('an HTML message renders in the locked-down view over the reading pane, and
     .poll(() => a!.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().flatMap((w) => w.contentView.children.filter((v) => v.getVisible())).length))
     .toBe(0);
 
+  // every line of every list row stays inside its row (the global toolbar .row style once centred
+  // them, so long previews were clipped on both sides)
+  const overflow = await a.ui.evaluate(() =>
+    [...document.querySelectorAll('[data-testid=mail-row]')].flatMap((r) => {
+      const box = r.getBoundingClientRect();
+      return [...r.children].filter((c) => { const b = c.getBoundingClientRect(); return b.left < box.left - 0.5 || b.right > box.right + 0.5; }).map((c) => c.className);
+    }),
+  );
+  expect(overflow).toEqual([]);
   await row(a, 'HTML newsletter').click();
   await expect(a.ui.locator('[data-testid=mail-subject]')).toHaveText('HTML newsletter');
   // (a) the view exists, is visible, and sits exactly on the reading pane's body
