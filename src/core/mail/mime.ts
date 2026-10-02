@@ -9,7 +9,8 @@
 // module's job is to make them inert, and the store's job is to keep only the text. That is also why
 // these tests are the cheapest ones in the mail program.
 
-import { clean, cleanBody, MAX_BODY_TEXT, MAX_STR } from './store';
+import { clean, cleanBody, htmlToText, MAX_BODY_HTML, MAX_BODY_TEXT, MAX_STR } from './store';
+import { looksLikeHtml, pickHtml } from './html';
 
 export const MAX_HEADER_BYTES = 256 * 1024;
 export const MAX_HEADERS = 500;
@@ -398,12 +399,14 @@ function parseMimeText(raw: string, depth: number, binary: boolean): MimePart {
   }
 
   const charset = params.charset ?? 'utf-8';
-  if (!binary) part.body = decodeBody(encoding, bodyRaw, charset);
-  else if (encoding === 'base64') part.body = decodeBody(encoding, bodyRaw, charset);
+  // an HTML part is kept for the HTML reading view, so it gets the larger HTML ceiling
+  const max = contentType === 'text/html' ? MAX_BODY_HTML : MAX_BODY_TEXT;
+  if (!binary) part.body = decodeBody(encoding, bodyRaw, charset, max);
+  else if (encoding === 'base64') part.body = decodeBody(encoding, bodyRaw, charset, max);
   // quoted-printable should be ASCII; stray 8-bit bytes in it are read as UTF-8 before the =XX pass
-  else if (encoding === 'quoted-printable') part.body = decodeBody(encoding, Buffer.from(bodyRaw, 'latin1').toString('utf8'), charset);
+  else if (encoding === 'quoted-printable') part.body = decodeBody(encoding, Buffer.from(bodyRaw, 'latin1').toString('utf8'), charset, max);
   // 7bit / 8bit / binary: the bytes ARE the text, in the part's charset
-  else part.body = cleanBody(bytesToString(Buffer.from(bodyRaw, 'latin1'), charset), MAX_BODY_TEXT);
+  else part.body = cleanBody(bytesToString(Buffer.from(bodyRaw, 'latin1'), charset), max);
   return part;
 }
 
@@ -442,9 +445,10 @@ export interface ExtractedContent {
 }
 
 /**
- * Reduce a MIME tree to what the store keeps: the best plain text, the HTML alternative (for the
- * store's own HTML-to-text pass, which is what handles the remote-content flag), and attachment
- * METADATA. The bytes of an attachment are never part of the result.
+ * Reduce a MIME tree to what the store keeps: the best plain text, the chosen HTML body (the
+ * text/html part(s); else a text/plain part that is plainly HTML source — see `pickHtml`), and
+ * attachment METADATA. The bytes of an attachment are never part of the result. A text/plain part
+ * that is HTML source is converted to text here, so the stored text, preview and index carry no tags.
  */
 export function extractContent(root: MimePart): ExtractedContent {
   const texts: string[] = [];
@@ -487,8 +491,9 @@ export function extractContent(root: MimePart): ExtractedContent {
   };
   walk(root, '1');
 
-  const text = cleanBody(texts.join('\n\n'), MAX_BODY_TEXT);
-  const html = htmls.join('\n').slice(0, MAX_BODY_TEXT * 4);
+  let text = cleanBody(texts.join('\n\n'), MAX_BODY_TEXT);
+  const html = pickHtml(htmls.join('\n'), text);
+  if (looksLikeHtml(text)) text = htmlToText(text).text;
   return {
     text,
     html,

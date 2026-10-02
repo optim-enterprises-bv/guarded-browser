@@ -23,6 +23,7 @@ import { testEnv } from './test-hooks';
 // ticket 37c: the mail controller is per PROFILE and its handlers live on this runtime's `on()` table,
 // so the chrome resolves them from the sending window exactly like every other chrome channel.
 import { MailController } from './mail/controller';
+import { MailHtmlView } from './mail/html-view';
 import { HistoryStore, recordable } from '../core/history';
 import { ClosedTabStore } from '../core/closed-tabs';
 import { SessionStore } from '../core/session-state';
@@ -79,6 +80,8 @@ const handlers: Record<string, Handler> = {};
 /** the rail badge's number: unread-ish mail across this profile's accounts */
 let mailUnreadCount = 0;
 let mailController: MailController | null = null;
+/** the HTML reading view (src/main/mail/html-view.ts): one per window, created on first use */
+let mailView: MailHtmlView | null = null;
 /** TEST ONLY. Bypasses the policy engine and judge so tests can show the egress layer holds alone. */
 const POLICY_DISABLED = testEnv('GUARDED_UNSAFE_DISABLE_POLICY') === '1';
 
@@ -345,6 +348,7 @@ const rt: RuntimeDeps = {
   runAction: (action) => runAction(action),
   chordTable: () => chordTable(),
   mail: () => api.mail(),
+  mailView: () => api.mailView(),
 };
 const { setupEgress, sourceOf, handleProceed } = createEgressWiring(rt);
 const { installShortcuts, runChord, runAction, chordTable, tabStartUrl } = createChords(rt);
@@ -816,6 +820,8 @@ async function startTask(text: string, origins?: string[]) {
   current = { task, tab };
   // the mail gate refuses new connections from here on; drop the ones opened before the task
   mailController?.disconnectAll();
+  // and a remote-image allowance in the mail HTML view ends: the message reloads blocked
+  mailView?.revokeRemote();
   tabs.setAgentTab(tab.id);
   sendUI('agent:update', { taskId: task.id, status: 'started', step: 0 });
   void task
@@ -904,7 +910,11 @@ await ses.setProxy({ proxyRules: `127.0.0.1:${proxy.port}`, proxyBypassRules: '<
 setupEgress(ses);
 guardedSession = ses;
 
-broker = new ConfirmBroker(sendUI, () => settings.agent.confirmTimeoutMs);
+broker = new ConfirmBroker((channel, payload) => {
+  sendUI(channel, payload);
+  // a pending confirmation is chrome UI a native view must never cover
+  mailView?.update();
+}, () => settings.agent.confirmTimeoutMs);
 registerIpc();
 
 const size = /^(\d{3,5})x(\d{3,5})$/.exec(process.env.GUARDED_WINDOW_SIZE ?? '');
@@ -955,6 +965,23 @@ const api = {
     });
     return mailController;
   },
+  /** this window's mail HTML view. Not a tab: no TabManager entry, no driver, no preload, no IPC. */
+  mailView(): MailHtmlView {
+    mailView ??= new MailHtmlView({
+      win,
+      // in-memory (no `persist:`), and distinct from every tab's partition
+      partition: `mailview-${profile().id}`,
+      html: (id) => api.mail().htmlFor(id),
+      // a link in a message: a NEW normal tab through the user navigation path (reputation, proxy, gates)
+      openLink: (url) => api.openUrl(url),
+      canConnect: () => (current ? { ok: false, reason: 'an agent task is running: remote content stays blocked until it ends' } : { ok: true }),
+      chromeBusy: () => !!tabs?.overlayOn || broker.pendingCount() > 0,
+      reputationListed: (url) => !!reputation.check(url)?.listed,
+      audit: (detail) => audit.write('mail' as Parameters<AuditLog['write']>[0], detail),
+      allowLoopbackForTest: testEnv('GUARDED_TEST_MAIL_LOOPBACK') === '1',
+    });
+    return mailView;
+  },
   /** the last unread count pushed to the rail badge (ticket 37); the controller owns updating it */
   mailUnread() {
     return mailUnreadCount;
@@ -983,7 +1010,11 @@ tabs.onTabClosed = (url, title, pos) => {
   sendUI('closed-tabs', closedTabs.list());
   saveSessionSoon();
 };
-tabs.onGeometry = (g) => sendUI('geometry', g);
+tabs.onGeometry = (g) => {
+  sendUI('geometry', g);
+  // every layout (overlay on/off included) re-derives the mail HTML view's visibility
+  mailView?.update();
+};
 installShortcuts(win.webContents);
 // Start where the user left off when the profile says so; a crashed exit restores regardless, so
 // work is not lost silently. Every restored tab is a NEW tab (ungated by construction).
@@ -1018,6 +1049,7 @@ async function dispose() {
   disposed = true;
   // drop mail connections and the sqlite handle with the window (ticket 37c)
   try {
+    mailView?.dispose();
     mailController?.dispose();
   } catch {
     /* nothing to release */

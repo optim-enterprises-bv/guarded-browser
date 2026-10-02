@@ -538,3 +538,25 @@ same reason as Vivaldi Sync (31): it needs a server and an account model.
 - **The mail UI's visual outcome is not e2e-verifiable** beyond structure and state (the same limit
   wave 2 recorded for audio chips and CSS injection); layout must be measured from a Vivaldi
   screenshot before building 37.
+
+---
+
+## HTML mail view (2026-10-02, after ticket 37c)
+
+The store no longer drops HTML: `message_html` (schema v2, capped at 2 MB, never indexed, migration
+adds the table and old rows fall back to text). `bodyText` stays text-only and remains the search
+and fallback source; a text/plain part that is plainly HTML source is stored as html and converted
+to text. The HTML is displayed by `src/main/mail/html-view.ts`: one WebContentsView per window,
+JavaScript off, sandboxed, no preload, own in-memory `mailview-<profileId>` partition, sanitized
+document (`src/core/mail/html.ts`) with a CSP meta first in `<head>`, every request cancelled,
+navigation always prevented (http(s) links open a new normal tab through the user path), and drawn
+only while the chrome reports the reading-pane rect (`mail:view-rect`, null under any modal/menu)
+and main has no overlay or pending confirmation. The HTML never crosses into the chrome renderer.
+
+Remote images: blocked by default for every message. The banner's `Load External Content`
+(`mail:view-load-remote`) allows, for that display only, GET images from public http(s) hosts on
+default ports — reputation-listed hosts, private / loopback / link-local addresses (also after DNS
+resolution) and non-standard ports stay refused, Cookie / Referer / Origin are stripped and
+Set-Cookie dropped. Showing another message or reopening this one goes back to blocked, an agent
+task starting revokes it, and during a task the action is refused. Not built: a per-sender
+"always load" preference (deliberately not persisted).

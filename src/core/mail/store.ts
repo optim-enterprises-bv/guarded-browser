@@ -9,10 +9,13 @@
 //  * node:sqlite (Electron 44 ships Node 24 / SQLite 3.53 with FTS5 — probed on this box, not
 //    assumed) instead of better-sqlite3: no native module in an RPM-packaged browser, and the store
 //    is unit-testable outside Electron.
-//  * NO HTML IS EVER STORED. `htmlToText` strips tags with no parser and no fetch, so a hostile tag
-//    soup cannot survive into the UI and a tracking pixel cannot even be counted. The original HTML
-//    is dropped, not kept "for rendering later"; whether the message HAD remote content is a flag,
-//    so the UI can say "remote content was not loaded" instead of pretending the message was flat.
+//  * `bodyText` NEVER HOLDS HTML. `htmlToText` strips tags with no parser and no fetch, so a hostile
+//    tag soup cannot survive into the chrome UI, the preview or the FTS index. Whether the message
+//    HAD remote content is a flag, so the UI can say "remote content was not loaded".
+//  * The HTML body is kept APART, in `message_html` (schema v2, capped at MAX_BODY_HTML), for the
+//    locked-down HTML reading view only (src/main/mail/html-view.ts: JavaScript off, own in-memory
+//    session, every request cancelled). It is never indexed, never previewed, and never returned to
+//    the chrome renderer: main reads it and loads it into that view, nothing else.
 //  * Attachments are METADATA only (name / mime / size / part id). Bytes are never stored here and
 //    are never fetched implicitly — a fetch is an explicit click (ticket 41).
 //  * No gate, taint or agent-task state can be REPRESENTED: there is no column for it, and a test
@@ -26,13 +29,15 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const DB_FILE = 'mail.sqlite';
 
 /** hard ceiling on stored messages; a store beyond this refuses writes instead of growing forever */
 export const MAX_MESSAGES = 500_000;
 /** per-message stored text ceiling (a 300 MB text body is a hostile input, not mail) */
 export const MAX_BODY_TEXT = 200_000;
+/** per-message stored HTML ceiling (the HTML reading view's document; larger bodies are truncated) */
+export const MAX_BODY_HTML = 2 * 1024 * 1024;
 /** stored raw header ceiling */
 export const MAX_RAW_HEADER = 128_000;
 export const MAX_STR = 400;
@@ -113,6 +118,8 @@ export interface MessageRow extends Required<Omit<MessageHeader, 'messageId'>> {
 export interface MessageBody {
   id: number;
   bodyText: string;
+  /** an HTML body is stored for this message (the HTML itself is read with `html(id)`, in main only) */
+  hasHtml: boolean;
   rawHeader: string;
   bodyFetched: boolean;
   remoteContent: boolean;
@@ -373,6 +380,14 @@ CREATE TABLE filter (
 CREATE VIRTUAL TABLE message_fts USING fts5(subject, fromName, fromAddr, toAddrs, bodyText);
 `;
 
+/** v2: the HTML body, apart from the text, for the HTML reading view only (never indexed). */
+const SCHEMA_V2 = `
+CREATE TABLE message_html (
+  messageId INTEGER PRIMARY KEY REFERENCES message(id) ON DELETE CASCADE,
+  html      TEXT NOT NULL DEFAULT ''
+);
+`;
+
 const nowMs = () => Date.now();
 
 export class MailStore {
@@ -427,6 +442,8 @@ export class MailStore {
         this.db.exec(SCHEMA);
         this.db.exec(`INSERT INTO meta (k, v) VALUES ('createdAt', '${nowMs()}')`);
       }
+      // existing messages simply have no row here and keep showing their text
+      if (v < 2) this.db.exec(SCHEMA_V2);
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       this.db.exec('COMMIT');
     } catch (e) {
@@ -665,8 +682,9 @@ export class MailStore {
   }
 
   /**
-   * Store a fetched body. Only TEXT is stored: HTML is converted here, once, and the original is
-   * discarded. `rawHeader` is stored capped for the "view source" view (ticket 37).
+   * Store a fetched body. `bodyText` is TEXT only: when there is no plain part the HTML is converted
+   * here. The HTML itself goes to `message_html` (capped, never indexed) for the HTML reading view;
+   * an empty `html` removes any stored one. `rawHeader` is stored capped for "view source" (ticket 37).
    */
   setBody(accountId: string, folder: string, uid: number, body: { text?: string; html?: string; rawHeader?: string; attachments?: Attachment[] }): Result<{ id: number }> {
     const row = this.byUid(accountId, folder, uid);
@@ -681,6 +699,9 @@ export class MailStore {
     this.db
       .prepare('UPDATE message SET bodyText = ?, rawHeader = ?, bodyFetched = 1, remoteContent = remoteContent OR ? WHERE id = ?')
       .run(text, cleanBody(body.rawHeader ?? '', MAX_RAW_HEADER), remote ? 1 : 0, row.id);
+    const html = typeof body.html === 'string' ? body.html.slice(0, MAX_BODY_HTML) : '';
+    if (html.trim()) this.db.prepare('INSERT OR REPLACE INTO message_html (messageId, html) VALUES (?, ?)').run(row.id, html);
+    else this.db.prepare('DELETE FROM message_html WHERE messageId = ?').run(row.id);
     if (body.attachments) this.setAttachments(row.id, body.attachments);
     this.indexMessage(row.id);
     return { ok: true, id: row.id };
@@ -726,14 +747,22 @@ export class MailStore {
     const r = this.db.prepare('SELECT id, bodyText, rawHeader, bodyFetched, remoteContent FROM message WHERE id = ?').get(Number(id)) as Record<string, unknown> | undefined;
     if (!r) return null;
     const att = this.db.prepare('SELECT partId, filename, mime, size FROM attachment WHERE messageId = ? ORDER BY partId').all(Number(id)) as Record<string, unknown>[];
+    const hasHtml = !!this.db.prepare('SELECT 1 AS x FROM message_html WHERE messageId = ?').get(Number(id));
     return {
       id: Number(r.id),
       bodyText: String(r.bodyText),
+      hasHtml,
       rawHeader: String(r.rawHeader),
       bodyFetched: Number(r.bodyFetched) === 1,
       remoteContent: Number(r.remoteContent) === 1,
       attachments: att.map((a) => ({ partId: String(a.partId), filename: String(a.filename), mime: String(a.mime), size: Number(a.size) })),
     };
+  }
+
+  /** The stored HTML body, or null. For the main-process HTML reading view ONLY: never sent to a renderer. */
+  html(id: number): string | null {
+    const r = this.db.prepare('SELECT html FROM message_html WHERE messageId = ?').get(Number(id)) as { html: string } | undefined;
+    return r && r.html ? r.html : null;
   }
 
   private labelsOf(ids: number[]): Map<number, string[]> {

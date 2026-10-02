@@ -3,7 +3,7 @@
 // Two kinds of test live here and both matter:
 //  1. the store does what the sync layer and the UI will need (migrations, FTS, UIDVALIDITY, threads,
 //     counters, caps);
-//  2. the store CANNOT hold, or leak, what the product forbids: no gate/taint/agent state, no HTML,
+//  2. the store CANNOT hold, or leak, what the product forbids: no gate/taint/agent state, no HTML in the text,
 //     no attachment bytes, no credential, and — the one that matters most — no message text that a
 //     planner / reader / judge request could ever contain.
 //
@@ -100,7 +100,7 @@ describe('mail store (34) — what it CANNOT represent', () => {
     for (const forbidden of ['gate', 'taint', 'agenttab', 'post-task']) expect(ddl).not.toContain(forbidden);
   });
 
-  it('stores NO html and NO attachment bytes — only text and attachment metadata', () => {
+  it('bodyText holds NO html and nothing holds attachment bytes — the html is kept apart (message_html), never as text', () => {
     const s = open();
     s.addAccount({ id: 'a1', name: '', address: '', kind: 'imap', host: 'h', port: 993, tls: 'implicit', username: '', sentFolder: '', trashFolder: '', junkFolder: '', archiveFolder: '' });
     const r = s.upsertMessage(header());
@@ -110,6 +110,9 @@ describe('mail store (34) — what it CANNOT represent', () => {
     expect(b.bodyText).not.toContain('<');
     expect(b.bodyText).not.toContain('alert(1)');
     expect(b.attachments[0].size).toBe(12_345);
+    // the html itself is only reachable through html(), which only the main-process HTML view calls
+    expect(b.hasHtml).toBe(true);
+    expect(JSON.stringify(b)).not.toContain('<script>');
     // nothing anywhere holds the bytes
     expect(JSON.stringify(s.schemaSql() + JSON.stringify(b))).not.toContain('base64');
   });

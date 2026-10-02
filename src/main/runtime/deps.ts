@@ -27,6 +27,7 @@ import type { ZoomStore } from '../../core/zoom';
 import type { ConfirmBroker } from '../confirm';
 import type { ExtensionList } from '../extensions';
 import type { MailController } from '../mail/controller';
+import type { MailHtmlView } from '../mail/html-view';
 import type { Handler, RuntimeContext } from '../runtime';
 import type { Tab, TabManager } from '../tabs';
 
@@ -98,4 +99,6 @@ export interface RuntimeDeps {
   chordTable(): Chord[];
   /** the per-profile mail controller (ticket 37c), created on first use */
   mail(): MailController;
+  /** this window's HTML reading view for mail, created on first use (never a tab, never agent-visible) */
+  mailView(): MailHtmlView;
 }

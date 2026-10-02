@@ -8,6 +8,12 @@
 // wire. Every one of them reaches the DOM through `textContent`, never `innerHTML`, never an
 // attribute built from the value. The one place markup is created is `el()` below, which takes a tag
 // name from a closed set in this file — no server string is ever a tag name.
+//
+// HTML mail is NOT rendered here. When `mail:message` says `hasHtml`, this file asks main to show
+// that message id in the locked-down HTML view (src/main/mail/html-view.ts) and reports where the
+// reading pane is (`mail:view-rect`); the HTML itself never reaches this document. Because that view
+// is a native view drawn OVER this page, the rect is reported as null whenever chrome UI would be
+// covered by it: a modal, a menu, the address suggestions, a confirmation, or the panel closing.
 
 interface MailBridge {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
@@ -29,6 +35,8 @@ let selectedFolder = '';
 let selectedMessageId = 0;
 let searchQuery = '';
 let flagOnly = false;
+/** the message the HTML view is showing (0 = the text body is in use) */
+let htmlShownId = 0;
 
 // ---------------------------------------------------------------- DOM helpers (no server string is markup)
 
@@ -174,19 +182,91 @@ async function openMessage(id: number) {
     row.append(el('span', 'k', `${f.label}:`), el('span', undefined, f.value || ''));
     fields.append(row);
   }
-  // TEXT. `textContent` on a <pre>-like block: an encoded <script> stays characters.
-  $('m-body').textContent = m.text || (m.text === '' ? '(no text body)' : '');
+  // HTML: shown by main in its own view over #m-body, which stays empty as the placeholder whose
+  // rect is reported. TEXT otherwise: `textContent`, so an encoded <script> stays characters.
+  const body = $('m-body');
+  const shown = m.hasHtml ? await gb().invoke('mail:view-show', id) : null;
+  if (shown?.hasHtml) {
+    htmlShownId = id;
+    body.replaceChildren();
+    body.classList.add('html');
+  } else {
+    if (htmlShownId) void gb().invoke('mail:view-show', 0);
+    htmlShownId = 0;
+    body.classList.remove('html');
+    body.textContent = m.text || (m.text === '' ? '(no text body)' : '');
+  }
+  scheduleViewRect();
   const atts = $('m-attachments');
   atts.replaceChildren();
   for (const a of m.attachments ?? []) {
     // an attachment is metadata here; the bytes are fetched only by an explicit click (ticket 41)
     atts.append(el('span', 'att', `${a.filename} (${a.mime}, ${Math.round((a.size ?? 0) / 1024)} KB)`));
   }
-  const notice = $('m-notice');
-  notice.textContent = m.notice || '';
-  notice.classList.toggle('hidden', !m.notice);
+  renderNotice(m, id, !!shown?.hasHtml);
   renderActions(m);
   await refreshState();
+}
+
+/**
+ * The remote-content banner. For an HTML message with remote images it carries the per-message
+ * "Load External Content" action; the allowance lasts for this display only (main resets it when
+ * another message is shown, this one is reopened, or an agent task starts).
+ */
+function renderNotice(m: AnyRec, id: number, html: boolean) {
+  const notice = $('m-notice');
+  notice.replaceChildren();
+  if (m.notice) notice.append(el('span', undefined, m.notice));
+  if (html && m.remoteImages) {
+    const b = button('mail-load-remote', 'Load External Content', 'Load this message\'s remote images, this time only');
+    b.onclick = async () => {
+      const r = await gb().invoke('mail:view-load-remote', id);
+      if (id !== htmlShownId) return;
+      notice.replaceChildren(el('span', undefined, r?.ok ? 'Remote images loaded for this message only.' : (r?.error ?? 'remote content could not be loaded')));
+      if (!r?.ok) notice.append(b);
+    };
+    notice.append(' ', b);
+  }
+  notice.classList.toggle('hidden', !m.notice);
+}
+
+// ---------------------------------------------------------------- the HTML view's rectangle
+
+/** chrome UI a native view must never cover; any of these visible means "report null" */
+const COVERS = '.modal, .overlay, .menu, #suggest, #palette, #reader';
+let rectTimer = 0;
+let lastRect = '';
+
+function viewRect(): { x: number; y: number; width: number; height: number } | null {
+  if (!htmlShownId) return null;
+  // the panel (or this section of it) is closed: display:none somewhere up the tree
+  if (!$('mail-view').getClientRects().length) return null;
+  for (const n of document.querySelectorAll(COVERS)) if (n.getClientRects().length) return null;
+  const r = $('m-body').getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return null;
+  return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+}
+
+/** coalesced: many DOM changes in one task produce one report, and an unchanged rect none */
+function scheduleViewRect() {
+  if (rectTimer) return;
+  rectTimer = window.setTimeout(() => {
+    rectTimer = 0;
+    const r = viewRect();
+    const key = r ? `${r.x},${r.y},${r.width},${r.height}` : '';
+    if (key === lastRect) return;
+    lastRect = key;
+    void gb().invoke('mail:view-rect', r);
+  }, 0);
+}
+
+function watchViewRect() {
+  // class/style flips are how every panel, modal and menu in the chrome opens and closes
+  new MutationObserver(() => {
+    if (htmlShownId || lastRect) scheduleViewRect();
+  }).observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'hidden'], subtree: true, childList: true });
+  new ResizeObserver(() => scheduleViewRect()).observe($('m-body'));
+  window.addEventListener('resize', () => scheduleViewRect());
 }
 
 function renderActions(m: AnyRec) {
@@ -510,6 +590,7 @@ export const mailPanel: MailPanelUi = {
 export function initMailPanel(gbIn: MailBridge) {
   bridge = gbIn;
   wire();
+  watchViewRect();
   void main();
 }
 

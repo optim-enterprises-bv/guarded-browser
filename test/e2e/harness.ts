@@ -26,6 +26,8 @@ export interface LaunchOpts {
   maxSteps?: number;
   /** a custom search-engine template (e.g. a local fixture server) instead of DuckDuckGo */
   searchTemplate?: string;
+  /** test only: the mail view's remote-image opt-in may reach 127.0.0.1 (the fixture server) */
+  mailRemoteLoopback?: boolean;
 }
 
 export interface App {
@@ -73,6 +75,7 @@ export async function launch(o: LaunchOpts): Promise<App> {
   // test hooks (download dir, confirm timeout, ...) are only honoured with GUARDED_TEST=1 in an
   // unpackaged build; the guard model is verified into a shared, gitignored test directory
   env.GUARDED_TEST = '1';
+  if (o.mailRemoteLoopback) env.GUARDED_TEST_MAIL_LOOPBACK = '1';
   env.GUARDED_MODEL_DIR = join(ROOT, '.cache-test', 'models');
   env.GUARDED_DOWNLOAD_DIR = join(userData, 'downloads');
   mkdirSync(env.GUARDED_DOWNLOAD_DIR, { recursive: true });

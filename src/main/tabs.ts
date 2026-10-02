@@ -220,6 +220,11 @@ export class TabManager {
     this.layout();
   }
 
+  /** true while a chrome overlay is up (other native views, e.g. the mail HTML view, step aside too) */
+  get overlayOn(): boolean {
+    return this.overlay;
+  }
+
   setDragging(on: boolean) {
     this.dragging = on;
     this.layout();

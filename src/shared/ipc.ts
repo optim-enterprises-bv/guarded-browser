@@ -20,6 +20,11 @@ export const MAIL_CHANNELS = [
   'mail:folders',
   'mail:list',
   'mail:message',
+  // the HTML reading view: show a message id (0 = clear), report the reading pane's rect (or null),
+  // and the per-message remote-image opt-in. The HTML never crosses this bridge; ids and rects do.
+  'mail:view-show',
+  'mail:view-rect',
+  'mail:view-load-remote',
   'mail:search',
   'mail:view-set',
   'mail:sync',

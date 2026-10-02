@@ -30,7 +30,8 @@ import { MailSyncer } from './sync';
 import { makeSocketFactory } from './socket';
 import type { SocketFactory } from '../../core/mail/imap';
 import { parseHimalayaConfig, buildImportPlan, HIMALAYA_CONFIG, type ImportPlan } from './import';
-import { DEFAULT_VIEW, buildFolderTree, groupThreads, listRowFrom, readingHeader, externalContentNotice, parseMailSearch, type ViewFilter } from '../../core/mail/ui';
+import { DEFAULT_VIEW, buildFolderTree, groupThreads, listRowFrom, readingHeader, externalContentNotice, parseMailSearch, REMOTE_IMAGES_NOTICE, type ViewFilter } from '../../core/mail/ui';
+import { sanitizeMailHtml } from '../../core/mail/html';
 
 export interface MailControllerDeps {
   /** this profile's app-state directory (the store and the secrets live here) */
@@ -254,21 +255,33 @@ export class MailController {
       }
     }
     const fresh = this.db().byId(row.id) ?? row;
+    // the HTML itself never leaves main: the renderer learns only THAT there is one (it then asks
+    // main to show it in the HTML view) and whether it references remote images (the banner)
+    const html = body?.hasHtml ? this.db().html(row.id) : null;
+    const remoteImages = html ? sanitizeMailHtml(html).remoteImageHosts.length > 0 : false;
     return {
       ok: true as const,
+      id: fresh.id,
       header: readingHeader(fresh),
       subject: fresh.subject,
-      // TEXT, and the renderer sets it with textContent
+      // TEXT, and the renderer sets it with textContent (also the fallback when the HTML view cannot show)
       text: body?.bodyText ?? '',
+      hasHtml: !!html,
+      remoteImages,
       attachments: body?.attachments ?? [],
       remoteContent: body?.remoteContent ?? false,
-      notice: externalContentNotice(body?.remoteContent ?? false),
+      notice: html ? (remoteImages ? REMOTE_IMAGES_NOTICE : '') : externalContentNotice(body?.remoteContent ?? false),
       flagged: fresh.flagged,
       readFlag: fresh.readFlag,
       folder: fresh.folder,
       accountId: fresh.accountId,
       uid: fresh.uid,
     };
+  }
+
+  /** The stored HTML body of a message, for the main-process HTML view ONLY (never returned over IPC). */
+  htmlFor(id: number): string | null {
+    return this.db().html(Number(id));
   }
 
   async sync(accountId: string) {

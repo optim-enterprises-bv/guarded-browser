@@ -452,6 +452,8 @@ export function externalContentNotice(remoteContent: boolean): string {
 }
 
 export const LOAD_EXTERNAL_LABEL = 'Load External Content';
+/** The banner over an HTML message that references remote images (blocked until the user asks). */
+export const REMOTE_IMAGES_NOTICE = 'Remote images are blocked.';
 export const COMPOSE_PLACEHOLDER = 'Write a quick reply here';
 export const SEND_LABEL = 'Send';
 export const INCLUDE_QUOTED_LABEL = 'Include Quoted Text';
