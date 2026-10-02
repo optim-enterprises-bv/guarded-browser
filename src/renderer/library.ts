@@ -32,8 +32,6 @@ export function initLibrary(gb: Bridge) {
     for (const k of kids) e.append(typeof k === 'string' ? document.createTextNode(k) : k);
     return e;
   };
-  /** set by renderer.ts: the mail panel's own module refreshes itself when the column opens */
-  let onMailShown: (() => void) | null = null;
   let roots: BNode[] = [];
   let showBar = false;
   /** which section the shared column shows; the rail drives this (ticket 17) */
@@ -105,7 +103,6 @@ export function initLibrary(gb: Bridge) {
     void gb.invoke('panels:show', null);
     if (which === 'history') void renderHistory();
     else if (which === 'bookmarks') void renderBookmarks();
-    else if (which === 'mail') onMailShown?.();
   }
   function closeSide() {
     side = null;
@@ -478,9 +475,5 @@ export function initLibrary(gb: Bridge) {
     },
     /** re-run the inset calculation after another module changes the geometry */
     refreshInsets: insets,
-    /** renderer.ts hands the mail panel's refresh in here (the column is shared, the content is not) */
-    setMailShown(fn: () => void) {
-      onMailShown = fn;
-    },
   };
 }

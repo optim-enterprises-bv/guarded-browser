@@ -17,6 +17,7 @@ import { createRuntime, type Runtime } from './runtime';
 
 import { GUARD_MODEL, ensureModel } from './model-store';
 import { testEnv } from './test-hooks';
+import { RUNTIME_CHANNELS } from '../shared/ipc';
 
 // user data: ~/.config/guarded-browser (the package's product name would otherwise make it
 // "~/.config/Guarded Browser"); GUARDED_USER_DATA picks another directory
@@ -251,23 +252,7 @@ async function deleteProfile(id: string, requester: Runtime): Promise<{ ok: bool
 
 // ---------- IPC: every handler is resolved from the SENDER's window ----------
 
-const PROFILE_CHANNELS = new Set(['profiles:list', 'profiles:create', 'profiles:update', 'profiles:open', 'profiles:delete']);
-const RUNTIME_CHANNELS = [
-  'state:get', 'tabs:new', 'tabs:close', 'tabs:reopen', 'tabs:closed-list', 'tabs:guard-state', 'tabs:activate', 'tabs:select', 'tiles:tile', 'tiles:untile', 'tiles:layout', 'tiles:drag', 'tiles:state',
-  'tabs:move', 'tabs:duplicate', 'tabs:close-others', 'tabs:close-right', 'tabs:mute',
-  'zoom:get', 'zoom:set', 'zoom:step', 'zoom:reset', 'find:start', 'find:stop', 'page:print',
-  'downloads:list', 'downloads:action', 'downloads:clear', 'search:get', 'session:info', 'page:contextmenu', 'chord',
-  // wave 2 (tickets 14-33)
-  'bookmarks:set-description', 'bookmarks:set-speeddial', 'bookmarks:sort', 'bookmarks:trash', 'bookmarks:trash-empty', 'bookmarks:trash-restore', 'bookmarks:tree-sorted', 'bundle:dry-run', 'bundle:export', 'bundle:export-file', 'bundle:import', 'bundle:import-file', 'capture:run', 'capture:to-clipboard', 'action:run', 'commands:search', 'extensions:add', 'extensions:enable', 'extensions:list', 'extensions:pick', 'extensions:remove', 'extensions:set-enabled', 'gesture:trail', 'hibernation:set', 'hibernation:state', 'hibernation:sweep', 'keybindings:get', 'keybindings:reset', 'keybindings:save', 'pageactions:get', 'pageactions:set', 'panel:refresh', 'panels:state', 'panels:list', 'panels:add', 'panels:open-current', 'panels:remove', 'panels:close', 'panels:rect', 'panels:show', 'panels:show-view', 'profiles:create-ephemeral', 'rail:set', 'reader:open', 'sessions:delete', 'sessions:export', 'sessions:list', 'sessions:rename', 'sessions:restore', 'sessions:save', 'stacks:close', 'stacks:collapse', 'stacks:color', 'stacks:create', 'stacks:dissolve', 'stacks:list', 'stacks:rename', 'status:set', 'tabstrip:set', 'translate:run', 'translate:set', 'translate:state', 'workspaces:create', 'workspaces:delete', 'workspaces:list', 'workspaces:rename', 'workspaces:switch',
-  'nav:go', 'nav:back', 'nav:forward', 'nav:reload', 'agent:preview', 'agent:start', 'agent:stop', 'confirm:answer', 'egress:allow',
-  'settings:get', 'settings:save', 'audit:recent', 'reputation:refresh', 'appearance:get', 'appearance:save', 'theme:import', 'theme:import-file', 'theme:export-file',
-  'history:list', 'history:delete', 'history:delete-range', 'history:clear-on-exit', 'history:open', 'bookmarks:tree', 'bookmarks:add', 'bookmarks:add-current', 'bookmarks:add-folder', 'bookmarks:update', 'bookmarks:remove', 'bookmarks:move', 'bookmarks:search', 'bookmarks:set-bar', 'bookmarks:is-bookmarked', 'bookmarks:open', 'bookmarks:import', 'bookmarks:import-file', 'bookmarks:export', 'bookmarks:export-file', 'suggest', 'favicon:get', 'chrome:insets', 'chrome:overlay',
-  // mail, ticket 37c: a panel in the browser window, handlers on the runtime table
-  'mail:state', 'mail:accounts', 'mail:account-save', 'mail:account-remove', 'mail:account-test',
-  'mail:secret-state', 'mail:secret-mode', 'mail:unlock', 'mail:folders', 'mail:list', 'mail:message',
-  'mail:search', 'mail:view-set', 'mail:sync', 'mail:sync-all', 'mail:flags', 'mail:move',
-  'mail:import-scan', 'mail:import-apply',
-];
+// The channel lists live in src/shared/ipc.ts (the same registry the preload exposes).
 
 function registerIpc() {
   for (const ch of RUNTIME_CHANNELS) {

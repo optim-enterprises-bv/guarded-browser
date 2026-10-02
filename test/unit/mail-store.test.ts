@@ -19,6 +19,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { PLANNER_SYSTEM, PLANNER_TOOLS } from '../../src/core/planner';
 import { READER_SYSTEM } from '../../src/core/reader';
 import { JUDGE_SYSTEM } from '../../src/core/judge';
+import { EVENT_CHANNELS, INVOKE_CHANNELS, MAIL_CHANNELS } from '../../src/shared/ipc';
 
 const tmp = () => mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'gb-mail-'));
 const open = (file = ':memory:') => new MailStore(file);
@@ -469,18 +470,19 @@ describe('mail store (34) — THE INVARIANT: mail never reaches the agent', () =
     // document the agent panel lives in with no request to correlate it to a user action.
     //
     // So: no `mail:*` channel is an event, and the ONE `mail` event that exists carries a number.
-    const preload = readFileSync(join(process.cwd(), 'src/main/preload.ts'), 'utf8');
-    const events = /const EVENTS = new Set\(\[([\s\S]*?)\]\)/.exec(preload)?.[1] ?? '';
-    expect(events).toContain("'mail'"); // the badge count, and nothing else
+    // The preload's EVENTS allowlist is the shared registry (src/shared/ipc.ts).
+    const events = new Set<string>(EVENT_CHANNELS);
+    expect(events.has('mail')).toBe(true); // the badge count, and nothing else
     // what main sends on that event is a count, and the regex is the assertion
     const runtime = readFileSync(join(process.cwd(), 'src/main/runtime.ts'), 'utf8');
     const sent = /sendUI\('mail',\s*\{[^}]*\}\)/.exec(runtime)?.[0] ?? '';
     expect(sent).toContain('unread');
     expect(sent).not.toMatch(/subject|body|text|from|:to/i);
     // and no mail channel is ever an event name
-    const channels = [...preload.matchAll(/'(mail:[^']+)'/g)].map((m) => m[1]);
+    const channels = [...INVOKE_CHANNELS].filter((c) => c.startsWith('mail:'));
     expect(channels.length).toBeGreaterThan(10);
-    for (const ch of channels) expect(events).not.toContain(`'${ch}'`);
+    expect(channels.length).toBe(MAIL_CHANNELS.length);
+    for (const ch of channels) expect(events.has(ch)).toBe(false);
   });
 
   it('a store file on disk is readable without the app, and holds nothing secret', () => {

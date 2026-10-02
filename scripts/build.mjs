@@ -1,6 +1,9 @@
 // Bundles main process, UI preload and renderer with esbuild. Type checking is `npm run typecheck`.
 import { build } from 'esbuild';
-import { cpSync, mkdirSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync } from 'node:fs';
+
+// start from an empty dist/ so a renamed or deleted entry point cannot leave a stale bundle behind
+rmSync('dist', { recursive: true, force: true });
 
 const common = { bundle: true, sourcemap: true, logLevel: 'warning', target: 'es2023' };
 const external = ['electron', '@huggingface/transformers', 'onnxruntime-node'];

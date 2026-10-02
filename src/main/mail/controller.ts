@@ -542,25 +542,5 @@ function reportFolders(r: unknown): number {
   return Array.isArray(rep?.folders) ? rep.folders.length : 0;
 }
 
-/** The channel names this controller registers. Asserted against preload/RUNTIME_CHANNELS by tests. */
-export const MAIL_CHANNELS = [
-  'mail:state',
-  'mail:accounts',
-  'mail:account-save',
-  'mail:account-remove',
-  'mail:account-test',
-  'mail:secret-state',
-  'mail:secret-mode',
-  'mail:unlock',
-  'mail:folders',
-  'mail:list',
-  'mail:message',
-  'mail:search',
-  'mail:view-set',
-  'mail:sync',
-  'mail:sync-all',
-  'mail:flags',
-  'mail:move',
-  'mail:import-scan',
-  'mail:import-apply',
-] as const;
+/** The channel names this controller's handlers answer; declared once, in the shared IPC registry. */
+export { MAIL_CHANNELS } from '../../shared/ipc';

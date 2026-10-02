@@ -50,11 +50,6 @@ export const ALL_ACTIONS: ChordAction[] = [
   'mail.open',
 ];
 
-/** Default chords for the actions that have one (the map itself is user-editable). */
-export const DEFAULT_ACTION_CHORDS: Partial<Record<ChordAction, string>> = {
-  'mail.open': 'Ctrl+Shift+M',
-};
-
 /** Human labels for the settings UI. */
 export const ACTION_LABELS: Record<ChordAction, string> = {
   'tab.new': 'New tab',

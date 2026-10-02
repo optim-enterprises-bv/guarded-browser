@@ -1,113 +1,82 @@
-// The IPC surface is gated by THREE separate allowlists, and a channel that is in some but not all
-// of them fails in a way that looks like a UI bug rather than a wiring bug:
-//
-//   1. src/main/preload.ts  INVOKE  — what the chrome renderer may call at all
-//   2. src/main/main.ts     RUNTIME_CHANNELS — what ipcMain.handle actually registers
-//   3. src/main/main.ts     PROFILE_CHANNELS — the profile-management handlers
-//
-// A channel missing from (2) throws "No handler registered for ..." at runtime, after the click
-// appears to do nothing. Missing from (1) throws "channel not allowed". Ticket 02 hit exactly
-// this: the new tab channels were added to (1) and (2) in runtime.ts but not to (2) in main.ts.
-// This test reads the three lists out of the source and keeps them in agreement, so the next
-// channel cannot be half-wired.
+// The chrome IPC surface is declared ONCE, in src/shared/ipc.ts: the preload exposes exactly the
+// registry and main.ts registers exactly the registry. What can still drift is the registry against
+// the handlers that really exist — a registry channel with no handler throws "unknown sender" after
+// a click that appears to do nothing, and a handler missing from the registry is unreachable dead
+// code. Ticket 02 hit exactly this kind of half-wiring. This test holds the registry and the
+// handlers (runtime.ts + src/main/runtime/*.ts `on('…'`, main.ts `ipcMain.handle('…'`) together.
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { EVENT_CHANNELS, INVOKE_CHANNELS, MAIL_CHANNELS, PROFILE_CHANNELS, RUNTIME_CHANNELS } from '../../src/shared/ipc';
 
 const ROOT = join(__dirname, '..', '..');
 const src = (p: string) => readFileSync(join(ROOT, p), 'utf8');
 
-/** Pull the quoted channel names out of a bracketed list literal, ignoring comments. */
-function channelsAfter(text: string, marker: string): Set<string> {
-  const at = text.indexOf(marker);
-  if (at < 0) throw new Error(`marker not found: ${marker}`);
-  const open = text.indexOf(text.includes('(') && marker.includes('new Set') ? '(' : '[', at);
-  const close = text.indexOf(text.includes('(') && marker.includes('new Set') ? ')' : ']', open);
-  const body = text.slice(open, close);
-  return new Set([...body.matchAll(/'([^']+)'/g)].map((m) => m[1]));
-}
-
 const preload = src('src/main/preload.ts');
 const main = src('src/main/main.ts');
-/**
- * Mail (ticket 37c) is a PANEL in the browser window, so its channels are on the CHROME bridge and its
- * handlers are on the profile's runtime table. `MAIL_CHANNELS` in src/main/mail/controller.ts is the
- * single declaration of what mail needs; these tests hold the three lists together.
- */
-const mailController = src('src/main/mail/controller.ts');
 
-const invoke = channelsAfter(preload, 'const INVOKE');
-const events = channelsAfter(preload, 'const EVENTS');
-const runtimeChannels = channelsAfter(main, 'const RUNTIME_CHANNELS');
-const profileChannels = channelsAfter(main, 'const PROFILE_CHANNELS');
-
-/** Channels registered by runtime.ts, read the same way — these are the handlers that exist. */
-const runtimeHandlers = (() => {
-  const text = src('src/main/runtime.ts');
-  // every `on('channel'` inside registerIpc()
-  const start = text.indexOf('function registerIpc()');
-  const end = text.indexOf('\nregisterIpc();', start);
-  const body = text.slice(start, end < 0 ? undefined : end);
-  return new Set([...body.matchAll(/\bon\(\s*'([^']+)'/g)].map((m) => m[1]));
+/** Every `on('channel'` registration in the runtime (not `x.on('event'` listeners). */
+const runtimeHandlerList = (() => {
+  const files = ['src/main/runtime.ts'];
+  const dir = join(ROOT, 'src/main/runtime');
+  if (existsSync(dir)) for (const f of readdirSync(dir).sort()) if (f.endsWith('.ts')) files.push(`src/main/runtime/${f}`);
+  return files.flatMap((f) => [...src(f).matchAll(/(?<![.\w])on\(\s*'([^']+)'/g)].map((m) => m[1]));
 })();
+const runtimeHandlers = new Set(runtimeHandlerList);
+/** Channels main.ts handles itself with a literal name (the profile channels). */
+const mainHandlers = new Set([...main.matchAll(/ipcMain\.handle\(\s*'([^']+)'/g)].map((m) => m[1]));
 
-describe('IPC allowlists agree', () => {
+const dupes = (xs: readonly string[]) => [...new Set(xs.filter((x, i) => xs.indexOf(x) !== i))];
+
+describe('IPC channel registry', () => {
   it('NO list repeats a channel — a second ipcMain.handle throws INSIDE whenReady() and the app then exits with no window and no message', () => {
-    // This is why the check must be array-based: the Set-based parser above cannot see a duplicate.
-    const asList = (text: string, marker: string): string[] => {
-      const at = text.indexOf(marker);
-      const open = text.indexOf('[', at);
-      const close = text.indexOf(']', open);
-      return [...text.slice(open, close).matchAll(/'([^']+)'/g)].map((m) => m[1]);
-    };
-    const dupes = (xs: string[]) => [...new Set(xs.filter((x, i) => xs.indexOf(x) !== i))];
-    expect(dupes(asList(main, 'const RUNTIME_CHANNELS')), 'duplicate in main.ts RUNTIME_CHANNELS').toEqual([]);
-    expect(dupes(asList(preload, 'const INVOKE')), 'duplicate in preload.ts INVOKE').toEqual([]);
-    expect(dupes(asList(preload, 'const EVENTS')), 'duplicate in preload.ts EVENTS').toEqual([]);
+    expect(dupes(INVOKE_CHANNELS), 'duplicate invoke channel').toEqual([]);
+    expect(dupes(EVENT_CHANNELS), 'duplicate event channel').toEqual([]);
+    expect(dupes(runtimeHandlerList), 'a runtime channel registered twice').toEqual([]);
   });
 
-  it('parsed all four lists (guards against this test silently matching nothing)', () => {
-    expect(invoke.size).toBeGreaterThan(40);
-    expect(runtimeChannels.size).toBeGreaterThan(40);
+  it('parsed everything (guards against this test silently matching nothing)', () => {
+    expect(RUNTIME_CHANNELS.length).toBeGreaterThan(40);
     expect(runtimeHandlers.size).toBeGreaterThan(40);
-    expect(events.size).toBeGreaterThan(5);
-    expect(profileChannels.size).toBe(5);
+    expect(EVENT_CHANNELS.length).toBeGreaterThan(5);
+    expect(PROFILE_CHANNELS.length).toBe(5);
+    expect(INVOKE_CHANNELS.length).toBe(RUNTIME_CHANNELS.length + PROFILE_CHANNELS.length);
   });
 
-  it('every channel the preload allows is actually registered by ipcMain.handle', () => {
-    const registered = new Set([...runtimeChannels, ...profileChannels]);
-    const unregistered = [...invoke].filter((c) => !registered.has(c)).sort();
-    expect(unregistered).toEqual([]);
+  it('the preload and main.ts take their allowlists from the registry, not from copies', () => {
+    expect(preload).toMatch(/from '\.\.\/shared\/ipc'/);
+    expect(preload).toMatch(/new Set<string>\(INVOKE_CHANNELS\)/);
+    expect(preload).toMatch(/new Set<string>\(EVENT_CHANNELS\)/);
+    expect(main).toMatch(/for \(const ch of RUNTIME_CHANNELS\)/);
   });
 
-  it('every registered channel is reachable from the preload (no dead handler)', () => {
-    const dead = [...runtimeChannels].filter((c) => !invoke.has(c)).sort();
-    expect(dead).toEqual([]);
+  it('every runtime channel in the registry has an on() handler in the runtime', () => {
+    expect(RUNTIME_CHANNELS.filter((c) => !runtimeHandlers.has(c)).sort()).toEqual([]);
   });
 
-  it('every runtime handler has a channel in both allowlists', () => {
-    const registered = new Set([...runtimeChannels, ...profileChannels]);
-    const orphans = [...runtimeHandlers].filter((c) => !registered.has(c)).sort();
-    const unreachable = [...runtimeHandlers].filter((c) => !invoke.has(c)).sort();
-    expect(orphans).toEqual([]);
-    expect(unreachable).toEqual([]);
+  it('every profile channel in the registry has an ipcMain.handle in main.ts', () => {
+    expect(PROFILE_CHANNELS.filter((c) => !mainHandlers.has(c)).sort()).toEqual([]);
   });
 
-  it('the mail channels are declared once, exposed on the chrome bridge, and all handled', () => {
-    // Mail is a panel in the browser window (ticket 37c), so its channels are declared in
-    // `MAIL_CHANNELS` (controller.ts), exposed by the chrome preload, and registered by runtime.ts.
-    // Drift in any direction is a click that silently does nothing ("No handler registered").
-    const declared = channelsAfter(mailController, 'const MAIL_CHANNELS');
-    expect(declared.size).toBeGreaterThan(10);
-    for (const ch of declared) {
-      expect(invoke.has(ch)).toBe(true);
-      expect(runtimeHandlers.has(ch)).toBe(true);
-      expect(runtimeChannels.has(ch)).toBe(true);
+  it('every handler is in the registry (no unreachable handler)', () => {
+    const runtime = new Set<string>(RUNTIME_CHANNELS);
+    const profile = new Set<string>(PROFILE_CHANNELS);
+    expect([...runtimeHandlers].filter((c) => !runtime.has(c)).sort(), 'runtime handlers missing from RUNTIME_CHANNELS').toEqual([]);
+    expect([...mainHandlers].filter((c) => !profile.has(c)).sort(), 'main.ts handlers missing from PROFILE_CHANNELS').toEqual([]);
+  });
+
+  it('the mail channels are runtime channels and are never published as events', () => {
+    // Mail is a panel in the browser window (ticket 37c): request/response only, so nothing pushes
+    // message text at the renderer.
+    expect(MAIL_CHANNELS.length).toBeGreaterThan(10);
+    const runtime = new Set<string>(RUNTIME_CHANNELS);
+    const events = new Set<string>(EVENT_CHANNELS);
+    for (const ch of MAIL_CHANNELS) {
+      expect(runtime.has(ch)).toBe(true);
+      expect(events.has(ch)).toBe(false);
     }
-    // and a MAIL channel must never be published as an event: mail is request/response, so nothing
-    // pushes message text at the renderer
-    for (const ch of declared) expect(events.has(ch)).toBe(false);
-    for (const ch of [...events]) expect(declared.has(ch)).toBe(false);
+    const mail = new Set<string>(MAIL_CHANNELS);
+    for (const ch of EVENT_CHANNELS) expect(mail.has(ch)).toBe(false);
   });
 
   it('the rail width agrees between panels.ts and styles.css (a drift here moves the page area)', () => {

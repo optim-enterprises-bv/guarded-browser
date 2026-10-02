@@ -9,8 +9,19 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlink
 import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const rpm = process.argv[2] || readdirSync(join(ROOT, 'dist-pkg')).filter((f) => /\.x86_64\.rpm$/.test(f) && !f.includes('offline')).map((f) => join(ROOT, 'dist-pkg', f))[0];
-if (!rpm) throw new Error('no RPM in dist-pkg/');
+const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+// the RPM of THIS version (dist-pkg/ keeps older builds; picking "the first .rpm" verified a stale one)
+const wanted = `guarded-browser-${pkg.version}-*.x86_64.rpm`;
+const pkgDir = join(ROOT, 'dist-pkg');
+const rpm =
+  process.argv[2] ||
+  (existsSync(pkgDir) ? readdirSync(pkgDir) : [])
+    .filter((f) => f.startsWith(`guarded-browser-${pkg.version}-`) && f.endsWith('.x86_64.rpm') && !f.includes('offline'))
+    .map((f) => join(pkgDir, f))[0];
+if (!rpm || !existsSync(rpm)) {
+  console.log(`FAIL  RPM present: ${rpm ? `${rpm} does not exist` : `no ${wanted} in dist-pkg/ (run npm run dist first)`}`);
+  process.exit(1);
+}
 const out = { rpm, checks: {} };
 const ok = (name, pass, detail) => {
   out.checks[name] = { pass, ...(detail === undefined ? {} : { detail }) };
@@ -28,9 +39,13 @@ ok('rpm2cpio extraction', x.status === 0);
 const bin = join(rootDir, 'opt', 'guarded-browser', 'guarded-browser');
 ok('binary present', existsSync(bin), bin);
 const sandboxHelper = join(rootDir, 'opt', 'guarded-browser', 'chrome-sandbox');
-const helperMode = statSync(sandboxHelper).mode & 0o7777;
+const helperPresent = existsSync(sandboxHelper);
 // extracted as a normal user the setuid bit cannot be kept: Chromium must use user namespaces here
-ok('chrome-sandbox helper extracted (setuid only takes effect once rpm installs it root-owned)', existsSync(sandboxHelper), `mode ${helperMode.toString(8)}`);
+ok(
+  'chrome-sandbox helper extracted (setuid only takes effect once rpm installs it root-owned)',
+  helperPresent,
+  helperPresent ? `mode ${(statSync(sandboxHelper).mode & 0o7777).toString(8)}` : `missing: ${sandboxHelper}`,
+);
 
 // 2. fixture page
 const hits = [];
@@ -106,6 +121,15 @@ const info = (p) => {
 };
 const table = allPids.map(info).filter(Boolean);
 const browser = table.find((p) => p.exe === exe && !/--type=/.test(p.args.join(' ')));
+ok('browser process found', !!browser, browser ? `pid ${browser.pid}` : `no process running ${exe}`);
+if (!browser) {
+  // nothing below can be checked without the browser process: report, clean up and stop
+  child.kill('SIGTERM');
+  srv.close();
+  rmSync(userData, { recursive: true, force: true });
+  console.log(`\nbrowser process not found; stderr:\n${stderr.split('\n').slice(-10).join('\n')}`);
+  process.exit(1);
+}
 const tree = new Set([browser.pid]);
 for (let changed = true; changed; ) {
   changed = false;
