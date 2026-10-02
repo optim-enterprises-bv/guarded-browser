@@ -31,7 +31,6 @@ import { SessionStore } from '../core/session-state';
 import { ZoomStore, clampZoom, stepZoom } from '../core/zoom';
 import { SEARCH_ENGINES, searchUrl, SearchSettingsSchema } from '../core/search';
 import { DownloadList } from '../core/downloads';
-import { resolveChord, type Chord } from '../core/chords';
 import { BAR_ID, BookmarkStore, OTHER_ID, type ParsedImport } from '../core/bookmarks';
 import { SavedSessionStore } from '../core/saved-sessions';
 import { SortModeSchema, sortTree, TrashStore, type SortMode } from '../core/bookmarks-panel';
@@ -39,7 +38,7 @@ import { WorkspaceStore } from '../core/workspaces';
 import { StackModel } from '../core/tab-stacks';
 import { PageActionsSchema, PageActionsStore, defaultPageActions, pageActionCss, affectsAgentSnapshot, describePageActions, type PageActions } from '../core/page-actions';
 import { planSweep, decideHibernation, HibernationSettingsSchema, type HibernationFacts } from '../core/hibernation';
-import { toChords, validateBindings, defaultKeybindings, KeybindingsSchema, ACTION_LABELS, formatChord } from '../core/keybindings';
+import { validateBindings, defaultKeybindings, KeybindingsSchema, ACTION_LABELS, formatChord } from '../core/keybindings';
 import { resolveGesture, pathFrom, type Point } from '../core/gestures';
 import { clampItems, type PaletteItem } from '../core/quick-commands';
 import { buildBundle, dryRun, parseBundle, MAX_BUNDLE_BYTES } from '../core/profile-bundle';
@@ -48,6 +47,7 @@ import { EXTRACT_ARTICLE_JS, normalizeArticle } from './reader-mode';
 import { canTranslate, chunkText, cloudStatus, translatePrompt, TRANSLATE_SYSTEM, TranslateSettingsSchema, LANGUAGES, defaultTranslate } from './translate';
 import { ExtensionList, EXTENSION_WARNING, extensionListFile, loadExtensions } from './extensions';
 import { createEgressWiring, PROCEED_PREFIX } from './runtime/egress-wiring';
+import { createChords } from './runtime/chords';
 import type { RuntimeDeps } from './runtime/deps';
 import { Worker } from 'node:worker_threads';
 import { lookup } from 'node:dns/promises';
@@ -287,11 +287,18 @@ const rt: RuntimeDeps = {
     return deniedFlows;
   },
   profileDir,
+  settingsFile,
   downloads,
+  zoom,
   sendUI,
   stopTask,
+  closeTab,
+  reopenClosed,
+  liftGateOnCommit,
+  printTab,
 };
 const { setupEgress, sourceOf, handleProceed } = createEgressWiring(rt);
+const { installShortcuts, runChord, runAction, chordTable, tabStartUrl } = createChords(rt);
 
 function sendUI(channel: string, payload: unknown) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -383,221 +390,6 @@ function reopenClosed(): { ok: boolean; url?: string } {
   t.navSource = 'user';
   audit.write('navigation', { url: entry.url, tab: t.id, by: 'user', reopen: true });
   return { ok: true, url: entry.url };
-}
-
-/**
- * Dispatch a chord while a page has focus. Every action in src/core/chords.ts lands here, so the
- * keymap has exactly one implementation (ticket 15 will edit the table, not this function).
- */
-function installShortcuts(wc: WebContents) {
-  wc.on('before-input-event', (e, input) => {
-    if (runChord(input)) e.preventDefault();
-  });
-}
-
-/**
- * Run one chord against this window. Returns true when the keystroke was consumed.
- *
- * `before-input-event` only fires for a focused *page* view, so the chrome UI's own keydown
- * handler calls into the same path through the `chord` IPC channel (see the handler below). One
- * implementation, two entry points: the keymap has a single place to change (ticket 15 edits the
- * table in src/core/chords.ts and nothing else).
- *
- * `e` is the Electron event when available; the IPC path passes null and nothing needs to be
- * prevented (the renderer already called preventDefault on its own event).
- */
-function runChord(input: { key: string; control?: boolean; meta?: boolean; shift?: boolean; alt?: boolean; type?: string }): boolean {
-  const key = input.key.toLowerCase();
-  const action = resolveChord(input, chordTable());
-  // Ctrl+1..9 selects a tab by index (1..8), Ctrl+9 the last one
-  if (!action && (input.control || input.meta) && !input.shift && /^[1-9]$/.test(key)) {
-    const list = tabs.list();
-    const idx = key === '9' ? list.length - 1 : Number(key) - 1;
-    const t = list[idx];
-    if (t) tabs.activate(t.id);
-    return true;
-  }
-  if (!action) return false;
-  const active = tabs.active();
-  switch (action) {
-    case 'tab.new':
-      // the agent's pane is fixed for the duration of its task
-      if (current) return true;
-      tabs.create(tabStartUrl()).navSource = 'user';
-      break;
-    case 'tab.close':
-      if (active) closeTab(active.id);
-      break;
-    case 'tab.reopen':
-      reopenClosed();
-      break;
-    case 'tab.next':
-    case 'tab.prev': {
-      const id = tabs.nextInMru(action === 'tab.next' ? 1 : -1);
-      if (id !== undefined) tabs.activate(id);
-      break;
-    }
-    case 'tab.duplicate':
-      tabs.duplicate(active?.id ?? -1);
-      break;
-    case 'tab.closeOthers':
-      if (active) tabs.closeOthers(active.id, !!current);
-      break;
-    case 'tab.mute':
-      if (active) tabs.setAudioMuted(active.id, !active.wc.isAudioMuted());
-      sendUI('tabs', tabs.list());
-      break;
-    case 'tab.reload':
-      if (active) {
-        active.navSource = 'user';
-        active.wc.reload();
-      }
-      break;
-    case 'nav.back':
-      if (active && !current) {
-        liftGateOnCommit(active);
-        active.navSource = 'user';
-        active.wc.navigationHistory.goBack();
-      }
-      break;
-    case 'nav.forward':
-      if (active && !current) {
-        liftGateOnCommit(active);
-        active.navSource = 'user';
-        active.wc.navigationHistory.goForward();
-      }
-      break;
-    case 'nav.focusAddress':
-      sendUI('shortcut', 'focus-address');
-      break;
-    // ticket 37c: mail is a PANEL in this window, so the action simply tells the chrome to switch to
-    // it. One action, so the rail button, the chord and the menu land on the same place.
-    case 'mail.open':
-      sendUI('shortcut', 'open-mail');
-      break;
-    case 'view.zoomIn':
-    case 'view.zoomOut':
-    case 'view.zoomReset': {
-      if (!active) break;
-      const origin = originOf(active.wc.getURL());
-      const factor =
-        action === 'view.zoomReset' ? 1 : stepZoom(active.wc.getZoomFactor(), action === 'view.zoomIn' ? 1 : -1);
-      active.wc.setZoomFactor(factor);
-      if (origin) zoom.set(origin, factor);
-      sendUI('zoom', { tab: active.id, factor });
-      break;
-    }
-    case 'view.find':
-      sendUI('shortcut', 'find');
-      break;
-    case 'view.print':
-      // chrome-initiated print of the page the user is looking at. A page-initiated window.print()
-      // is neutralised in the page's own world in setupTab.
-      if (active) void printTab(active);
-      break;
-    case 'view.fullscreen':
-      win.setFullScreen(!win.isFullScreen());
-      break;
-    case 'library.history':
-      sendUI('shortcut', 'history');
-      break;
-    case 'library.bookmarkPage':
-      sendUI('shortcut', 'bookmark-page');
-      break;
-    case 'library.toggleBar':
-      sendUI('shortcut', 'toggle-bar');
-      break;
-    case 'tiles.tile':
-      tabs.tile(undefined, 'columns');
-      break;
-    case 'tiles.untile':
-      tabs.untile();
-      break;
-    // ---- wave 2 ----
-    case 'palette.open':
-      sendUI('shortcut', 'palette');
-      break;
-    case 'panel.history':
-      sendUI('shortcut', 'panel:history');
-      break;
-    case 'panel.bookmarks':
-      sendUI('shortcut', 'panel:bookmarks');
-      break;
-    case 'panel.downloads':
-      sendUI('shortcut', 'panel:downloads');
-      break;
-    case 'panel.sessions':
-      sendUI('shortcut', 'panel:sessions');
-      break;
-    case 'panel.workspaces':
-      sendUI('shortcut', 'panel:workspaces');
-      break;
-    case 'reader.toggle':
-      sendUI('shortcut', 'reader');
-      break;
-    case 'capture.visible':
-      sendUI('shortcut', 'capture:visible');
-      break;
-    case 'capture.full':
-      sendUI('shortcut', 'capture:full');
-      break;
-    case 'capture.clipboard':
-      sendUI('shortcut', 'capture:clipboard');
-      break;
-    case 'session.save':
-      sendUI('shortcut', 'session:save');
-      break;
-    case 'tab.stripToggle': {
-      // cycles the strip placement, so the chord is useful without a settings visit
-      const order: Array<'top' | 'left' | 'right' | 'bottom'> = ['top', 'left', 'bottom', 'right'];
-      const next = order[(order.indexOf(settings.general.tabStrip) + 1) % order.length];
-      settings.general.tabStrip = next;
-      saveSettings(settingsFile, settings);
-      sendUI('tabstrip', { placement: next });
-      break;
-    }
-    case 'view.translate':
-      sendUI('shortcut', 'translate');
-      break;
-  }
-  return true;
-}
-
-// The shortcuts above can close several tabs at once; closeTab sends the stack notification.
-
-
-/**
- * Where a new tab goes. Still `about:blank` by default; ticket 13 introduces the chrome start page
- * and this is the single place that decides, so the agent's snapshot never sees the start page as
- * a page.
- */
-function tabStartUrl(): string {
-  return 'about:blank';
-}
-
-/** The chord table in force: the user's remappings applied over the defaults. */
-function chordTable(): Chord[] {
-  const custom = toChords(settings.keybindings);
-  return custom.length ? custom : resolveChordTable();
-}
-
-/** The default table, kept as a function so keybindings.ts stays the single source of defaults. */
-function resolveChordTable(): Chord[] {
-  return toChords(defaultKeybindings());
-}
-
-/**
- * Run an action from the keybinding table by NAME. This is the one entry point for anything that
- * wants to trigger a bound action (a gesture, a Quick Commands row, a menu item), so a gesture can
- * never do something a chord cannot, and vice versa.
- *
- * It is implemented on top of the same switch runChord uses, reached by synthesising the chord that
- * is currently bound to the action — that keeps ONE dispatch table rather than two that can drift.
- */
-function runAction(action: string): boolean {
-  const c = chordTable().find((x) => x.action === action);
-  if (!c) return false;
-  return runChord({ key: c.key, control: c.ctrl, shift: c.shift, alt: c.alt, type: 'keyDown' });
 }
 
 /**

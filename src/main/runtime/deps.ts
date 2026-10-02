@@ -9,6 +9,7 @@ import type { AuditLog } from '../../core/audit';
 import type { Settings } from '../../core/config';
 import type { DownloadList } from '../../core/downloads';
 import type { EgressController } from '../../core/egress';
+import type { ZoomStore } from '../../core/zoom';
 import type { ConfirmBroker } from '../confirm';
 import type { Tab, TabManager } from '../tabs';
 
@@ -27,9 +28,15 @@ export interface RuntimeDeps {
 
   // ---- fixed for the runtime's lifetime ----
   profileDir: string;
+  settingsFile: string;
   downloads: DownloadList;
+  zoom: ZoomStore;
 
   // ---- runtime functions ----
   sendUI(channel: string, payload: unknown): void;
   stopTask(): void;
+  closeTab(id: number): void;
+  reopenClosed(): { ok: boolean; url?: string };
+  liftGateOnCommit(t: Tab): void;
+  printTab(tab: Tab): Promise<boolean>;
 }
