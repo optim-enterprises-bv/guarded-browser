@@ -12,8 +12,8 @@
 //
 // Persistence holds ids, names, colours and tab URLs/titles — never gate state, never taint.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 import { restorable } from './session-state';
 
 export const MAX_WORKSPACES = 20;
@@ -63,11 +63,6 @@ export const cleanName = (n: string) =>
     .trim()
     .slice(0, MAX_NAME);
 
-function atomicWrite(file: string, data: string) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  renameSync(tmp, file);
-}
 
 export class WorkspaceStore {
   private data: z.infer<typeof FileSchema>;
@@ -79,15 +74,9 @@ export class WorkspaceStore {
       activeId: 'w-default',
       workspaces: [{ id: 'w-default', name: 'Default', colorIndex: 0, tabs: [] }],
     };
-    this.data = first;
-    if (!existsSync(file)) return;
-    try {
-      const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) this.data = r.data;
-      else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-    } catch (e) {
-      this.loadError = (e as Error).message;
-    }
+    const r = loadJson(file, FileSchema, { fallback: first });
+    this.data = r.value;
+    this.loadError = r.loadError;
   }
 
   list(): Workspace[] {
@@ -166,6 +155,6 @@ export class WorkspaceStore {
   }
 
   flush() {
-    atomicWrite(this.file, JSON.stringify(this.data, null, 2) + '\n');
+    atomicWriteFile(this.file, JSON.stringify(this.data, null, 2) + '\n');
   }
 }

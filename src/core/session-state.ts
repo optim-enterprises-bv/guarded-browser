@@ -9,8 +9,8 @@
 //
 // Like history.json this is chrome-side private data: the agent never gets a reference to it.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 
 export const MAX_TABS = 50;
 export const MAX_URL = 2048;
@@ -59,12 +59,6 @@ export function restorable(url: string): boolean {
 
 const cleanTitle = (t: string) => t.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE);
 
-/** Same idiom as profiles.ts: 0600, temp file + rename, never a partial write. */
-function atomicWrite(file: string, data: string) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  renameSync(tmp, file);
-}
 
 export class SessionStore {
   private data: SessionState = { version: 1, clean: true, activeIndex: 0, tabs: [], tiles: null };
@@ -75,16 +69,10 @@ export class SessionStore {
   readonly crashed: boolean = false;
 
   constructor(private readonly file: string) {
-    if (!existsSync(file)) return;
-    try {
-      const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) {
-        this.data = r.data;
-        this.crashed = !r.data.clean;
-      } else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-    } catch (e) {
-      this.loadError = (e as Error).message;
-    }
+    const r = loadJson(file, FileSchema, { fallback: this.data });
+    this.data = r.value;
+    this.loadError = r.loadError;
+    this.crashed = !r.value.clean;
   }
 
   /** What to restore: only restorable URLs, with the indices remapped. */
@@ -164,6 +152,6 @@ export class SessionStore {
   }
 
   flush() {
-    atomicWrite(this.file, JSON.stringify(this.data, null, 2) + '\n');
+    atomicWriteFile(this.file, JSON.stringify(this.data, null, 2) + '\n');
   }
 }

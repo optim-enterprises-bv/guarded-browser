@@ -2,9 +2,8 @@
 // the agent (planner / reader / judge) ever reads this module. Titles are page-controlled and are
 // stored length-capped and rendered as text only.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { rename, rm, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
+import { atomicWriteFile, atomicWriteFileAsync, loadJson } from './persist';
 
 export const MAX_VISITS = 20_000;
 export const MAX_TITLE = 200;
@@ -65,19 +64,13 @@ export class HistoryStore {
   readonly loadError: string | null = null;
 
   constructor(private readonly file: string) {
-    if (existsSync(file)) {
-      try {
-        const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-        if (r.success) this.data = r.data;
-        else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-        // "clear on exit" must hold after a crash too: clear at load if the last exit did not
-        if (this.data.clearOnExit && this.data.visits.length) {
-          this.data.visits = [];
-          this.flush();
-        }
-      } catch (e) {
-        this.loadError = (e as Error).message;
-      }
+    const r = loadJson(file, FileSchema, { fallback: this.data });
+    this.data = r.value;
+    this.loadError = r.loadError;
+    // "clear on exit" must hold after a crash too: clear at load if the last exit did not
+    if (this.data.clearOnExit && this.data.visits.length) {
+      this.data.visits = [];
+      this.flush();
     }
   }
 
@@ -203,10 +196,9 @@ export class HistoryStore {
       this.timer = null;
       const json = JSON.stringify(this.data);
       const mine = ++this.gen;
-      const tmp = `${this.file}.tmp-${process.pid}-a${mine}`;
       this.writing = this.writing
-        .then(() => writeFile(tmp, json, { mode: 0o600 }))
-        .then(() => (mine === this.gen ? rename(tmp, this.file) : rm(tmp, { force: true })))
+        .then(() => atomicWriteFileAsync(this.file, json, { commit: () => mine === this.gen }))
+        .then(() => undefined)
         .catch(() => undefined);
     }, 2000);
   }
@@ -216,9 +208,7 @@ export class HistoryStore {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.gen++;
-    const tmp = `${this.file}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
-    renameSync(tmp, this.file);
+    atomicWriteFile(this.file, JSON.stringify(this.data));
   }
 
   /** Wait for pending asynchronous writes (tests / shutdown). */

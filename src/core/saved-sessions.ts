@@ -6,8 +6,8 @@
 // field for gate state, the agent-tab marker, taint or origins, and the schema is `.strict()` so a
 // hand-edited file carrying one is rejected rather than obeyed.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 import { restorable } from './session-state';
 
 export const MAX_SESSIONS = 100;
@@ -51,25 +51,15 @@ export const cleanName = (n: string) =>
     .trim()
     .slice(0, MAX_NAME);
 
-function atomicWrite(file: string, data: string) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  renameSync(tmp, file);
-}
 
 export class SavedSessionStore {
   private data: z.infer<typeof FileSchema> = { version: 1, sessions: [] };
   readonly loadError: string | null = null;
 
   constructor(private readonly file: string) {
-    if (!existsSync(file)) return;
-    try {
-      const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) this.data = r.data;
-      else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-    } catch (e) {
-      this.loadError = (e as Error).message;
-    }
+    const r = loadJson(file, FileSchema, { fallback: this.data });
+    this.data = r.value;
+    this.loadError = r.loadError;
   }
 
   list(): SavedSession[] {
@@ -163,6 +153,6 @@ export class SavedSessionStore {
   }
 
   flush() {
-    atomicWrite(this.file, JSON.stringify(this.data, null, 2) + '\n');
+    atomicWriteFile(this.file, JSON.stringify(this.data, null, 2) + '\n');
   }
 }

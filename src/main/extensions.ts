@@ -10,9 +10,10 @@
 //  - `ses.loadExtension` is **deprecated** as of Electron 43+ in favour of `ses.extensions.loadExtension`.
 //    We prefer the new API and fall back to the old one, so this keeps working either way.
 
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from '../core/persist';
 
 export const MAX_EXTENSIONS = 20;
 
@@ -37,11 +38,6 @@ export type ExtensionEntry = z.infer<typeof ExtensionEntrySchema>;
 
 const FileSchema = z.object({ version: z.literal(1), entries: z.array(ExtensionEntrySchema).max(MAX_EXTENSIONS) }).strict();
 
-function atomicWrite(file: string, data: string) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  renameSync(tmp, file);
-}
 
 /**
  * Read an unpacked extension's manifest just enough to describe it. Returns null when the path is
@@ -72,14 +68,9 @@ export class ExtensionList {
   readonly loadError: string | null = null;
 
   constructor(private readonly file: string) {
-    if (!existsSync(file)) return;
-    try {
-      const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) this.entries = r.data.entries;
-      else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-    } catch (e) {
-      this.loadError = (e as Error).message;
-    }
+    const r = loadJson(file, FileSchema, { fallback: { version: 1, entries: [] } });
+    this.entries = r.value.entries;
+    this.loadError = r.loadError;
   }
 
   list(): ExtensionEntry[] {
@@ -119,7 +110,7 @@ export class ExtensionList {
   }
 
   flush() {
-    atomicWrite(this.file, JSON.stringify({ version: 1, entries: this.entries }, null, 2) + '\n');
+    atomicWriteFile(this.file, JSON.stringify({ version: 1, entries: this.entries }, null, 2) + '\n');
   }
 }
 

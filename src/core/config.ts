@@ -1,7 +1,9 @@
 // Settings file (settings.json in userData). Three model roles, each with an optional cloud fallback.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 import { DEFAULT_FEEDS, type FeedConfig } from './reputation';
 import { AppearanceSchema, defaultAppearance, type Appearance } from './theme';
 import { SearchSettingsSchema, defaultSearch, type SearchSettings } from './search';
@@ -128,14 +130,31 @@ function merge<T>(base: T, over: unknown): T {
   return out as T;
 }
 
-export function loadSettings(file: string): Settings {
+/** Top level of settings.json: an object. Everything inside is validated field by field below. */
+const SettingsFileSchema = z.object({}).passthrough();
+
+/**
+ * Load a profile's settings. With `onLoadError`, an unreadable file is quarantined (kept as
+ * settings.json.corrupt-<time>, see core/persist.ts) and the message is reported; without it the
+ * file is only read (main.ts peeks at the first profile's settings before its runtime exists).
+ */
+export function loadSettings(file: string, opts: { onLoadError?: (message: string) => void } = {}): Settings {
   if (!existsSync(file)) {
     const s = defaultSettings();
     saveSettings(file, s);
     return s;
   }
   try {
-    const s = merge(defaultSettings(), JSON.parse(readFileSync(file, 'utf8')));
+    let raw: unknown;
+    if (opts.onLoadError) {
+      const r = loadJson<unknown>(file, SettingsFileSchema, { fallback: undefined });
+      if (r.loadError) {
+        opts.onLoadError(r.loadError);
+        return defaultSettings();
+      }
+      raw = r.value;
+    } else raw = JSON.parse(readFileSync(file, 'utf8'));
+    const s = merge(defaultSettings(), raw);
     // a hand-edited settings file must not smuggle an invalid theme into the UI
     const a = AppearanceSchema.safeParse(s.appearance);
     s.appearance = a.success ? a.data : defaultAppearance();
@@ -176,5 +195,5 @@ export function loadSettings(file: string): Settings {
 
 export function saveSettings(file: string, s: Settings): void {
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(s, null, 2) + '\n');
+  atomicWriteFile(file, JSON.stringify(s, null, 2) + '\n');
 }

@@ -66,6 +66,8 @@ export interface RuntimeContext {
   /** guard model settings: app-wide, not per profile */
   sharedGuard: () => Settings['guard'];
   setSharedGuard: (g: unknown) => void;
+  /** set when userData/shared.json was unreadable at startup and was quarantined */
+  sharedLoadError: () => string | null;
   onFeedsChange: (fn: () => void) => () => void;
   startUrl?: string;
   onClosed: () => void;
@@ -86,7 +88,16 @@ const { profile, dir: profileDir, guard, feeds } = ctx;
 // read synchronously, before any await: this runtime only ever uses ITS profile's partition
 const partition = profile().partition;
 const settingsFile = join(profileDir, 'settings.json');
-let settings: Settings = loadSettings(settingsFile);
+/**
+ * One line per store file that was unreadable at load and was moved aside (core/persist.ts). Shown
+ * in the chrome's status bar so the user knows where their data went instead of finding it empty.
+ */
+const storeErrors: string[] = [];
+const noteLoadError = (e: string | null) => {
+  if (e) storeErrors.push(e);
+};
+noteLoadError(ctx.sharedLoadError());
+let settings: Settings = loadSettings(settingsFile, { onLoadError: noteLoadError });
 settings.reputation.feeds = ctx.sharedFeeds();
 settings.guard = { ...ctx.sharedGuard() };
 if (testEnv('GUARDED_CONFIRM_TIMEOUT_MS')) settings.agent.confirmTimeoutMs = Number(testEnv('GUARDED_CONFIRM_TIMEOUT_MS'));
@@ -121,13 +132,15 @@ const savedSessions = new SavedSessionStore(join(profileDir, 'saved-sessions.jso
 const workspaces = new WorkspaceStore(join(profileDir, 'workspaces.json'));
 // Tab stacks (ticket 19). Pure presentation over tab ids — collapsing one unloads and un-gates
 // nothing.
-const stacks = StackModel.load(join(profileDir, 'tab-stacks.json')).model;
+const loadedStacks = StackModel.load(join(profileDir, 'tab-stacks.json'));
+const stacks = loadedStacks.model;
 // Per-origin page transforms (ticket 27). The applied set is agent-visible state, so it is audited.
 const pageActions = new PageActionsStore(join(profileDir, 'page-actions.json'));
 // Bookmarks panel extras: sort mode + a Trash that never discards silently (ticket 33).
 const bookmarkTrash = new TrashStore(join(profileDir, 'bookmarks-trash.json'));
 // Unpacked extensions (ticket 32). Outside the threat model — see the warning in extensions.ts.
 const extensions = new ExtensionList(extensionListFile(profileDir));
+for (const e of [history, bookmarks, closedTabs, sessionState, zoom, savedSessions, workspaces, loadedStacks, pageActions, bookmarkTrash, extensions]) noteLoadError(e.loadError);
 /** last activation time per tab id, for the hibernation sweep (ticket 23) */
 const activatedAt = new Map<number, number>();
 /** gesture trail from the MAIN process's own input events; never page-reported (ticket 16) */
@@ -292,6 +305,7 @@ function state() {
     auditFile: audit.file,
     settingsFile,
     profile: { id: profile().id, name: profile().name, color: profile().color },
+    storeErrors,
   };
 }
 

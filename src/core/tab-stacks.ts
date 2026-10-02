@@ -11,7 +11,7 @@
 // to at most one stack (the model enforces this), which keeps the strip a sequence, not a tree.
 
 import { z } from 'zod';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { atomicWriteFile, loadJson } from './persist';
 
 export const MAX_STACKS = 100;
 export const MAX_NAME = 60;
@@ -43,11 +43,6 @@ export const cleanName = (n: string) =>
     .trim()
     .slice(0, MAX_NAME);
 
-function atomicWrite(file: string, data: string) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  renameSync(tmp, file);
-}
 
 /**
  * Pure stack model. Every method takes and returns plain data so the rules are unit-testable
@@ -153,18 +148,12 @@ export class StackModel {
   }
 
   flush(file: string) {
-    atomicWrite(file, JSON.stringify({ version: 1, stacks: this.stacks }, null, 2) + '\n');
+    atomicWriteFile(file, JSON.stringify({ version: 1, stacks: this.stacks }, null, 2) + '\n');
   }
 
   static load(file: string): { model: StackModel; loadError: string | null } {
-    try {
-      if (!existsSync(file)) return { model: new StackModel(), loadError: null };
-      const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) return { model: new StackModel(r.data.stacks), loadError: null };
-      return { model: new StackModel(), loadError: r.error.issues[0]?.message ?? 'invalid' };
-    } catch (e) {
-      return { model: new StackModel(), loadError: (e as Error).message };
-    }
+    const r = loadJson(file, FileSchema, { fallback: { version: 1, stacks: [] } });
+    return { model: new StackModel(r.value.stacks), loadError: r.loadError };
   }
 }
 

@@ -215,6 +215,20 @@ export function initStatus(gb: Bridge, getActiveTabId: () => number | null) {
   tick();
   setInterval(tick, 15_000);
 
+  // ---------- store notices (a profile file was unreadable and was kept aside) ----------
+  const notice = $('sb-notice');
+  let dismissed = '';
+  notice.onclick = () => {
+    dismissed = notice.textContent ?? '';
+    notice.classList.add('hidden');
+  };
+  function setNotices(lines: string[]) {
+    const text = lines.join(' · ');
+    notice.textContent = text;
+    notice.title = `${lines.join('\n')}\n(click to dismiss)`;
+    notice.classList.toggle('hidden', !text || text === dismissed);
+  }
+
   let lastTabsState: Array<{ active: boolean; url: string; canGoBack: boolean; canGoForward: boolean }> = [];
   function currentPageUrl() {
     return lastTabsState.find((t) => t.active)?.url ?? '';
@@ -222,6 +236,7 @@ export function initStatus(gb: Bridge, getActiveTabId: () => number | null) {
 
   return {
     setZoom,
+    setNotices,
     openFind,
     closeFind,
     setTabs(t: typeof lastTabsState) {

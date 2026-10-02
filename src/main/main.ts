@@ -3,11 +3,12 @@
 
 import { app, ipcMain, Menu, session, BrowserWindow, type WebContents } from 'electron';
 import { join } from 'node:path';
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { Worker } from 'node:worker_threads';
 import { z } from 'zod';
 import { loadSettings } from '../core/config';
+import { atomicWriteFile, loadJson } from '../core/persist';
 import { NullGuard, TransformersGuard } from '../core/guard';
 import { DEFAULT_FEEDS, HostSet, ReputationDb, type FeedBuilder, type FeedConfig } from '../core/reputation';
 import type { Guard } from '../core/types';
@@ -77,7 +78,11 @@ let sharedGuard: GuardShared;
 const FeedListSchema = z.array(
   z.object({ name: z.string().max(80), url: z.string().max(2000), format: z.enum(['domains', 'hosts', 'urls']), enabled: z.boolean() }).strict(),
 ).max(50);
+/** the outer shape of shared.json; each field is validated on its own and falls back on its own */
+const SharedFileSchema = z.object({ reputationFeeds: z.unknown().optional(), guard: z.unknown().optional() }).passthrough();
 let sharedFile = '';
+/** set when shared.json was unreadable at startup; every profile window reports it */
+let sharedLoadError: string | null = null;
 let sharedFeeds: FeedConfig[] = DEFAULT_FEEDS;
 const feedListeners = new Set<() => void>();
 
@@ -87,14 +92,10 @@ const feedListeners = new Set<() => void>();
  */
 function loadShared(ud: string, fallbackFeeds: FeedConfig[], fallbackGuard: GuardShared) {
   sharedFile = join(ud, 'shared.json');
-  let raw: { reputationFeeds?: unknown; guard?: unknown } = {};
-  if (existsSync(sharedFile)) {
-    try {
-      raw = JSON.parse(readFileSync(sharedFile, 'utf8'));
-    } catch {
-      raw = {};
-    }
-  }
+  // an unreadable file is kept aside (shared.json.corrupt-<time>), never overwritten by the defaults
+  const loaded = loadJson(sharedFile, SharedFileSchema, { fallback: {} });
+  sharedLoadError = loaded.loadError;
+  const raw = loaded.value;
   const f = FeedListSchema.safeParse(raw.reputationFeeds);
   const g = GuardSharedSchema.safeParse(raw.guard);
   sharedFeeds = f.success ? f.data : fallbackFeeds;
@@ -103,9 +104,7 @@ function loadShared(ud: string, fallbackFeeds: FeedConfig[], fallbackGuard: Guar
 }
 
 function writeShared() {
-  const tmp = `${sharedFile}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ reputationFeeds: sharedFeeds, guard: sharedGuard }, null, 2) + '\n');
-  renameSync(tmp, sharedFile);
+  atomicWriteFile(sharedFile, JSON.stringify({ reputationFeeds: sharedFeeds, guard: sharedGuard }, null, 2) + '\n');
 }
 
 function saveSharedFeeds(f: FeedConfig[]) {
@@ -182,6 +181,7 @@ async function openProfile(id: string, startUrl?: string): Promise<Runtime> {
       setSharedFeeds: saveSharedFeeds,
       sharedGuard: () => sharedGuard,
       setSharedGuard: saveSharedGuard,
+      sharedLoadError: () => sharedLoadError,
       onFeedsChange: (fn) => {
         feedListeners.add(fn);
         return () => feedListeners.delete(fn);

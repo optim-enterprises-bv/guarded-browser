@@ -185,6 +185,7 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .sb-zoom { display: flex; align-items: center; gap: 2px; }
 .sb-zoom-label { min-width: 44px; text-align: center; }
 .sb-zoom-off { color: var(--accent); font-weight: 700; }
+.sb-notice { color: var(--warn); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .sb-badge { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 8px; background: var(--accent); color: #fff; font-size: 10px; }
 
 /* ---------- find bar (overlay, top-right of the page area) ---------- */

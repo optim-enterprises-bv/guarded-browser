@@ -5,8 +5,8 @@
 // store is keyed on origin, so navigating within an origin keeps the zoom and leaving it resets to
 // 100% (Vivaldi's behaviour).
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 
 /** Chromium's own limits: outside this, pages become unusable. */
 export const MIN_ZOOM = 0.25;
@@ -30,25 +30,15 @@ export function stepZoom(current: number, dir: 1 | -1): number {
   return [...ZOOM_STEPS].reverse().find((s) => s < c - 1e-6) ?? MIN_ZOOM;
 }
 
-function atomicWrite(file: string, data: string) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  renameSync(tmp, file);
-}
 
 export class ZoomStore {
   private data: z.infer<typeof FileSchema> = { version: 1, origins: {} };
   readonly loadError: string | null = null;
 
   constructor(private readonly file: string) {
-    if (!existsSync(file)) return;
-    try {
-      const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) this.data = r.data;
-      else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-    } catch (e) {
-      this.loadError = (e as Error).message;
-    }
+    const r = loadJson(file, FileSchema, { fallback: this.data });
+    this.data = r.value;
+    this.loadError = r.loadError;
   }
 
   /** The remembered factor for an origin, or 1 (100%) when none. */
@@ -75,6 +65,6 @@ export class ZoomStore {
   }
 
   flush() {
-    atomicWrite(this.file, JSON.stringify(this.data, null, 2) + '\n');
+    atomicWriteFile(this.file, JSON.stringify(this.data, null, 2) + '\n');
   }
 }

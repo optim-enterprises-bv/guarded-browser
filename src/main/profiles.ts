@@ -5,9 +5,10 @@
 // + its own app-state directory userData/profiles/<id>/ + its own window.
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { atomicWriteFile } from '../core/persist';
 
 const HEX = /^#[0-9a-f]{6}$/;
 const ID = /^[0-9a-f-]{36}$/;
@@ -58,11 +59,6 @@ export const PROFILE_COLORS = ['#2f5bd3', '#1b8a5a', '#b3261e', '#7c3aed', '#c24
 /** Files and directories of the single-profile layout that belong to the user's profile. */
 export const MIGRATED_ENTRIES = ['settings.json', 'audit', 'downloads-pending', 'reputation/local-blocklist.txt', 'reputation/local-allowlist.txt'];
 
-function atomicWrite(file: string, data: string) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  renameSync(tmp, file);
-}
 
 /** Partition directory on disk for a `persist:<name>` partition. */
 export function partitionDir(userData: string, partition: string): string {
@@ -94,7 +90,7 @@ export class ProfileRegistry {
 
   private save() {
     RegistrySchema.parse(this.reg); // never write an invalid registry
-    atomicWrite(this.file, JSON.stringify(this.reg, null, 2) + '\n');
+    atomicWriteFile(this.file, JSON.stringify(this.reg, null, 2) + '\n');
   }
 
   /**
@@ -115,7 +111,7 @@ export class ProfileRegistry {
     if (existsSync(pending)) {
       const p = JSON.parse(readFileSync(pending, 'utf8')) as { id?: string };
       if (p.id && ID.test(p.id)) id = p.id;
-    } else atomicWrite(pending, JSON.stringify({ id }));
+    } else atomicWriteFile(pending, JSON.stringify({ id }));
     const dir = join(this.userData, 'profiles', id);
     mkdirSync(join(dir, 'reputation'), { recursive: true, mode: 0o700 });
     for (const entry of MIGRATED_ENTRIES) {

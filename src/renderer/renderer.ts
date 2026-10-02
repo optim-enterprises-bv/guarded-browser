@@ -237,6 +237,7 @@ function renderState(s: any) {
   $('banner-sandbox').classList.toggle('hidden', !s.sandboxDisabled);
   setRunning(!!s.task);
   for (const c of s.confirmations ?? []) queueConfirm(c);
+  statusUi.setNotices(s.storeErrors ?? []);
 }
 
 function renderEgress(e: { mode: string; allowed: string[]; blocked: Array<{ host: string; count: number }> }) {

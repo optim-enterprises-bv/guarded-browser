@@ -10,8 +10,8 @@
 // The CSS is applied in the page, injected as a stylesheet from the isolated world. The chrome is
 // never touched (rule 6): these selectors and filters target the page document only.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 
 export const PAGE_ACTIONS = ['greyscale', 'contrast', 'hideImages', 'hideBackgrounds', 'invert', 'sepia'] as const;
 export type PageAction = (typeof PAGE_ACTIONS)[number];
@@ -105,14 +105,9 @@ export class PageActionsStore {
   readonly loadError: string | null = null;
 
   constructor(private readonly file: string) {
-    if (!existsSync(file)) return;
-    try {
-      const r = PageActionsFileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) this.data = r.data;
-      else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-    } catch (e) {
-      this.loadError = (e as Error).message;
-    }
+    const r = loadJson(file, PageActionsFileSchema, { fallback: this.data });
+    this.data = r.value;
+    this.loadError = r.loadError;
   }
 
   byOrigin(origin: string): PageActions {
@@ -139,8 +134,6 @@ export class PageActionsStore {
   }
 
   flush() {
-    const tmp = `${this.file}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(this.data, null, 2) + '\n', { mode: 0o600 });
-    renameSync(tmp, this.file);
+    atomicWriteFile(this.file, JSON.stringify(this.data, null, 2) + '\n');
   }
 }

@@ -9,8 +9,8 @@
 // is about to discard and the caller must pass `confirm: true`. The panel shows the count and asks.
 // Nothing is ever hard-deleted by a sort, a restore or a purge triggered by an import.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 import { BookmarkSchema, FolderSchema, type FolderNode, type Node } from './bookmarks';
 
 export const SORT_MODES = ['manual', 'title', 'url', 'added'] as const;
@@ -73,14 +73,9 @@ export class TrashStore {
   readonly loadError: string | null = null;
 
   constructor(private readonly file: string) {
-    if (!existsSync(file)) return;
-    try {
-      const r = TrashFileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) this.data = r.data;
-      else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-    } catch (e) {
-      this.loadError = (e as Error).message;
-    }
+    const r = loadJson(file, TrashFileSchema, { fallback: this.data });
+    this.data = r.value;
+    this.loadError = r.loadError;
   }
 
   /** Newest first, which is what a Trash list should show. */
@@ -125,8 +120,6 @@ export class TrashStore {
   }
 
   flush() {
-    const tmp = `${this.file}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(this.data, null, 2) + '\n', { mode: 0o600 });
-    renameSync(tmp, this.file);
+    atomicWriteFile(this.file, JSON.stringify(this.data, null, 2) + '\n');
   }
 }

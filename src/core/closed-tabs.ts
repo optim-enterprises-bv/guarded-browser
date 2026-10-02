@@ -8,8 +8,8 @@
 // is a fresh document that happens to sit at an old URL — never a resurrection of the previous
 // document's security state.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 
 /** Bounded per profile, newest last. Old entries fall off the bottom. */
 export const MAX_CLOSED = 25;
@@ -52,12 +52,6 @@ export function reopenable(url: string): boolean {
 
 const cleanTitle = (t: string) => t.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE);
 
-/** Same idiom as profiles.ts: 0600, temp file + rename, never a partial write. */
-function atomicWrite(file: string, data: string) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  renameSync(tmp, file);
-}
 
 export class ClosedTabStore {
   private data: z.infer<typeof FileSchema> = { version: 1, tabs: [] };
@@ -65,14 +59,9 @@ export class ClosedTabStore {
   readonly loadError: string | null = null;
 
   constructor(private readonly file: string) {
-    if (!existsSync(file)) return;
-    try {
-      const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-      if (r.success) this.data = r.data;
-      else this.loadError = r.error.issues[0]?.message ?? 'invalid';
-    } catch (e) {
-      this.loadError = (e as Error).message;
-    }
+    const r = loadJson(file, FileSchema, { fallback: this.data });
+    this.data = r.value;
+    this.loadError = r.loadError;
   }
 
   /** Record a closed tab. Non-reopenable URLs and `about:blank` are ignored. */
@@ -116,6 +105,6 @@ export class ClosedTabStore {
   }
 
   flush() {
-    atomicWrite(this.file, JSON.stringify(this.data, null, 2) + '\n');
+    atomicWriteFile(this.file, JSON.stringify(this.data, null, 2) + '\n');
   }
 }

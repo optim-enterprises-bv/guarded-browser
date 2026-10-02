@@ -7,8 +7,8 @@
 // nesting depth are capped.
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
+import { atomicWriteFile, loadJson } from './persist';
 
 export const MAX_NODES = 10_000;
 export const MAX_DEPTH = 20;
@@ -135,16 +135,12 @@ export class BookmarkStore {
   readonly loadError: string | null = null;
 
   constructor(private readonly file: string) {
-    if (existsSync(file)) {
-      try {
-        const r = FileSchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-        const ok = r.success && r.data.roots.every((f) => depthAndCount(f).depth <= MAX_DEPTH) && this.countOf(r.data) <= MAX_NODES;
-        if (ok) this.data = r.data;
-        else this.loadError = r.success ? 'too deep or too large' : r.error.issues[0]?.message ?? 'invalid';
-      } catch (e) {
-        this.loadError = (e as Error).message;
-      }
-    }
+    const r = loadJson(file, FileSchema, {
+      fallback: this.data,
+      check: (d) => (d.roots.every((f) => depthAndCount(f).depth <= MAX_DEPTH) && this.countOf(d) <= MAX_NODES ? null : 'too deep or too large'),
+    });
+    this.data = r.value;
+    this.loadError = r.loadError;
   }
 
   private countOf(d: BookmarksFile) {
@@ -365,9 +361,7 @@ export class BookmarkStore {
   private save() {
     const r = FileSchema.safeParse(this.data);
     if (!r.success) throw new Error(`bookmarks invalid: ${r.error.issues[0]?.message}`);
-    const tmp = `${this.file}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
-    renameSync(tmp, this.file);
+    atomicWriteFile(this.file, JSON.stringify(this.data));
   }
 }
 
