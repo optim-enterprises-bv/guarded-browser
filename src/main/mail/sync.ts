@@ -411,6 +411,30 @@ export class MailSyncer {
   }
 
   /** Move messages to another folder, re-keying the store rows from the server's COPYUID. */
+  /**
+   * APPEND a sent message to `folder` (ticket 38's Sent copy), marked \Seen, then sync that folder so
+   * the copy shows up. Gated like every other server write; a failure is RETURNED (the caller reports
+   * it — the message itself was already delivered).
+   */
+  async appendSent(folder: string, raw: string): Promise<{ ok: boolean; error?: string; uid?: number | null }> {
+    const no = this.refused('append');
+    if (no) return { ok: false, error: no };
+    const ready = await this.ensureClient();
+    const c = ready.client;
+    if (!c) return { ok: false, error: ready.refused ?? ready.error ?? 'not connected' };
+    let uid: number | null;
+    try {
+      uid = (await c.append(folder, raw, ['\\Seen'])).uid;
+    } catch (e) {
+      this.lastError = sanitizeDetail((e as Error).message);
+      return { ok: false, error: this.lastError };
+    }
+    this.deps.audit?.({ kind: 'sync', detail: `appended a sent copy to ${folder}` });
+    // best effort: the copy is on the server either way
+    await this.syncFolder(folder).catch(() => undefined);
+    return { ok: true, uid };
+  }
+
   async move(uids: number[], from: string, to: string): Promise<{ ok: boolean; error?: string; moved: number }> {
     const no = this.refused('move');
     if (no) return { ok: false, error: no, moved: 0 };

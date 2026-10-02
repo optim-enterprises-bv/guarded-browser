@@ -33,6 +33,17 @@ export const MAIL_CHANNELS = [
   'mail:move',
   'mail:import-scan',
   'mail:import-apply',
+  // ticket 38: compose, drafts, outbox, send. Request/response like the rest; the renderer sends what
+  // the user typed and gets results back — no compose field is ever pushed at it.
+  'mail:compose-init',
+  'mail:draft-save',
+  'mail:drafts',
+  'mail:draft-get',
+  'mail:draft-delete',
+  'mail:send',
+  'mail:outbox',
+  'mail:outbox-retry',
+  'mail:outbox-delete',
 ] as const;
 
 /** Profile management: handled in main.ts itself (it spans profiles), still sender-checked. */

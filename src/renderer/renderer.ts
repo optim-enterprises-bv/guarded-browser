@@ -213,6 +213,9 @@ document.addEventListener('keydown', (e) => {
     .invoke('chord', e.key, { ctrl: mod, shift: e.shiftKey, alt: e.altKey })
     .then((r: { handled?: boolean }) => {
       if (r?.handled) e.preventDefault();
+      // Ctrl+N is not bound in the chord table (and a remapped binding would have been handled
+      // above): inside the open mail panel it composes a new message
+      else if (e.key.toLowerCase() === 'n' && mod && !e.shiftKey && !e.altKey && document.getElementById('mail-view')?.getClientRects().length) mailPanel.compose();
     })
     .catch(() => undefined);
 });

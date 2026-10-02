@@ -357,3 +357,15 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 #mail-view .import-row { display: flex; gap: 6px; align-items: flex-start; padding: 3px 2px; font-size: 11px; }
 #mail-view .import-text { display: flex; flex-wrap: wrap; gap: 3px; align-items: baseline; }
 #mail-view .hidden { display: none !important; }
+/* ticket 38: the compose form replaces the reading pane */
+#m-compose { flex: 1; display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; min-height: 0; }
+#m-compose .c-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+#m-compose .c-row label { min-width: 52px; color: var(--muted); }
+#m-compose .c-row input, #m-compose .c-row select { flex: 1; min-width: 0; }
+#m-c-body { flex: 1; min-height: 120px; resize: none; font-family: inherit; font-size: 12px; }
+#m-compose .c-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#mail-view .row.outbox .status { font-size: 10px; color: var(--muted); white-space: normal; }
+#mail-view .row.outbox.failed .status { color: var(--warn); }
+#mail-view .row.outbox { height: auto; min-height: 68px; }
+#mail-view .row .row-actions { display: flex; gap: 4px; }
+#mail-view .row .row-actions button { padding: 0 5px; font-size: 10px; }

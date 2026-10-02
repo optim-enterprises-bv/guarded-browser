@@ -28,8 +28,9 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const DB_FILE = 'mail.sqlite';
 
 /** hard ceiling on stored messages; a store beyond this refuses writes instead of growing forever */
@@ -45,10 +46,19 @@ export const MAX_ADDRS = 2_000;
 export const MAX_SUBJECT = 400;
 export const MAX_ACCOUNTS = 24;
 export const MAX_LABELS = 500;
+/** local drafts per profile (ticket 38) */
+export const MAX_DRAFTS = 500;
+/** queued / failed outgoing messages per profile */
+export const MAX_OUTBOX = 200;
+/** a draft's text (the composed message is capped again, in bytes, by compose.ts) */
+export const MAX_DRAFT_BODY = 10 * 1024 * 1024;
+export const MAX_DRAFT_FIELD = 8_000;
 
 export type FolderKind = 'folder' | 'inbox' | 'sent' | 'drafts' | 'outbox' | 'trash' | 'junk' | 'archive';
 export type AccountKind = 'imap' | 'pop3' | 'local';
 export type TlsMode = 'implicit' | 'starttls' | 'none';
+/** SMTP has no plaintext mode: 465 implicit TLS or 587 STARTTLS */
+export type SmtpTlsMode = 'implicit' | 'starttls';
 export type MessageSource = 'mail' | 'feed';
 
 export interface MailAccount {
@@ -66,6 +76,58 @@ export interface MailAccount {
   junkFolder: string;
   archiveFolder: string;
   sortOrder: number;
+  /** schema v4 (ticket 38): the submission server; an account from before v4 has host / 465 / implicit */
+  smtpHost: string;
+  smtpPort: number;
+  smtpTls: SmtpTlsMode;
+}
+
+export type DraftMode = 'new' | 'reply' | 'replyAll' | 'forward';
+
+/** A locally saved draft (ticket 38). Fields are what the user typed; nothing here is validated mail. */
+export interface DraftRow {
+  id: string;
+  accountId: string;
+  mode: DraftMode;
+  /** the store id of the message replied to / forwarded (0 = a new message) */
+  refMessage: number;
+  to: string;
+  cc: string;
+  bcc: string;
+  subject: string;
+  body: string;
+  includeQuoted: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type OutboxStatus = 'queued' | 'sending' | 'failed';
+
+/** An outgoing message that has not been accepted by the server yet. */
+export interface OutboxRow {
+  id: string;
+  accountId: string;
+  messageId: string;
+  subject: string;
+  /** recipient COUNT and their DOMAINS: the list view and the audit log never need the addresses */
+  recipients: number;
+  domains: string;
+  status: OutboxStatus;
+  error: string;
+  attempts: number;
+  /** 1 when a timer may retry it; 0 = only the user's Retry sends it (refusals, permanent errors) */
+  autoRetry: boolean;
+  nextAttemptAt: number;
+  bytes: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface OutboxItem extends OutboxRow {
+  envelopeFrom: string;
+  envelopeTo: string[];
+  /** the complete RFC 5322 message (7-bit ASCII), built once so a retry sends the same Message-ID */
+  raw: string;
 }
 
 export interface MailFolder {
@@ -380,6 +442,52 @@ CREATE TABLE filter (
 CREATE VIRTUAL TABLE message_fts USING fts5(subject, fromName, fromAddr, toAddrs, bodyText);
 `;
 
+/**
+ * v4 (ticket 38): the account's submission server, local drafts and the outbox. An existing account
+ * keeps working: its SMTP host is its IMAP host on 465 with implicit TLS until the user changes it.
+ */
+const SCHEMA_V4 = `
+ALTER TABLE account ADD COLUMN smtpHost TEXT NOT NULL DEFAULT '';
+ALTER TABLE account ADD COLUMN smtpPort INTEGER NOT NULL DEFAULT 465;
+ALTER TABLE account ADD COLUMN smtpTls TEXT NOT NULL DEFAULT 'implicit';
+UPDATE account SET smtpHost = host WHERE smtpHost = '';
+
+CREATE TABLE draft (
+  id            TEXT PRIMARY KEY,
+  accountId     TEXT NOT NULL DEFAULT '',
+  mode          TEXT NOT NULL DEFAULT 'new',
+  refMessage    INTEGER NOT NULL DEFAULT 0,
+  toAddrs       TEXT NOT NULL DEFAULT '',
+  ccAddrs       TEXT NOT NULL DEFAULT '',
+  bccAddrs      TEXT NOT NULL DEFAULT '',
+  subject       TEXT NOT NULL DEFAULT '',
+  body          TEXT NOT NULL DEFAULT '',
+  includeQuoted INTEGER NOT NULL DEFAULT 0,
+  createdAt     INTEGER NOT NULL DEFAULT 0,
+  updatedAt     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE outbox (
+  id            TEXT PRIMARY KEY,
+  accountId     TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  messageId     TEXT NOT NULL DEFAULT '',
+  subject       TEXT NOT NULL DEFAULT '',
+  recipients    INTEGER NOT NULL DEFAULT 0,
+  domains       TEXT NOT NULL DEFAULT '',
+  envelopeFrom  TEXT NOT NULL DEFAULT '',
+  envelopeTo    TEXT NOT NULL DEFAULT '[]',
+  raw           TEXT NOT NULL DEFAULT '',
+  bytes         INTEGER NOT NULL DEFAULT 0,
+  status        TEXT NOT NULL DEFAULT 'queued',
+  error         TEXT NOT NULL DEFAULT '',
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  autoRetry     INTEGER NOT NULL DEFAULT 0,
+  nextAttemptAt INTEGER NOT NULL DEFAULT 0,
+  createdAt     INTEGER NOT NULL DEFAULT 0,
+  updatedAt     INTEGER NOT NULL DEFAULT 0
+);
+`;
+
 /** v2: the HTML body, apart from the text, for the HTML reading view only (never indexed). */
 const SCHEMA_V2 = `
 CREATE TABLE message_html (
@@ -447,6 +555,7 @@ export class MailStore {
       // v3: bodies fetched before HTML was kept have text only. Mark them unfetched (the text stays) so
       // the next OPEN fetches the body again and stores its HTML; nothing is fetched in bulk.
       if (v < 3) this.db.exec('UPDATE message SET bodyFetched = 0 WHERE bodyFetched = 1 AND id NOT IN (SELECT messageId FROM message_html)');
+      if (v < 4) this.db.exec(SCHEMA_V4);
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       this.db.exec('COMMIT');
     } catch (e) {
@@ -502,7 +611,7 @@ export class MailStore {
 
   // ------------------------------------------------------------ accounts
 
-  addAccount(a: Omit<MailAccount, 'sortOrder'> & { sortOrder?: number }): Result<{ id: string }> {
+  addAccount(a: Omit<MailAccount, 'sortOrder' | 'smtpHost' | 'smtpPort' | 'smtpTls'> & { sortOrder?: number } & Partial<Pick<MailAccount, 'smtpHost' | 'smtpPort' | 'smtpTls'>>): Result<{ id: string }> {
     const id = clean(a.id, 64);
     if (!id) return { ok: false, error: 'account needs an id' };
     const count = Number((this.db.prepare('SELECT COUNT(*) AS n FROM account').get() as { n: number }).n);
@@ -511,14 +620,16 @@ export class MailStore {
     const tlsModes = new Set<TlsMode>(['implicit', 'starttls', 'none']);
     const kind: AccountKind = kinds.has(a.kind) ? a.kind : 'imap';
     const tls: TlsMode = tlsModes.has(a.tls) ? a.tls : 'implicit';
+    const smtpTls: SmtpTlsMode = a.smtpTls === 'starttls' ? 'starttls' : 'implicit';
+    const smtpPort = Math.max(0, Math.min(65535, Number(a.smtpPort) || 0)) || (smtpTls === 'starttls' ? 587 : 465);
     this.db
       .prepare(
-        `INSERT INTO account (id, name, address, kind, host, port, tls, username, sentFolder, trashFolder, junkFolder, archiveFolder, sortOrder)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO account (id, name, address, kind, host, port, tls, username, sentFolder, trashFolder, junkFolder, archiveFolder, sortOrder, smtpHost, smtpPort, smtpTls)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET name=excluded.name, address=excluded.address, kind=excluded.kind, host=excluded.host,
            port=excluded.port, tls=excluded.tls, username=excluded.username, sentFolder=excluded.sentFolder,
            trashFolder=excluded.trashFolder, junkFolder=excluded.junkFolder, archiveFolder=excluded.archiveFolder,
-           sortOrder=excluded.sortOrder`,
+           sortOrder=excluded.sortOrder, smtpHost=excluded.smtpHost, smtpPort=excluded.smtpPort, smtpTls=excluded.smtpTls`,
       )
       .run(
         id,
@@ -534,6 +645,9 @@ export class MailStore {
         clean(a.junkFolder, 255),
         clean(a.archiveFolder, 255),
         Number(a.sortOrder ?? count),
+        clean(a.smtpHost || a.host, 255),
+        smtpPort,
+        smtpTls,
       );
     return { ok: true, id };
   }
@@ -554,6 +668,9 @@ export class MailStore {
       junkFolder: String(r.junkFolder),
       archiveFolder: String(r.archiveFolder),
       sortOrder: Number(r.sortOrder),
+      smtpHost: String(r.smtpHost || r.host),
+      smtpPort: Number(r.smtpPort) || 465,
+      smtpTls: String(r.smtpTls) === 'starttls' ? 'starttls' : 'implicit',
     }));
   }
 
@@ -564,6 +681,7 @@ export class MailStore {
     const n = this.db.prepare('DELETE FROM account WHERE id = ?').run(clean(id, 64)).changes;
     this.db.prepare('DELETE FROM label WHERE accountId = ?').run(clean(id, 64));
     this.db.prepare('DELETE FROM filter WHERE accountId = ?').run(clean(id, 64));
+    this.db.prepare('DELETE FROM draft WHERE accountId = ?').run(clean(id, 64));
     return { removed: Number(n) };
   }
 
@@ -1202,6 +1320,180 @@ export class MailStore {
 
   removeFilter(id: string): number {
     return Number(this.db.prepare('DELETE FROM filter WHERE id = ?').run(clean(id, 64)).changes);
+  }
+
+  // ------------------------------------------------------------ drafts (ticket 38)
+
+  /**
+   * Save (insert or replace) a local draft. The fields are stored as typed, length-capped: a draft is
+   * work in progress, and it is validated as mail only when it is SENT (compose.ts refuses a line
+   * break in a header field there, with a message, rather than this method silently dropping it).
+   */
+  saveDraft(d: Partial<Omit<DraftRow, 'createdAt' | 'updatedAt'>> & { id?: string }): Result<{ id: string }> {
+    const existing = d.id ? this.getDraft(String(d.id)) : null;
+    if (!existing) {
+      const n = Number((this.db.prepare('SELECT COUNT(*) AS n FROM draft').get() as { n: number }).n);
+      if (n >= MAX_DRAFTS) return { ok: false, error: `at most ${MAX_DRAFTS} drafts; delete some first` };
+    }
+    const id = existing?.id ?? (d.id && /^[A-Za-z0-9_-]{8,64}$/.test(String(d.id)) ? String(d.id) : randomUUID());
+    const modes = new Set<DraftMode>(['new', 'reply', 'replyAll', 'forward']);
+    const f = (v: unknown) => String(v ?? '').slice(0, MAX_DRAFT_FIELD);
+    const now = nowMs();
+    this.db
+      .prepare(
+        `INSERT INTO draft (id, accountId, mode, refMessage, toAddrs, ccAddrs, bccAddrs, subject, body, includeQuoted, createdAt, updatedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET accountId=excluded.accountId, mode=excluded.mode, refMessage=excluded.refMessage,
+           toAddrs=excluded.toAddrs, ccAddrs=excluded.ccAddrs, bccAddrs=excluded.bccAddrs, subject=excluded.subject,
+           body=excluded.body, includeQuoted=excluded.includeQuoted, updatedAt=excluded.updatedAt`,
+      )
+      .run(
+        id,
+        clean(d.accountId, 64),
+        modes.has(d.mode as DraftMode) ? (d.mode as DraftMode) : 'new',
+        Math.max(0, Math.floor(Number(d.refMessage) || 0)),
+        f(d.to),
+        f(d.cc),
+        f(d.bcc),
+        f(d.subject),
+        String(d.body ?? '').slice(0, MAX_DRAFT_BODY),
+        d.includeQuoted ? 1 : 0,
+        existing?.createdAt ?? now,
+        now,
+      );
+    return { ok: true, id };
+  }
+
+  private toDraft(r: Record<string, unknown>): DraftRow {
+    return {
+      id: String(r.id),
+      accountId: String(r.accountId),
+      mode: String(r.mode) as DraftMode,
+      refMessage: Number(r.refMessage),
+      to: String(r.toAddrs),
+      cc: String(r.ccAddrs),
+      bcc: String(r.bccAddrs),
+      subject: String(r.subject),
+      body: String(r.body),
+      includeQuoted: Number(r.includeQuoted) === 1,
+      createdAt: Number(r.createdAt),
+      updatedAt: Number(r.updatedAt),
+    };
+  }
+
+  getDraft(id: string): DraftRow | null {
+    const r = this.db.prepare('SELECT * FROM draft WHERE id = ?').get(String(id ?? '').slice(0, 64)) as Record<string, unknown> | undefined;
+    return r ? this.toDraft(r) : null;
+  }
+
+  listDrafts(accountId?: string): DraftRow[] {
+    const rows = (accountId
+      ? this.db.prepare('SELECT * FROM draft WHERE accountId = ? ORDER BY updatedAt DESC').all(clean(accountId, 64))
+      : this.db.prepare('SELECT * FROM draft ORDER BY updatedAt DESC').all()) as Record<string, unknown>[];
+    return rows.map((r) => this.toDraft(r));
+  }
+
+  deleteDraft(id: string): number {
+    return Number(this.db.prepare('DELETE FROM draft WHERE id = ?').run(String(id ?? '').slice(0, 64)).changes);
+  }
+
+  // ------------------------------------------------------------ outbox (ticket 38)
+
+  addOutbox(o: { accountId: string; messageId: string; subject: string; envelopeFrom: string; envelopeTo: string[]; domains: string[]; raw: string; bytes: number }): Result<{ id: string }> {
+    const n = Number((this.db.prepare('SELECT COUNT(*) AS n FROM outbox').get() as { n: number }).n);
+    if (n >= MAX_OUTBOX) return { ok: false, error: `the Outbox already holds ${MAX_OUTBOX} messages; send or delete some first` };
+    const id = randomUUID();
+    const now = nowMs();
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO outbox (id, accountId, messageId, subject, recipients, domains, envelopeFrom, envelopeTo, raw, bytes, status, createdAt, updatedAt)
+           VALUES (?,?,?,?,?,?,?,?,?,?, 'queued', ?, ?)`,
+        )
+        .run(id, clean(o.accountId, 64), clean(o.messageId, 998), clean(o.subject, MAX_SUBJECT), o.envelopeTo.length, o.domains.join(',').slice(0, MAX_ADDRS), clean(o.envelopeFrom, 320), JSON.stringify(o.envelopeTo), o.raw, Math.max(0, Number(o.bytes) || 0), now, now);
+    } catch (e) {
+      return { ok: false, error: `the Outbox could not store the message: ${(e as Error).message.slice(0, 80)}` };
+    }
+    return { ok: true, id };
+  }
+
+  private toOutboxRow(r: Record<string, unknown>): OutboxRow {
+    return {
+      id: String(r.id),
+      accountId: String(r.accountId),
+      messageId: String(r.messageId),
+      subject: String(r.subject),
+      recipients: Number(r.recipients),
+      domains: String(r.domains),
+      status: String(r.status) as OutboxStatus,
+      error: String(r.error),
+      attempts: Number(r.attempts),
+      autoRetry: Number(r.autoRetry) === 1,
+      nextAttemptAt: Number(r.nextAttemptAt),
+      bytes: Number(r.bytes),
+      createdAt: Number(r.createdAt),
+      updatedAt: Number(r.updatedAt),
+    };
+  }
+
+  /** The list view's rows: no message bytes, no addresses. */
+  listOutbox(accountId?: string): OutboxRow[] {
+    const cols = 'id, accountId, messageId, subject, recipients, domains, status, error, attempts, autoRetry, nextAttemptAt, bytes, createdAt, updatedAt';
+    const rows = (accountId
+      ? this.db.prepare(`SELECT ${cols} FROM outbox WHERE accountId = ? ORDER BY createdAt`).all(clean(accountId, 64))
+      : this.db.prepare(`SELECT ${cols} FROM outbox ORDER BY createdAt`).all()) as Record<string, unknown>[];
+    return rows.map((r) => this.toOutboxRow(r));
+  }
+
+  getOutbox(id: string): OutboxItem | null {
+    const r = this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(String(id ?? '').slice(0, 64)) as Record<string, unknown> | undefined;
+    if (!r) return null;
+    let to: string[] = [];
+    try {
+      const v = JSON.parse(String(r.envelopeTo)) as unknown;
+      if (Array.isArray(v)) to = v.map((x) => String(x));
+    } catch {
+      to = [];
+    }
+    return { ...this.toOutboxRow(r), envelopeFrom: String(r.envelopeFrom), envelopeTo: to, raw: String(r.raw) };
+  }
+
+  updateOutbox(id: string, p: Partial<Pick<OutboxRow, 'status' | 'error' | 'attempts' | 'autoRetry' | 'nextAttemptAt'>>): number {
+    const cur = this.getOutbox(id);
+    if (!cur) return 0;
+    const statuses = new Set<OutboxStatus>(['queued', 'sending', 'failed']);
+    return Number(
+      this.db
+        .prepare('UPDATE outbox SET status = ?, error = ?, attempts = ?, autoRetry = ?, nextAttemptAt = ?, updatedAt = ? WHERE id = ?')
+        .run(
+          p.status && statuses.has(p.status) ? p.status : cur.status,
+          String(p.error ?? cur.error).slice(0, 600),
+          Math.max(0, Math.floor(Number(p.attempts ?? cur.attempts) || 0)),
+          (p.autoRetry ?? cur.autoRetry) ? 1 : 0,
+          Math.max(0, Number(p.nextAttemptAt ?? cur.nextAttemptAt) || 0),
+          nowMs(),
+          cur.id,
+        ).changes,
+    );
+  }
+
+  deleteOutbox(id: string): number {
+    return Number(this.db.prepare('DELETE FROM outbox WHERE id = ?').run(String(id ?? '').slice(0, 64)).changes);
+  }
+
+  /**
+   * After a restart: nothing is retried behind the user's back. An item that was mid-send when the
+   * app stopped may or may not have been delivered, and says so; every item waits for a Retry.
+   */
+  recoverOutbox(): number {
+    const now = nowMs();
+    const a = this.db
+      .prepare(`UPDATE outbox SET status = 'failed', autoRetry = 0, nextAttemptAt = 0, updatedAt = ?, error = 'the app closed while this was being sent; it may or may not have been delivered. Press Retry to send it again.' WHERE status = 'sending'`)
+      .run(now).changes;
+    const b = this.db
+      .prepare(`UPDATE outbox SET status = 'failed', autoRetry = 0, nextAttemptAt = 0, updatedAt = ?, error = CASE WHEN error = '' THEN 'not sent yet: press Retry to send it' ELSE error END WHERE status = 'queued' OR autoRetry = 1`)
+      .run(now).changes;
+    return Number(a) + Number(b);
   }
 
   // ------------------------------------------------------------ inspection (tests / diagnosis)

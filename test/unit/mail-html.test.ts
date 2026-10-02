@@ -96,6 +96,14 @@ const tmp = () => mkdtempSync(join(tmpdir(), 'gb-mailhtml-'));
 
 // ---------------------------------------------------------------- choosing the html body
 
+
+/** Remove what schema v4 (ticket 38) added, so a file can be turned back into a genuine older one. */
+function dropV4(raw: InstanceType<typeof DatabaseSync>) {
+  raw.exec('DROP TABLE draft');
+  raw.exec('DROP TABLE outbox');
+  for (const c of ['smtpHost', 'smtpPort', 'smtpTls']) raw.exec(`ALTER TABLE account DROP COLUMN ${c}`);
+}
+
 describe('mail html: which part is the HTML body', () => {
   const alt = [
     'Subject: newsletter',
@@ -482,11 +490,12 @@ describe('mail html: the store keeps html apart (schema v2)', () => {
     // turn it back into a v1 file, the way one written before this change looks
     const raw = new DatabaseSync(f);
     raw.exec('DROP TABLE message_html');
+    dropV4(raw);
     raw.exec('PRAGMA user_version = 1');
     raw.close();
     const again = new MailStore(f);
     expect(again.schemaVersion()).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(3);
+    expect(SCHEMA_VERSION).toBe(4);
     // v3: the text stays, and the message is marked unfetched so the next open stores its HTML
     expect(again.body(r.id)).toMatchObject({ bodyText: 'old text', hasHtml: false, bodyFetched: false });
     again.setBody('a1', 'INBOX', 1, { text: 'old text', html: '<p>new</p>' });
@@ -505,10 +514,11 @@ describe('mail html: the store keeps html apart (schema v2)', () => {
     s.setBody('a1', 'INBOX', 2, { text: 'has html', html: '<p>x</p>' });
     s.close();
     const raw = new DatabaseSync(f);
+    dropV4(raw);
     raw.exec('PRAGMA user_version = 2');
     raw.close();
     const again = new MailStore(f);
-    expect(again.schemaVersion()).toBe(3);
+    expect(again.schemaVersion()).toBe(SCHEMA_VERSION);
     expect(again.body(a.id)).toMatchObject({ bodyText: 'text only', bodyFetched: false });
     expect(again.body(b.id)).toMatchObject({ bodyText: 'has html', bodyFetched: true, hasHtml: true });
     again.close();

@@ -185,11 +185,14 @@ imap.sasl.plain.password.raw = "g"
     expect(plan.skipped.find((s) => s.name === 'starttls')!.reason).toContain('implicit-TLS');
   });
 
-  it('imports an implicit-IMAP account whose SEND needs STARTTLS, flagged read-only', () => {
+  it('imports an implicit-IMAP account whose SEND uses STARTTLS with its SMTP server, and no "read-only" note (ticket 38)', () => {
     const plan = buildImportPlan(parsed());
     const g = plan.imported.find((x) => x.account.id === 'gmailish')!;
     expect(g.account.host).toBe('imap.gmail.com');
-    expect(g.notes.join(' ')).toMatch(/SENDING is unavailable/);
+    expect(g.account).toMatchObject({ smtpHost: 'smtp.gmail.com', smtpPort: 587, smtpTls: 'starttls' });
+    expect(g.notes.join(' ')).not.toMatch(/SENDING is unavailable/);
+    const w = plan.imported.find((x) => x.account.id === 'work')!;
+    expect(w.account).toMatchObject({ smtpHost: 'smtp.example.com', smtpPort: 465, smtpTls: 'implicit' });
   });
 
   it('an account id that cannot be an id is reported, not mangled into one', () => {
@@ -241,12 +244,15 @@ describe('himalaya import (37b) — a config shaped like the real one (fixture)'
     for (const want of ['bob', 'carol', 'team-a', 'team-b', 'team-c', 'team-d']) expect(ids).toContain(want);
   });
 
-  it.skipIf(!has)('the Gmail accounts are flagged for their send path, the James ones are not', () => {
+  it.skipIf(!has)('every account carries its SMTP server; the Gmail ones send over STARTTLS and none is "read-only" (ticket 38)', () => {
     const plan = buildImportPlan(parseHimalayaConfig(readFileSync(path, 'utf8')));
     const gmail = plan.imported.find((x) => x.account.id === 'bob')!;
     expect(gmail.account.host).toBe('imap.gmail.com');
-    expect(gmail.notes.join(' ')).toMatch(/SENDING is unavailable/);
-    const james = plan.imported.find((x) => x.account.id === 'alice')!;
-    expect(james.notes.join(' ')).not.toMatch(/SENDING is unavailable/);
+    expect(gmail.account.smtpTls).toBe('starttls');
+    expect(gmail.account.smtpPort).toBe(587);
+    for (const e of plan.imported) {
+      expect(e.account.smtpHost, e.account.id).toBeTruthy();
+      expect(e.notes.join(' '), e.account.id).not.toMatch(/SENDING is unavailable/);
+    }
   });
 });

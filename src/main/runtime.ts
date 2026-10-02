@@ -6,6 +6,7 @@
 
 import { app, BrowserWindow, dialog, safeStorage, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
 import { loadSettings, saveSettings, type Role, type Settings } from '../core/config';
@@ -84,6 +85,16 @@ let mailController: MailController | null = null;
 let mailView: MailHtmlView | null = null;
 /** TEST ONLY. Bypasses the policy engine and judge so tests can show the egress layer holds alone. */
 const POLICY_DISABLED = testEnv('GUARDED_UNSAFE_DISABLE_POLICY') === '1';
+/** TEST ONLY: the PEM of a throwaway CA for the e2e fake mail servers on 127.0.0.1 (see socket.ts testCa) */
+function mailTestCa(): string | undefined {
+  const file = testEnv('GUARDED_TEST_MAIL_CA');
+  if (!file) return undefined;
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
 
 const { profile, dir: profileDir, guard, feeds } = ctx;
 // read synchronously, before any await: this runtime only ever uses ITS profile's partition
@@ -953,7 +964,14 @@ const api = {
   mail(): MailController {
     mailController ??= new MailController({
       profileDir,
-      canConnect: () => (current ? { ok: false, reason: 'an agent task is running: mail will not connect while it does' } : { ok: true }),
+      // rule 4: no mail network activity (sync, fetch, flag, move, SEND, APPEND) while an agent task runs
+      // or a confirmation dialog is pending
+      canConnect: () =>
+        current
+          ? { ok: false, reason: 'an agent task is running: mail will not connect while it does' }
+          : broker.pendingCount() > 0
+            ? { ok: false, reason: 'a confirmation is pending: mail will not connect until it is answered' }
+            : { ok: true },
       audit: (kind, detail) => audit.write(kind as Parameters<AuditLog['write']>[0], detail),
       sendUnread: (n) => {
         mailUnreadCount = Math.max(0, Math.floor(n) || 0);
@@ -961,7 +979,9 @@ const api = {
       },
       // the real backend name, so "no keyring" names what Electron actually reports
       safeStorage,
-    
+      // TEST ONLY (GUARDED_TEST=1, unpackaged): trust a throwaway CA for loopback fake mail servers;
+      // certificate verification itself stays on
+      testTlsCa: mailTestCa(),
     });
     return mailController;
   },
@@ -978,7 +998,12 @@ const api = {
         api.openUrl(url);
         sendUI('shortcut', 'close-mail');
       },
-      canConnect: () => (current ? { ok: false, reason: 'an agent task is running: remote content stays blocked until it ends' } : { ok: true }),
+      canConnect: () =>
+        current
+          ? { ok: false, reason: 'an agent task is running: remote content stays blocked until it ends' }
+          : broker.pendingCount() > 0
+            ? { ok: false, reason: 'a confirmation is pending: remote content stays blocked until it is answered' }
+            : { ok: true },
       chromeBusy: () => !!tabs?.overlayOn || broker.pendingCount() > 0,
       reputationListed: (url) => !!reputation.check(url)?.listed,
       audit: (detail) => audit.write('mail' as Parameters<AuditLog['write']>[0], detail),

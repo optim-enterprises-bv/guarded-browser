@@ -43,4 +43,16 @@ export function register(on: (channel: string, fn: Handler) => void, rt: Runtime
   on('mail:account-test', (_e, id: unknown) => mailCtrl().testAccount(String(id ?? '')));
   on('mail:import-scan', (_e, path: unknown) => mailCtrl().importScan(typeof path === 'string' ? path : undefined));
   on('mail:import-apply', (_e, path: unknown, ids: unknown) => mailCtrl().importApply(typeof path === 'string' ? path : undefined, ids));
+  // ---------- ticket 38: compose / drafts / outbox / send. Reached ONLY through this sender-resolved
+  // table (main.ts answers a tab, a web panel or the start page with "unknown sender"); the agent has
+  // no tool for any of it. Every send passes the controller's gate (task running / confirmation pending).
+  on('mail:compose-init', (_e, kind: unknown, id: unknown) => mailCtrl().composeInit(kind, id));
+  on('mail:draft-save', (_e, draft: unknown) => mailCtrl().draftSave(draft));
+  on('mail:drafts', (_e, accountId: unknown) => mailCtrl().drafts(accountId));
+  on('mail:draft-get', (_e, id: unknown) => mailCtrl().draftGet(id));
+  on('mail:draft-delete', (_e, id: unknown) => mailCtrl().draftDelete(id));
+  on('mail:send', (_e, draft: unknown) => mailCtrl().send(draft));
+  on('mail:outbox', (_e, accountId: unknown) => mailCtrl().outbox(accountId));
+  on('mail:outbox-retry', (_e, id: unknown) => mailCtrl().retry(id));
+  on('mail:outbox-delete', (_e, id: unknown) => mailCtrl().outboxDelete(id));
 }

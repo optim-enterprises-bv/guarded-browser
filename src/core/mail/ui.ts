@@ -228,6 +228,10 @@ export interface TreeSection {
 
 export const SEARCH_OPERATORS: SearchOperator[] = ['and', 'or', 'not'];
 
+/** tree row ids of the two local roles (ticket 38) */
+export const LOCAL_DRAFTS = 'local:drafts';
+export const LOCAL_OUTBOX = 'local:outbox';
+
 const ZERO: TreeCounts = { unseen: 0, unread: 0, total: 0 };
 
 /**
@@ -244,6 +248,8 @@ export function buildFolderTree(
   labels: Array<{ id: string; name: string }> = [],
   filters: Array<{ id: string; name: string }> = [],
   view: ViewFilter = DEFAULT_VIEW,
+  /** ticket 38: local drafts and the outbox (failed = items waiting for a Retry) */
+  local: { drafts: number; outbox: number; outboxFailed: number } = { drafts: 0, outbox: 0, outboxFailed: 0 },
 ): TreeSection[] {
   const byPath = new Map(counts.map((c) => [c.folder, c.counts]));
   const hidden = hiddenFolders(view, folders);
@@ -284,8 +290,10 @@ export function buildFolderTree(
     { kind: 'view', id: 'view:unread', label: 'Unread', counts: allCounts(counts).unreadPart, view: 'unread', depth: 1 },
     roleRow('inbox', 'Received', 'all'),
     roleRow('sent', 'Sent'),
-    roleRow('drafts', 'Drafts'),
-    roleRow('outbox', 'Outbox'),
+    // Drafts and Outbox are LOCAL (ticket 38): the rows open the store's drafts / outbox, and a server
+    // Drafts folder's messages are listed under the same row
+    { ...roleRow('drafts', 'Drafts'), id: LOCAL_DRAFTS, counts: { ...sumFor('drafts'), total: sumFor('drafts').total + local.drafts } },
+    { ...roleRow('outbox', 'Outbox'), id: LOCAL_OUTBOX, counts: { unseen: local.outboxFailed, unread: 0, total: local.outbox } },
     roleRow('junk', 'Spam'),
     roleRow('trash', 'Trash'),
     roleRow('archive', 'Archive'),

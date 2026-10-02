@@ -457,6 +457,58 @@ Security:
 * **Profiles**: A's history and bookmarks are not visible from B (also when B sends A's profile
   id), and deleting a profile deletes both files (tested).
 
+### Mail
+Mail is a full-width panel in the browser window (the rail's envelope, **Ctrl+Shift+M**), per
+profile: the message store is `mail.sqlite` (0600) in the profile's app-state directory, passwords
+live in a separate encrypted secret store (a master passphrase unless an OS keyring is available),
+and both are deleted with the profile. Accounts are added by hand or imported from a himalaya
+config (`password.cmd` is reported, never executed). IMAP is implicit TLS (993) only; bodies are
+fetched when a message is opened; HTML mail is shown in a locked-down view (JavaScript off, own
+in-memory session, every request blocked unless you press *Load External Content*).
+
+**Sending** (ticket 38):
+* **Compose** (toolbar button, or **Ctrl+N** inside the mail panel — Ctrl+N is not bound elsewhere,
+  and a remapped Ctrl+N keeps its own action), **Reply / Reply All / Forward** in the reading pane,
+  and the quick-reply strip under a message (*Write a quick reply here* + *Send*, with *Include
+  Quoted Text*). The compose form replaces the reading pane (the HTML view is hidden while it is
+  open): From (account), To, Cc, Bcc (toggle), Subject, text, Send / Save Draft / Discard.
+* **Drafts** autosave locally (debounced) and are listed under *Drafts* with the server's Drafts
+  folder. **Send** puts the message in the local **Outbox** and sends it; a failure keeps it there
+  with the error and a **Retry** button (transient failures also retry automatically with backoff).
+  The Outbox survives a restart; after a restart nothing is re-sent until you press Retry, and a
+  message that was mid-send when the app stopped says it may or may not have been delivered.
+* After a successful send a copy is **APPENDed to Sent** — except on Gmail, which files sent mail
+  itself (an APPEND would duplicate it). A failed APPEND does not fail the send; it is reported.
+* **SMTP security**: implicit TLS (465) or **STARTTLS (587), strictly**: the server must advertise
+  STARTTLS (otherwise the account is refused for sending — there is no plaintext fallback), the
+  upgrade verifies the certificate (TLS ≥ 1.2, SNI, no switch to disable verification), every
+  capability seen before TLS is discarded, EHLO is sent again, and only then AUTH (PLAIN, else
+  LOGIN; XOAUTH2 for an OAuth account with a current token — token refresh is not wired for sending,
+  so an expired OAuth account is refused with that message). Bytes the server sends between "ready to
+  start TLS" and the handshake (STARTTLS injection) fail the send. Plaintext SMTP and port 25 are
+  refused. A rejected recipient aborts the whole send and is reported per recipient; the server's
+  SIZE and a 25 MB cap are enforced on the byte size; every step has a timeout.
+* **Messages are built strictly**: a line break in a subject, name or address is refused (not
+  silently stripped), addresses go through a strict linear parser, Bcc is envelope-only (never a
+  header), non-ASCII subjects and names are RFC 2047 encoded-words, the body is UTF-8
+  quoted-printable, replies carry In-Reply-To / References and `Re: ` / `Fwd: ` without stacking.
+* **Divergence from Vivaldi: plain text only in v1.** There is no rich-text / HTML compose and no
+  inline images. Quoting and forwarding use the original's stored *text* body, never its HTML.
+
+Security:
+* **The agent cannot read, compose or send mail.** There is no planner tool for mail; the mail
+  channels exist only on the chrome window's sender-resolved IPC table (a tab gets `unknown
+  sender`, tested), and a structural test asserts that nothing the agent, the planner, the tab
+  driver or the tab preload imports can reach the SMTP / compose / mail-controller code. Nothing in
+  a page or a message can fill the compose fields (a `mailto:` link in an HTML message is ignored).
+* **No mail network activity during an agent task or while a confirmation is pending**: sync, body
+  fetch, flag / move, send and the Sent APPEND are all refused. A message sent during a task stays in
+  the Outbox with the reason and goes out **only** when you press Send / Retry after the task —
+  nothing queued during a task is flushed automatically, and a task starting cancels every pending
+  automatic retry.
+* **Every send is audited**: account, recipient *count* and *domains*, byte size, result (and the
+  Sent copy's outcome) — never the body, the subject or a full address.
+
 ### Split view (tab tiling)
 Tile 2-4 tabs **side by side**, **stacked** or as a **grid** (3 tabs: two on top, one below; 4: 2x2).
 Select tabs with **Ctrl+click** in the tab strip, then use the **Tile** toolbar button (layout from the

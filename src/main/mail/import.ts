@@ -12,9 +12,9 @@
 //   * It reads ONE file path given by the caller and parses a strict subset of TOML. No `eval`, no
 //     dynamic key paths, no command execution — including for `password.cmd`, which is REPORTED and
 //     never run (running a shell command from a config file is a capability this app does not want).
-//   * STARTTLS accounts are imported and MARKED, not dropped: this build only opens implicit-TLS
-//     sockets (see `socket.ts`), so a `smtp://…:587` account is read-only until that changes. Saying
-//     so per account beats a sync that mysteriously fails.
+//   * The SMTP server is imported with the account (ticket 38): `smtps://` is implicit TLS (465) and
+//     `smtp://…:587` is a STRICT STARTTLS (src/core/mail/smtp.ts), so both send. An IMAP server that
+//     needs STARTTLS is still SKIPPED with the reason: this build opens implicit-TLS IMAP only.
 //   * An account with no password is imported with no credential and reported as such; the user is
 //     expected to fill it in, and the UI says which ones need it.
 
@@ -191,9 +191,6 @@ export function buildImportPlan(parsed: ParsedConfig, opts: { accountIdPrefix?: 
       skipped.push({ name: p.name, reason: `IMAP here uses ${p.imap.tls} on port ${p.imap.port}; this build opens implicit-TLS servers only (993/995)` });
       continue;
     }
-    if (p.smtp.tls !== 'implicit') {
-      notes.push(`reading works; SENDING is unavailable because SMTP uses ${p.smtp.tls} on port ${p.smtp.port} and this build opens implicit-TLS servers only`);
-    }
     if (!p.password) {
       notes.push(p.passwordCmd ? 'no literal password in the config (it uses a password command, which is never executed): set the password in the account list' : 'no password in the config: set it in the account list');
     }
@@ -218,6 +215,10 @@ export function buildImportPlan(parsed: ParsedConfig, opts: { accountIdPrefix?: 
         trashFolder: p.folders.trash,
         junkFolder: 'Junk',
         archiveFolder: 'Archive',
+        smtpHost: p.smtp.host,
+        smtpPort: p.smtp.port,
+        // parseServerUrl never returns 'none'; SMTP is implicit (smtps://) or STARTTLS (smtp://)
+        smtpTls: p.smtp.tls === 'starttls' ? 'starttls' : 'implicit',
       },
       secret,
       notes,

@@ -121,6 +121,7 @@
       <div id="mail-toolbar">
         <button id="m-check" data-testid="mail-sync" title="Check this account for messages">&#x21bb;</button>
         <button id="m-check-all" data-testid="mail-sync-all" title="Check every account">&#x21c9;</button>
+        <button id="m-compose-btn" data-testid="mail-compose" title="Compose a new message (Ctrl+N)">&#x270E; Compose</button>
         <button id="m-import" data-testid="mail-import" title="Import accounts from your himalaya config">&#x21e5; Import</button>
         <button id="m-flag" data-testid="mail-flag-filter" title="Flagged only">&#x2691;</button>
         <input id="m-search" data-testid="mail-search" type="search" placeholder="Mail Search" autocomplete="off" spellcheck="false" />
@@ -152,11 +153,27 @@
           <div id="m-body" data-testid="mail-body"></div>
           <div id="m-attachments" data-testid="mail-attachments"></div>
           <div id="m-composer">
-            <textarea id="m-reply" data-testid="mail-compose-box" placeholder="Write a quick reply here" spellcheck="false"></textarea>
+            <textarea id="m-reply" data-testid="mail-compose-box" placeholder="Write a quick reply here" spellcheck="true"></textarea>
             <div id="m-compose-foot">
-              <button id="m-send" data-testid="mail-send" disabled title="Sending ships in ticket 38 (compose, drafts, outbox)">&#x27A4; Send</button>
-              <label class="muted small"><input id="m-quoted" type="checkbox" /> Include Quoted Text</label>
+              <button id="m-send" data-testid="mail-send" disabled title="Reply to the open message">&#x27A4; Send</button>
+              <label class="muted small"><input id="m-quoted" type="checkbox" data-testid="mail-quick-quoted" /> Include Quoted Text</label>
             </div>
+          </div>
+          <div id="m-compose" class="hidden" data-testid="mail-compose-form">
+            <div class="c-row"><label for="m-c-from">From</label><select id="m-c-from" data-testid="compose-from"></select></div>
+            <div class="c-row"><label for="m-c-to">To</label><input id="m-c-to" data-testid="compose-to" autocomplete="off" spellcheck="false" placeholder="Name &lt;name@example.com&gt;, other@example.com" /></div>
+            <div class="c-row"><label for="m-c-cc">Cc</label><input id="m-c-cc" data-testid="compose-cc" autocomplete="off" spellcheck="false" /><button id="m-c-bcc-toggle" class="link" data-testid="compose-bcc-toggle" title="Show the Bcc field">Bcc</button></div>
+            <div id="m-c-bcc-row" class="c-row hidden"><label for="m-c-bcc">Bcc</label><input id="m-c-bcc" data-testid="compose-bcc" autocomplete="off" spellcheck="false" /></div>
+            <div class="c-row"><label for="m-c-subject">Subject</label><input id="m-c-subject" data-testid="compose-subject" autocomplete="off" /></div>
+            <textarea id="m-c-body" data-testid="compose-body" spellcheck="true"></textarea>
+            <div class="c-foot">
+              <button id="m-c-send" data-testid="compose-send">&#x27A4; Send</button>
+              <button id="m-c-save" data-testid="compose-save">Save Draft</button>
+              <button id="m-c-discard" class="link" data-testid="compose-discard">Discard</button>
+              <label id="m-c-quoted-label" class="muted small"><input id="m-c-quoted" type="checkbox" data-testid="compose-quoted" /> Include Quoted Text</label>
+              <span id="m-c-note" class="muted small" data-testid="compose-note"></span>
+            </div>
+            <p id="m-c-msg" class="small" data-testid="compose-msg"></p>
           </div>
         </div>
       </div>
@@ -177,7 +194,7 @@
         <div class="modal-card wide">
           <h2>Add mail account</h2>
           <div class="grid">
-            <label>Name <input id="m-a-name" data-testid="acct-name" placeholder="Work" /></label>
+            <label>Your name (shown to recipients) <input id="m-a-name" data-testid="acct-name" placeholder="Ada Lovelace" /></label>
             <label>Email address <input id="m-a-address" data-testid="acct-address" placeholder="me@example.com" /></label>
             <label>Server <input id="m-a-host" data-testid="acct-host" placeholder="imap.example.com" /></label>
             <label>Port <input id="m-a-port" data-testid="acct-port" type="number" value="993" /></label>
@@ -185,8 +202,12 @@
             <label>Password / app password <input id="m-a-pass" data-testid="acct-pass" type="password" autocomplete="new-password" /></label>
             <label>Sent folder <input id="m-a-sent" data-testid="acct-sent" placeholder="Sent" /></label>
             <label>Trash folder <input id="m-a-trash" data-testid="acct-trash" placeholder="Trash" /></label>
+            <label>SMTP server <input id="m-a-smtp-host" data-testid="acct-smtp-host" placeholder="same as the server" /></label>
+            <label>SMTP port <input id="m-a-smtp-port" data-testid="acct-smtp-port" type="number" value="465" /></label>
+            <label>SMTP security <select id="m-a-smtp-tls" data-testid="acct-smtp-tls"><option value="implicit">TLS (465)</option><option value="starttls">STARTTLS (587)</option></select></label>
+            <label>SMTP password (if different) <input id="m-a-smtp-pass" data-testid="acct-smtp-pass" type="password" autocomplete="new-password" /></label>
           </div>
-          <p class="small muted">Only an implicit-TLS server (993/995) can be opened: STARTTLS is refused rather than half-implemented, and certificate verification is always on.</p>
+          <p class="small muted">IMAP: only an implicit-TLS server (993/995) can be opened. SMTP: implicit TLS (465) or STARTTLS (587) &#x2014; STARTTLS is strict: the server must offer it and there is no plaintext fallback. Certificate verification is always on.</p>
           <div id="m-acct-import">
             <button id="m-import-scan" data-testid="mail-import-scan">Import accounts from himalaya&#x2026;</button>
             <div id="m-import-list" data-testid="mail-import-list" class="hidden"></div>

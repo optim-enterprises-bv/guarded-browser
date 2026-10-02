@@ -24,6 +24,8 @@ export const MAX_FOLDERS = 8;
 export const TOKEN_URL_RE = /^https:\/\//i;
 
 export const TlsModeSchema = z.enum(['implicit', 'starttls', 'none']);
+/** SMTP (ticket 38) has no plaintext mode */
+export const SmtpTlsSchema = z.enum(['implicit', 'starttls']);
 export const AccountKindSchema = z.enum(['imap', 'pop3', 'local']);
 export const AuthKindSchema = z.enum(['password', 'app-password', 'oauth']);
 
@@ -42,6 +44,10 @@ export const MailAccountSchema = z
     trashFolder: z.string().max(255),
     junkFolder: z.string().max(255),
     archiveFolder: z.string().max(255),
+    /** the submission server (ticket 38); normalizeAccount always fills these */
+    smtpHost: z.string().max(MAX_HOST).optional(),
+    smtpPort: z.number().int().min(1).max(65535).optional(),
+    smtpTls: SmtpTlsSchema.optional(),
     /** OAuth only: where the tokens come from. The client secret is optional (public clients). */
     oauth: z
       .object({
@@ -82,6 +88,9 @@ export const ACCOUNT_KEYS = new Set([
   'trashFolder',
   'junkFolder',
   'archiveFolder',
+  'smtpHost',
+  'smtpPort',
+  'smtpTls',
   'oauth',
   'clientSecret',
 ]);
@@ -102,12 +111,21 @@ export function normalizeAccount(input: unknown): Result<{ account: MailAccount 
   const tls = String(src.tls ?? (kind === 'local' ? 'none' : 'implicit')) as MailAccount['tls'];
   const authKind = String(src.authKind ?? 'password') as MailAccount['authKind'];
   const port = Number(src.port) || DEFAULT_PORTS[kind] || 993;
+  const host = String(src.host ?? '').trim().slice(0, MAX_HOST);
+  const smtpTlsRaw = String(src.smtpTls ?? 'implicit');
+  if (smtpTlsRaw !== 'implicit' && smtpTlsRaw !== 'starttls') {
+    return { ok: false, error: 'SMTP security must be implicit TLS (465) or STARTTLS (587): plaintext sending is refused' };
+  }
+  const smtpTls = smtpTlsRaw as 'implicit' | 'starttls';
+  const smtpPort = Number(src.smtpPort) || (smtpTls === 'starttls' ? 587 : 465);
+  if (smtpPort === 25) return { ok: false, error: 'SMTP port 25 is server-to-server relay, not submission: use 465 (implicit TLS) or 587 (STARTTLS)' };
+  const smtpHost = String(src.smtpHost ?? '').trim().slice(0, MAX_HOST) || host;
   const candidate = {
     id: String(src.id ?? '').trim(),
     name: String(src.name ?? '').trim().slice(0, MAX_ACCOUNT_NAME),
     address: String(src.address ?? '').trim().slice(0, 320),
     kind,
-    host: String(src.host ?? '').trim().slice(0, MAX_HOST),
+    host,
     port,
     tls,
     username: String(src.username ?? '').trim().slice(0, MAX_USERNAME),
@@ -116,6 +134,9 @@ export function normalizeAccount(input: unknown): Result<{ account: MailAccount 
     trashFolder: String(src.trashFolder ?? '').trim().slice(0, 255),
     junkFolder: String(src.junkFolder ?? '').trim().slice(0, 255),
     archiveFolder: String(src.archiveFolder ?? '').trim().slice(0, 255),
+    smtpHost,
+    smtpPort,
+    smtpTls,
     ...(src.oauth && typeof src.oauth === 'object'
       ? {
           oauth: {
@@ -139,6 +160,7 @@ export function normalizeAccount(input: unknown): Result<{ account: MailAccount 
   if (!a.id) return { ok: false, error: 'an account needs an id' };
   if (a.kind !== 'local' && !a.host) return { ok: false, error: 'a mail server host is required' };
   if (a.kind !== 'local' && /[\s/@\\]/.test(a.host)) return { ok: false, error: 'the host must be a bare hostname or IP address' };
+  if (a.smtpHost && /[\s/@\\]/.test(a.smtpHost)) return { ok: false, error: 'the SMTP server must be a bare hostname or IP address' };
   if (a.authKind === 'oauth') {
     if (a.kind === 'local' || a.kind === 'pop3') return { ok: false, error: 'OAuth is only supported for IMAP accounts in this version' };
     if (!a.oauth?.clientId) return { ok: false, error: 'an OAuth account needs a client id' };

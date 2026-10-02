@@ -37,6 +37,25 @@ let searchQuery = '';
 let flagOnly = false;
 /** the message the HTML view is showing (0 = the text body is in use) */
 let htmlShownId = 0;
+/** the folders of the selected account, as mail:folders last returned them (for the server Drafts) */
+let lastFolders: AnyRec[] = [];
+
+/**
+ * The compose form (ticket 38), when it is open. It REPLACES the reading pane, and the HTML view is
+ * hidden for as long as it is open: that view is a native view drawn over this document and would
+ * cover the form. Every field is what the user typed (or what main prefilled from the STORED message
+ * for a reply); nothing from a page can reach it — no page has a channel to this document.
+ */
+interface ComposeState {
+  draftId: string;
+  mode: 'new' | 'reply' | 'replyAll' | 'forward';
+  refMessage: number;
+}
+let composing: ComposeState | null = null;
+let autosaveTimer = 0;
+const AUTOSAVE_MS = 800;
+const LOCAL_DRAFTS = 'local:drafts';
+const LOCAL_OUTBOX = 'local:outbox';
 
 // ---------------------------------------------------------------- DOM helpers (no server string is markup)
 
@@ -91,6 +110,7 @@ async function refreshTree() {
     return;
   }
   const data = await gb().invoke('mail:folders', selectedAccount);
+  lastFolders = data.folders ?? [];
   const tree = $('m-tree');
   tree.replaceChildren();
   for (const section of data.tree ?? []) {
@@ -116,6 +136,8 @@ async function refreshTree() {
       r.onclick = () => {
         selectedFolder = row.id;
         selectedMessageId = 0;
+        // the quick-reply strip replies to the OPEN message; there is none now
+        ($('m-send') as HTMLButtonElement).disabled = true;
         void refreshTree();
         void refreshList();
       };
@@ -130,6 +152,8 @@ async function refreshList() {
     $('m-rows').replaceChildren(el('p', 'muted small', 'No mail account configured.'));
     return;
   }
+  if (!searchQuery && selectedFolder === LOCAL_DRAFTS) return renderDrafts();
+  if (!searchQuery && selectedFolder === LOCAL_OUTBOX) return renderOutbox();
   const data = searchQuery
     ? await gb().invoke('mail:search', searchQuery, { accountId: selectedAccount })
     : await gb().invoke('mail:list', { accountId: selectedAccount, folder: folderPathFor(selectedFolder) });
@@ -139,27 +163,111 @@ async function refreshList() {
   $('m-search-state').textContent = data.refused ? data.refused : '';
   const visible = (data.rows ?? []).filter((r: AnyRec) => !flagOnly || r.flagged);
   if (!visible.length) rows.append(el('p', 'muted small', searchQuery ? 'No matches.' : 'No messages in this folder.'));
-  for (const r of visible) {
-    const row = el('div', `row${r.unread ? ' unread' : ''}${r.id === selectedMessageId ? ' selected' : ''}`);
-    row.dataset.testid = 'mail-row';
-    row.dataset.messageId = String(r.id);
+  for (const r of visible) rows.append(messageRow(r));
+}
+
+function messageRow(r: AnyRec): HTMLElement {
+  const row = el('div', `row${r.unread ? ' unread' : ''}${r.id === selectedMessageId ? ' selected' : ''}`);
+  row.dataset.testid = 'mail-row';
+  row.dataset.messageId = String(r.id);
+  const top = el('div', 'top');
+  top.append(el('span', 'from', r.from));
+  top.append(el('span', 'time', r.time));
+  const subject = el('div', 'subject', r.subject);
+  const preview = el('div', 'preview', r.preview || '');
+  const badges = el('div', 'badges');
+  if (r.threadCount > 1) badges.append(el('span', undefined, `\u2261 ${r.threadCount}`));
+  if (r.flagged) badges.append(el('span', undefined, '\u2691'));
+  if (r.hasAttachments) badges.append(el('span', undefined, '\u{1f4ce}'));
+  row.append(top, subject, preview, badges);
+  row.onclick = () => {
+    selectedMessageId = r.id;
+    void openMessage(r.id);
+    void refreshList();
+  };
+  return row;
+}
+
+/** Drafts: the local ones (ticket 38), then any messages in the server's Drafts folder. */
+async function renderDrafts() {
+  const data = await gb().invoke('mail:drafts', selectedAccount);
+  const rows = $('m-rows');
+  rows.replaceChildren();
+  const local: AnyRec[] = data?.drafts ?? [];
+  const server = lastFolders.find((f) => f.kind === 'drafts');
+  const remote = server ? await gb().invoke('mail:list', { accountId: selectedAccount, folder: server.path }) : { rows: [] };
+  $('m-count').textContent = `${local.length + (remote.rows?.length ?? 0)} drafts`;
+  if (!local.length && !remote.rows?.length) rows.append(el('p', 'muted small', 'No drafts.'));
+  for (const d of local) {
+    const row = el('div', 'row');
+    row.dataset.testid = 'draft-row';
+    row.dataset.draftId = d.id;
     const top = el('div', 'top');
-    top.append(el('span', 'from', r.from));
-    top.append(el('span', 'time', r.time));
-    const subject = el('div', 'subject', r.subject);
-    const preview = el('div', 'preview', r.preview || '');
-    const badges = el('div', 'badges');
-    if (r.threadCount > 1) badges.append(el('span', undefined, `\u2261 ${r.threadCount}`));
-    if (r.flagged) badges.append(el('span', undefined, '\u2691'));
-    if (r.hasAttachments) badges.append(el('span', undefined, '\u{1f4ce}'));
-    row.append(top, subject, preview, badges);
-    row.onclick = () => {
-      selectedMessageId = r.id;
-      void openMessage(r.id);
-      void refreshList();
+    top.append(el('span', 'from', d.to ? `To: ${d.to}` : '(no recipients)'));
+    top.append(el('span', 'time', new Date(d.updatedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })));
+    row.append(top, el('div', 'subject', d.subject || '(no subject)'), el('div', 'preview', 'Draft (saved on this computer)'));
+    row.onclick = async () => {
+      const r = await gb().invoke('mail:draft-get', d.id);
+      if (!r?.ok) return setStatus(r?.error ?? 'could not open the draft');
+      await openCompose({ ...r.draft, draftId: r.draft.id });
     };
     rows.append(row);
   }
+  for (const r of remote.rows ?? []) rows.append(messageRow(r));
+}
+
+/** The Outbox: queued and failed messages, each with its error and a Retry. */
+async function renderOutbox() {
+  const data = await gb().invoke('mail:outbox', selectedAccount);
+  const rows = $('m-rows');
+  rows.replaceChildren();
+  const items: AnyRec[] = data?.items ?? [];
+  $('m-count').textContent = `${items.length} in the Outbox`;
+  if (!items.length) rows.append(el('p', 'muted small', 'The Outbox is empty.'));
+  for (const o of items) {
+    const row = el('div', `row outbox${o.status === 'failed' ? ' failed' : ''}`);
+    row.dataset.testid = 'outbox-row';
+    row.dataset.outboxId = o.id;
+    row.dataset.status = o.sending ? 'sending' : o.status;
+    const top = el('div', 'top');
+    top.append(el('span', 'from', `To ${o.recipients} recipient(s)${o.domains ? ` at ${o.domains.split(',').join(', ')}` : ''}`));
+    row.append(top, el('div', 'subject', o.subject || '(no subject)'));
+    const st = el('div', 'status', o.sending ? 'sending\u2026' : o.status === 'failed' ? o.error || 'failed' : 'queued');
+    st.dataset.testid = 'outbox-error';
+    row.append(st);
+    const actions = el('div', 'row-actions');
+    const retry = button('outbox-retry', 'Retry', 'Send this message now');
+    retry.onclick = async (e) => {
+      e.stopPropagation();
+      setStatus('sending\u2026');
+      const r = await gb().invoke('mail:outbox-retry', o.id);
+      setStatus(sendOutcome(r));
+      await refreshTree();
+      await refreshList();
+    };
+    const del = button('outbox-delete', 'Delete', 'Delete this message without sending it');
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      const r = await gb().invoke('mail:outbox-delete', o.id);
+      if (r && r.ok === false) setStatus(r.error ?? 'could not delete');
+      await refreshTree();
+      await refreshList();
+    };
+    actions.append(retry, del);
+    row.append(actions);
+    rows.append(row);
+  }
+}
+
+/** One status line for a send / retry result. */
+function sendOutcome(r: AnyRec): string {
+  if (r?.ok) {
+    const copy = r.sentCopy === 'failed' ? ` (the copy in Sent could not be saved: ${r.sentCopyError ?? 'unknown error'})` : r.sentCopy === 'skipped' ? ' (the server keeps the copy in Sent)' : '';
+    return `Sent${copy}.`;
+  }
+  if (r?.refused) return `Not sent: ${r.refused}. It is in the Outbox; press Retry when that is over.`;
+  if (r?.queued) return `Not sent: ${r.error ?? 'failed'}. It is in the Outbox.`;
+  return r?.error ?? 'could not send';
 }
 
 /** A tree row id is either a folder path or a view/label id; only a path is a folder. */
@@ -169,6 +277,8 @@ function folderPathFor(id: string): string {
 }
 
 async function openMessage(id: number) {
+  // opening a message leaves the compose form; what was typed is kept as a draft
+  if (composing) await leaveCompose(true);
   const m = await gb().invoke('mail:message', id, { markRead: true });
   if (!m?.ok) {
     setStatus(m?.error ?? 'could not open that message');
@@ -205,6 +315,7 @@ async function openMessage(id: number) {
   }
   renderNotice(m, id, !!shown?.hasHtml);
   renderActions(m);
+  ($('m-send') as HTMLButtonElement).disabled = false;
   await refreshState();
 }
 
@@ -239,6 +350,8 @@ let lastRect = '';
 
 function viewRect(): { x: number; y: number; width: number; height: number } | null {
   if (!htmlShownId) return null;
+  // the compose form replaces the reading pane: the native view must not cover it
+  if (composing) return null;
   // the panel (or this section of it) is closed: display:none somewhere up the tree
   if (!$('mail-view').getClientRects().length) return null;
   for (const n of document.querySelectorAll(COVERS)) if (n.getClientRects().length) return null;
@@ -277,11 +390,19 @@ function renderActions(m: AnyRec) {
     b.onclick = async () => {
       const r = await fn();
       if (r && r.ok === false) setStatus(r.error ?? 'that action failed');
-      await refreshList();
+      if (!composing) await refreshList();
     };
     box.append(b);
   };
-  void action('Reply', 'mail-reply', async () => ({ ok: true })); // compose ships in ticket 38
+  const compose = (kind: 'reply' | 'replyAll' | 'forward') => async () => {
+    const r = await gb().invoke('mail:compose-init', kind, m.id);
+    if (!r?.ok) return r;
+    await openCompose(r);
+    return { ok: true };
+  };
+  void action('Reply', 'mail-reply', compose('reply'));
+  void action('Reply All', 'mail-reply-all', compose('replyAll'));
+  void action('Forward', 'mail-forward', compose('forward'));
   void action(m.flagged ? 'Unflag' : 'Flag', 'mail-flag', () => gb().invoke('mail:flags', [m.id], { flagged: !m.flagged }));
   void action(m.readFlag ? 'Mark Unread' : 'Mark Read', 'mail-read', () => gb().invoke('mail:flags', [m.id], { readFlag: !m.readFlag, seen: true }));
   void action('Archive', 'mail-archive', () => gb().invoke('mail:move', [m.id], 'Archive'));
@@ -323,6 +444,7 @@ function renderAccounts() {
       selectedAccount = a.id;
       selectedFolder = '';
       selectedMessageId = 0;
+      ($('m-send') as HTMLButtonElement).disabled = true;
       renderAccounts();
       await refreshTree();
       await refreshList();
@@ -427,7 +549,32 @@ function wire() {
     await refreshTree();
     await refreshList();
   };
-  $('m-send').onclick = () => setStatus('Compose and sending ship in ticket 38 (compose, drafts, outbox).');
+  // the quick-reply strip: a reply to the OPEN message; recipients and subject come from main (the
+  // stored row), the text is what was typed, and the quote (when checked) is added by main from the
+  // stored text body
+  $('m-send').onclick = async () => {
+    const text = ($('m-reply') as HTMLTextAreaElement).value;
+    if (!selectedMessageId) return setStatus('open a message to reply to');
+    if (!text.trim()) return setStatus('write a reply first');
+    const init = await gb().invoke('mail:compose-init', 'reply', selectedMessageId);
+    if (!init?.ok) return setStatus(init?.error ?? 'could not reply');
+    setStatus('sending\u2026');
+    // one send per click: the button is off until the result is back, and main refuses a second
+    // send under the same key while the first is in flight
+    const btn = $('m-send') as HTMLButtonElement;
+    btn.disabled = true;
+    let r: AnyRec;
+    try {
+      r = await gb().invoke('mail:send', { ...init, draftId: `quickreply-${selectedMessageId}`, body: text, includeQuoted: ($('m-quoted') as HTMLInputElement).checked });
+    } finally {
+      btn.disabled = !selectedMessageId;
+    }
+    setStatus(sendOutcome(r));
+    if (r?.ok || r?.queued) ($('m-reply') as HTMLTextAreaElement).value = '';
+    await refreshTree();
+  };
+  $('m-compose-btn').onclick = () => void openCompose({ mode: 'new' });
+  wireCompose();
   // One click from the toolbar: open the account panel and run the scan straight away, so configuring
   // eighteen accounts is not "find the right modal first".
   $('m-import').onclick = () => {
@@ -459,7 +606,14 @@ function wire() {
 
   // account form
   $('m-acct-cancel').onclick = () => $('m-account-form').classList.add('hidden');
+  // the default port follows the security choice, unless the user typed another one
+  $('m-a-smtp-tls').onchange = () => {
+    const port = $('m-a-smtp-port') as HTMLInputElement;
+    const tls = ($('m-a-smtp-tls') as HTMLSelectElement).value;
+    if (port.value === '465' || port.value === '587' || !port.value) port.value = tls === 'starttls' ? '587' : '465';
+  };
   $('m-acct-save').onclick = async () => {
+    const smtpPort = Number(($('m-a-smtp-port') as HTMLInputElement).value) || 0;
     const body = {
       id: ($('m-a-user') as HTMLInputElement).value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').slice(0, 40) || `acct-${Date.now().toString(36)}`,
       name: ($('m-a-name') as HTMLInputElement).value,
@@ -474,12 +628,16 @@ function wire() {
       trashFolder: ($('m-a-trash') as HTMLInputElement).value || 'Trash',
       junkFolder: 'Junk',
       archiveFolder: 'Archive',
+      smtpHost: ($('m-a-smtp-host') as HTMLInputElement).value.trim(),
+      ...(smtpPort ? { smtpPort } : {}),
+      smtpTls: ($('m-a-smtp-tls') as HTMLSelectElement).value,
     };
-    const r = await gb().invoke('mail:account-save', body, { password: ($('m-a-pass') as HTMLInputElement).value });
+    const r = await gb().invoke('mail:account-save', body, { password: ($('m-a-pass') as HTMLInputElement).value, smtpPassword: ($('m-a-smtp-pass') as HTMLInputElement).value });
     $('m-acct-msg').textContent = r?.ok ? 'account saved' : (r?.error ?? 'could not save');
     if (r?.ok) {
       selectedAccount = r.id;
       ($('m-a-pass') as HTMLInputElement).value = '';
+      ($('m-a-smtp-pass') as HTMLInputElement).value = '';
       $('m-account-form').classList.add('hidden');
       await refreshState();
       await refreshTree();
@@ -551,9 +709,160 @@ function wire() {
   };
 }
 
+// ---------------------------------------------------------------- compose (ticket 38)
+
+const input = (id: string) => $(id) as HTMLInputElement;
+
+/** Open the form, filled from a draft, a compose-init reply, or nothing. Replaces the reading pane. */
+async function openCompose(f: AnyRec) {
+  if (composing) await leaveCompose(true);
+  composing = { draftId: String(f.draftId ?? ''), mode: f.mode ?? 'new', refMessage: Number(f.refMessage ?? 0) || 0 };
+  // the HTML view is a native view over this document: hide it for as long as the form is open
+  if (htmlShownId) {
+    htmlShownId = 0;
+    void gb().invoke('mail:view-show', 0);
+  }
+  scheduleViewRect();
+  for (const id of ['m-read-head', 'm-body', 'm-attachments', 'm-composer']) $(id).classList.add('hidden');
+  $('m-compose').classList.remove('hidden');
+  const from = $('m-c-from') as HTMLSelectElement;
+  from.replaceChildren();
+  for (const a of state.accounts ?? []) {
+    const o = el('option', undefined, a.address ? `${a.name ? `${a.name} ` : ''}<${a.address}>` : a.id);
+    o.value = a.id;
+    from.append(o);
+  }
+  from.value = String(f.accountId || selectedAccount || (state.accounts ?? [])[0]?.id || '');
+  input('m-c-to').value = String(f.to ?? '');
+  input('m-c-cc').value = String(f.cc ?? '');
+  input('m-c-bcc').value = String(f.bcc ?? '');
+  $('m-c-bcc-row').classList.toggle('hidden', !f.bcc);
+  input('m-c-subject').value = String(f.subject ?? '');
+  ($('m-c-body') as HTMLTextAreaElement).value = String(f.body ?? '');
+  const reply = composing.mode === 'reply' || composing.mode === 'replyAll';
+  input('m-c-quoted').checked = reply ? f.includeQuoted !== false : false;
+  $('m-c-quoted-label').classList.toggle('hidden', !reply);
+  $('m-c-note').textContent = reply
+    ? 'The original message is quoted below your text when "Include Quoted Text" is checked.'
+    : composing.mode === 'forward'
+      ? 'The original message is added below your text as a forwarded message.'
+      : '';
+  $('m-c-msg').textContent = '';
+  (reply ? ($('m-c-body') as HTMLTextAreaElement) : input('m-c-to')).focus();
+}
+
+function composeFields(): AnyRec {
+  return {
+    draftId: composing?.draftId ?? '',
+    accountId: ($('m-c-from') as HTMLSelectElement).value,
+    mode: composing?.mode ?? 'new',
+    refMessage: composing?.refMessage ?? 0,
+    to: input('m-c-to').value,
+    cc: input('m-c-cc').value,
+    bcc: input('m-c-bcc').value,
+    subject: input('m-c-subject').value,
+    body: ($('m-c-body') as HTMLTextAreaElement).value,
+    includeQuoted: input('m-c-quoted').checked,
+  };
+}
+
+function composeEmpty(f: AnyRec): boolean {
+  return !f.to.trim() && !f.cc.trim() && !f.bcc.trim() && !f.subject.trim() && !f.body.trim();
+}
+
+/** Save the form as a local draft. Silent for the autosave; a typed-nothing form is not saved. */
+async function saveDraft(explicit: boolean): Promise<void> {
+  if (autosaveTimer) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = 0;
+  }
+  if (!composing) return;
+  const f = composeFields();
+  if (!f.draftId && composeEmpty(f)) {
+    if (explicit) $('m-c-msg').textContent = 'nothing to save yet';
+    return;
+  }
+  const c = composing;
+  const r = await gb().invoke('mail:draft-save', f);
+  if (r?.ok && c === composing) c.draftId = r.id;
+  if (composing) $('m-c-msg').textContent = r?.ok ? `Draft saved ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : (r?.error ?? 'could not save the draft');
+  if (explicit) await refreshTree();
+}
+
+/** Close the form; `keep` saves what was typed as a draft first. Restores the reading pane. */
+async function leaveCompose(keep: boolean) {
+  if (keep) await saveDraft(false);
+  if (autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = 0;
+  composing = null;
+  $('m-compose').classList.add('hidden');
+  for (const id of ['m-read-head', 'm-body', 'm-attachments', 'm-composer']) $(id).classList.remove('hidden');
+  scheduleViewRect();
+}
+
+function wireCompose() {
+  // debounced autosave on every edit
+  const onEdit = () => {
+    if (!composing) return;
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    autosaveTimer = window.setTimeout(() => {
+      autosaveTimer = 0;
+      void saveDraft(false);
+    }, AUTOSAVE_MS);
+  };
+  for (const id of ['m-c-to', 'm-c-cc', 'm-c-bcc', 'm-c-subject', 'm-c-body', 'm-c-quoted', 'm-c-from']) {
+    $(id).addEventListener('input', onEdit);
+    $(id).addEventListener('change', onEdit);
+  }
+  $('m-c-bcc-toggle').onclick = () => {
+    const row = $('m-c-bcc-row');
+    row.classList.toggle('hidden');
+    if (!row.classList.contains('hidden')) input('m-c-bcc').focus();
+  };
+  $('m-c-save').onclick = () => void saveDraft(true);
+  $('m-c-discard').onclick = async () => {
+    const id = composing?.draftId;
+    if (id) await gb().invoke('mail:draft-delete', id);
+    await leaveCompose(false);
+    setStatus('draft discarded');
+    if (selectedMessageId) await openMessage(selectedMessageId);
+    await refreshTree();
+    await refreshList();
+  };
+  $('m-c-send').onclick = async () => {
+    if (!composing) return;
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    autosaveTimer = 0;
+    const btn = $('m-c-send') as HTMLButtonElement;
+    if (btn.disabled) return;
+    const f = composeFields();
+    $('m-c-msg').textContent = 'sending\u2026';
+    btn.disabled = true;
+    let r: AnyRec;
+    try {
+      r = await gb().invoke('mail:send', f);
+    } finally {
+      btn.disabled = false;
+    }
+    // queued (refused by the gate, or a send failure): the message now lives in the Outbox, not in
+    // the form; a validation error keeps the form open with the reason
+    if (r?.ok || r?.queued) {
+      await leaveCompose(false);
+      setStatus(sendOutcome(r));
+      if (selectedMessageId) await openMessage(selectedMessageId);
+      await refreshTree();
+      await refreshList();
+    } else {
+      $('m-c-msg').textContent = r?.error ?? 'could not send';
+    }
+  };
+}
+
 export interface MailPanelUi {
   refresh(): Promise<void>;
   setSearch(q: string): void;
+  /** open an empty compose form (the toolbar button and Ctrl+N) */
+  compose(): void;
 }
 
 async function main() {
@@ -584,6 +893,9 @@ export const mailPanel: MailPanelUi = {
   setSearch(q: string) {
     searchQuery = q;
     void refreshList();
+  },
+  compose() {
+    void openCompose({ mode: 'new' });
   },
 };
 
