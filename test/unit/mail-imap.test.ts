@@ -530,7 +530,7 @@ describe('imap (36) — client commands', () => {
     expect(s.folders.find((f) => f.path === 'Sent')!.messages[0].raw).toContain('Subject: hi');
   });
 
-  it('AUTHENTICATE PLAIN and XOAUTH2 put the credential in a literal, not in the command line', async () => {
+  it('AUTHENTICATE PLAIN and XOAUTH2 send the credential as a SASL line after `+`, never in a literal', async () => {
     const s = new FakeImapServer({ capabilities: ['IMAP4rev1', 'AUTH=PLAIN', 'AUTH=XOAUTH2', 'IDLE'] });
     const c = new ImapClient(s.socket(), 3000);
     await c.greeting();
@@ -636,5 +636,98 @@ describe('imap (36) — the live probe works with the account taxonomy', () => {
     expect(r.ok).toBe(true);
     expect(s.transcript).toContain('AUTHENTICATE XOAUTH2');
     expect(s.transcript).not.toContain('AUTHENTICATE PLAIN');
+  });
+});
+
+// ------------------------------------------------------------------ regressions (review of ff68a31)
+
+describe('imap — literals are BYTES, and literals go out the way RFC 3501 says', () => {
+  it('counts a literal in octets: a non-ASCII literal does not swallow the next response', () => {
+    const got: Array<{ text: string; literals: string[] }> = [];
+    const p = new ImapParser((r) => got.push({ text: r.text, literals: r.literals }));
+    // `café` is 4 characters but 5 bytes; slicing 5 CHARACTERS eats the `)` and desyncs everything after
+    p.feed('* 1 FETCH (BODY[] {5}\r\ncafé)\r\n* 2 EXISTS\r\n');
+    expect(got.map((g) => g.literals)).toEqual([['café'], []]);
+    expect(got[1].text).toBe('* 2 EXISTS');
+  });
+
+  it('a body with non-ASCII text and a raw UTF-8 header, cut into 3-byte chunks, arrives intact', async () => {
+    const raw = 'Subject: café crème\r\nFrom: a@b.c\r\n\r\nthe café is open\r\n';
+    const s = new FakeImapServer({ chunkSize: 3, folders: [{ path: 'INBOX', uidValidity: 1, uidNext: 3, messages: [{ uid: 1, flags: [], raw }, { uid: 2, flags: [], raw: 'Subject: next\r\n\r\nx\r\n' }] }] });
+    const c = await client(s);
+    await c.select('INBOX', true);
+    const headers = await c.uidFetch('1:2', '(UID BODY.PEEK[HEADER])');
+    expect(headers.map((h) => h.uid)).toEqual([1, 2]);
+    expect(headers[0].sections.HEADER).toContain('Subject: café crème');
+    expect(headers[1].sections.HEADER).toContain('Subject: next');
+    expect((await c.uidBodyBytes(1)).equals(Buffer.from(raw, 'utf8'))).toBe(true);
+    expect(await c.uidBody(1)).toBe(raw);
+  });
+
+  it('AUTHENTICATE waits for `+` and sends the SASL response as its own CRLF-terminated line', async () => {
+    const s = new FakeImapServer({ user: 'me', password: 's3cret', capabilities: ['IMAP4rev1', 'AUTH=PLAIN'] });
+    const c = new ImapClient(s.socket(), 1000);
+    await c.greeting();
+    await c.capability();
+    await c.authenticatePlain('me', 's3cret');
+    const b64 = Buffer.from('\u0000me\u0000s3cret').toString('base64');
+    expect(s.bad).toEqual([]);
+    expect(s.log).toContain('A0002 AUTHENTICATE PLAIN\r\n');
+    expect(s.log).toContain(`${b64}\r\n`);
+    expect(s.transcript).not.toMatch(/\{\d+\}/);
+    // and the credential is checked, so a wrong one is a NO rather than a silent OK
+    const s2 = new FakeImapServer({ user: 'me', password: 'right', capabilities: ['IMAP4rev1', 'AUTH=PLAIN'] });
+    const c2 = new ImapClient(s2.socket(), 1000);
+    await c2.greeting();
+    await c2.capability();
+    await expect(c2.authenticatePlain('me', 'wrong')).rejects.toThrow(/invalid credentials/);
+  });
+
+  it('with SASL-IR the initial response rides on the command line (one round trip)', async () => {
+    const s = new FakeImapServer({ capabilities: ['IMAP4rev1', 'AUTH=PLAIN', 'AUTH=XOAUTH2', 'SASL-IR'] });
+    const c = new ImapClient(s.socket(), 1000);
+    await c.greeting();
+    await c.capability();
+    await c.authenticateXoauth2('me', 'TOKEN');
+    const b64 = Buffer.from('user=me\u0001auth=Bearer TOKEN\u0001\u0001').toString('base64');
+    expect(s.bad).toEqual([]);
+    expect(s.log).toContain(`A0002 AUTHENTICATE XOAUTH2 ${b64}\r\n`);
+  });
+
+  it('APPEND waits for `+`, then sends the literal and the CRLF that ends the command', async () => {
+    const s = new FakeImapServer();
+    const c = await client(s);
+    const msg = 'Subject: café\r\n\r\nbody';
+    const r = await c.append('Sent', msg, ['Seen']);
+    expect(s.bad).toEqual([]);
+    expect(r.uid).toBeGreaterThan(0);
+    expect(s.log.some((w) => w.endsWith(`{${Buffer.byteLength(msg)}}\r\n`))).toBe(true); // octets, not characters
+    expect(s.log).toContain(`${msg}\r\n`);
+    expect(s.folders.find((f) => f.path === 'Sent')!.messages[0].raw).toBe(msg);
+    // the connection is still in sync: the next command is answered as itself
+    expect((await c.select('INBOX')).uidValidity).toBe(42);
+  });
+
+  it('with LITERAL+ APPEND uses `{N+}` in one write and does not wait', async () => {
+    const s = new FakeImapServer({ capabilities: ['IMAP4rev1', 'UIDPLUS', 'LITERAL+'] });
+    const c = await client(s);
+    await c.append('Sent', 'Subject: hi\r\n\r\nbody');
+    expect(s.bad).toEqual([]);
+    expect(s.log).toContain(`A0003 APPEND Sent () {19+}\r\nSubject: hi\r\n\r\nbody\r\n`);
+  });
+
+  it('a command timeout is fatal: the socket is closed and the next command is refused, not mis-paired', async () => {
+    const s = new FakeImapServer();
+    const sock = s.socket();
+    let ended = 0;
+    let mute = false;
+    const c = new ImapClient({ ...sock, write: (d) => (mute ? undefined : sock.write(d)), end: () => { ended++; sock.end(); } }, 60);
+    await c.greeting();
+    await c.capability();
+    mute = true;
+    await expect(c.capability()).rejects.toThrow(/timed out/);
+    expect(ended).toBe(1);
+    mute = false;
+    await expect(c.capability()).rejects.toThrow(/closed/);
   });
 });

@@ -28,6 +28,7 @@ import { SecretStore, SECRETS_FILE, plaintextWarning, keychainBackend } from './
 import { normalizeAccount, testAccount, type MailAccount } from './accounts';
 import { MailSyncer } from './sync';
 import { makeSocketFactory } from './socket';
+import type { SocketFactory } from '../../core/mail/imap';
 import { parseHimalayaConfig, buildImportPlan, HIMALAYA_CONFIG, type ImportPlan } from './import';
 import { DEFAULT_VIEW, buildFolderTree, groupThreads, listRowFrom, readingHeader, externalContentNotice, parseMailSearch, type ViewFilter } from '../../core/mail/ui';
 
@@ -43,6 +44,8 @@ export interface MailControllerDeps {
   home?: string;
   /** Electron's safeStorage, so the UI reports the REAL keyring rather than "unknown" */
   safeStorage?: Parameters<typeof keychainBackend>[0];
+  /** test seam: the IMAP socket factory (production: the audited TLS factory from socket.ts) */
+  makeSocket?: SocketFactory;
 }
 
 export interface MailSendable {
@@ -135,7 +138,7 @@ export class MailController {
     this.accounts.set(id, acc);
     const s = new MailSyncer(acc, {
       store: this.db(),
-      makeSocket: makeSocketFactory({ audit: (ev) => this.deps.audit('mail-connection', { ...ev, account: id }) }),
+      makeSocket: this.deps.makeSocket ?? makeSocketFactory({ audit: (ev) => this.deps.audit('mail-connection', { ...ev, account: id }) }),
       credential: () => {
         const stored = this.sec().get(id);
         if (!stored) return null;
@@ -170,7 +173,11 @@ export class MailController {
     const c = this.counts();
     const gate = this.deps.canConnect();
     return {
-      accounts,
+      // per-account unread is a NUMBER (unseen + unread, the same figures counts() sums)
+      accounts: accounts.map((a) => {
+        const n = this.db().counts(a.id);
+        return { ...a, unread: n.unseen + n.unread };
+      }),
       unread: c.unread,
       configured: c.configured,
       synced: this.synced,
@@ -236,6 +243,9 @@ export class MailController {
     let body = this.db().body(row.id);
     // fetch on demand: opening a message is what pulls its text, never a sync pass
     if (!body?.bodyFetched) {
+      // a fetch is network: refused during a task (an already-fetched message is local and still opens)
+      const gate = this.deps.canConnect();
+      if (!gate.ok) return { ok: false as const, error: gate.reason ?? 'mail cannot connect right now', refused: true };
       const s = this.syncerFor(row.accountId);
       if (s) {
         const r = await s.fetchBody(row.folder, row.uid, { markRead: opts.markRead !== false });
@@ -289,6 +299,10 @@ export class MailController {
   async setFlags(ids: unknown, patch: unknown) {
     const rows = this.rowsFor(ids);
     if (!rows.length) return { ok: false as const, error: 'unknown message' };
+    // a flag change writes server state: refused during a task, rather than changed locally and
+    // left to diverge from the server
+    const gate = this.deps.canConnect();
+    if (!gate.ok) return { ok: false as const, error: gate.reason ?? 'mail cannot connect right now' };
     const p = (patch ?? {}) as { readFlag?: boolean; flagged?: boolean; seen?: boolean };
     const applied = this.db().setFlags(rows.map((r) => r.id), p);
     const s = this.syncerFor(rows[0].accountId);
@@ -302,6 +316,8 @@ export class MailController {
     if (!rows.length) return { ok: false as const, error: 'unknown message' };
     const target = String(to ?? '');
     if (!target) return { ok: false as const, error: 'no target folder' };
+    const gate = this.deps.canConnect();
+    if (!gate.ok) return { ok: false as const, error: gate.reason ?? 'mail cannot connect right now' };
     const s = this.syncerFor(rows[0].accountId);
     if (s) {
       const r = await s.move(rows.map((x) => x.uid), rows[0].folder, target);
@@ -461,12 +477,19 @@ export class MailController {
     let added = 0;
     let updated = 0;
     const failed: Array<{ id: string; error: string }> = [];
+    const notes: Array<{ id: string; note: string }> = [];
     for (const entry of plan.imported) {
       if (want && !want.has(entry.account.id)) continue;
-      const sec = this.sec().set(entry.account.id, entry.secret);
-      if (!sec.ok) {
-        failed.push({ id: entry.account.id, error: sec.error });
-        continue;
+      // a config with `password.cmd` (never executed) or no password at all has nothing to store: the
+      // account is still added, and the user sets the password in the account list
+      if (entry.secret.kind === 'password' && !entry.secret.password) {
+        notes.push({ id: entry.account.id, note: 'no password imported' });
+      } else {
+        const sec = this.sec().set(entry.account.id, entry.secret);
+        if (!sec.ok) {
+          failed.push({ id: entry.account.id, error: sec.error });
+          continue;
+        }
       }
       const existed = !!this.db().listAccounts().find((x) => x.id === entry.account.id);
       const r = this.db().addAccount({
@@ -491,9 +514,17 @@ export class MailController {
       if (existed) updated++;
       else added++;
     }
-    this.deps.audit('mail', { action: 'import-himalaya', added, updated, failed: failed.length, path: file });
+    this.deps.audit('mail', { action: 'import-himalaya', added, updated, failed: failed.length, noPassword: notes.length, path: file });
     this.counts();
-    return { ok: failed.length === 0, added, updated, failed, skipped: plan.skipped };
+    return { ok: failed.length === 0, added, updated, failed, notes, skipped: plan.skipped };
+  }
+
+  /**
+   * Drop every open mail connection (an idle push included). Called when an agent task starts: the
+   * gate refuses NEW connections, and this closes the ones opened before the task.
+   */
+  disconnectAll() {
+    for (const s of this.syncers.values()) s.disconnect();
   }
 
   /** Close every connection and the sqlite handle (called when the window closes). */

@@ -4,14 +4,15 @@
 // the user sees "wrong password" for a correct one), and a credential that leaks into something the UI
 // or the audit log touches.
 //
-// The last test is the important one: it runs against the REAL config on this machine and asserts the
-// shape of the result — hosts, ports, folder aliases — without ever asserting on a secret value.
+// The last block runs against a FIXTURE shaped like the user's real config (test/fixtures/himalaya) and
+// asserts the shape of the result — hosts, ports, folder aliases — without ever asserting on a secret
+// value. A unit run must never read ~/.config/himalaya/config.toml: it holds real credentials.
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { parseServerUrl, parseHimalayaConfig, buildImportPlan, HIMALAYA_CONFIG, MAX_ACCOUNTS_IMPORTED } from '../../src/main/mail/import';
+import { parseServerUrl, parseHimalayaConfig, buildImportPlan, MAX_ACCOUNTS_IMPORTED } from '../../src/main/mail/import';
 
 const config = (body: string) => body.trim().split('\n').join('\n');
 
@@ -201,11 +202,11 @@ imap.server = "imaps://h:993"
   });
 });
 
-describe('himalaya import (37b) — the REAL config on this machine', () => {
-  const path = join(process.env.HOME ?? '', HIMALAYA_CONFIG);
+describe('himalaya import (37b) — a config shaped like the real one (fixture)', () => {
+  const path = join(__dirname, '..', 'fixtures', 'himalaya', 'config.toml');
   const has = existsSync(path);
 
-  it('is present (this is the config the user asked us to import from)', () => {
+  it('the fixture is present (never the real ~/.config/himalaya/config.toml)', () => {
     expect(has, path).toBe(true);
   });
 

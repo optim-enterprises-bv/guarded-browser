@@ -68,19 +68,26 @@ export function makeSocketFactory(opts: SocketFactoryOptions = {}): SocketFactor
       detail: `${sock.getProtocol?.() ?? '?'}/${sock.getCipher?.()?.name ?? '?'}`,
     });
 
-    let dataCb: ((c: string) => void) | null = null;
+    let dataCb: ((c: Buffer) => void) | null = null;
     let closeCb: ((e?: Error) => void) | null = null;
     let closed = false;
-    const pending: string[] = [];
+    const pending: Buffer[] = [];
+    let pendingBytes = 0;
 
     const flush = () => {
       if (!dataCb) return;
+      pendingBytes = 0;
       for (const c of pending.splice(0)) dataCb(c);
     };
-    sock.setEncoding('utf8');
-    sock.on('data', (chunk: string) => {
-      if (dataCb) dataCb(chunk);
-      else if (pending.join('').length < MAX_SOCKET_BUFFER) pending.push(chunk);
+    // NO setEncoding: IMAP literal sizes are octet counts, so the parser must see bytes. A UTF-8
+    // decoded stream turns `{N}` into a character count and desyncs on the first non-ASCII literal.
+    sock.on('data', (chunk: Buffer | string) => {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+      if (dataCb) dataCb(buf);
+      else if (pendingBytes < MAX_SOCKET_BUFFER) {
+        pending.push(buf);
+        pendingBytes += buf.length;
+      }
     });
     sock.on('error', (e: Error) => {
       const wasClosed = closed;

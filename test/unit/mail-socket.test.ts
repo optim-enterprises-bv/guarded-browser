@@ -99,7 +99,7 @@ describe('mail socket (36b) — what it does', () => {
     expect(audit[0].kind).toBe('open');
     expect(audit[0].detail).toContain('TLSv1.3');
     const got: string[] = [];
-    sock.onData((c) => got.push(c));
+    sock.onData((c) => got.push(c.toString('utf8')));
     fake.send('* OK ready\r\n');
     expect(got).toEqual(['* OK ready\r\n']);
     sock.write('A1 CAPABILITY\r\n');
@@ -111,8 +111,23 @@ describe('mail socket (36b) — what it does', () => {
     const sock = await factoryFor(fake)({ host: 'h.example', port: 993, tls: 'implicit' });
     fake.send('* OK early\r\n');
     const got: string[] = [];
-    sock.onData((c) => got.push(c));
+    sock.onData((c) => got.push(c.toString('utf8')));
     expect(got).toEqual(['* OK early\r\n']);
+  });
+
+  it('delivers BYTES, never a decoded string: a UTF-8 character split across two TLS records survives', async () => {
+    const fake = new FakeTls({});
+    const sock = await factoryFor(fake)({ host: 'h.example', port: 993, tls: 'implicit' });
+    const got: Buffer[] = [];
+    sock.onData((c) => got.push(c));
+    const bytes = Buffer.from('* 1 FETCH (BODY[] {5}\r\ncafé)\r\n', 'utf8');
+    const cut = bytes.indexOf(0xc3) + 1; // inside the two-byte é
+    fake.emit('data', bytes.subarray(0, cut));
+    fake.emit('data', bytes.subarray(cut));
+    // setEncoding would have made `{5}` a character count; the stream must stay raw
+    expect(fake.encoding).toBeNull();
+    expect(got.every((c) => Buffer.isBuffer(c))).toBe(true);
+    expect(Buffer.concat(got).equals(bytes)).toBe(true);
   });
 
   it('reports a server-side close as a close, not as silence', async () => {

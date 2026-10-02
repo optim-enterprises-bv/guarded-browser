@@ -39,7 +39,7 @@ const account = (over: Record<string, unknown> = {}) => {
 };
 
 /** A store + server + syncer wired the way main.ts will wire it. */
-const harness = (opts: { server?: FakeImapServer; taskRunning?: () => boolean } = {}) => {
+const harness = (opts: { server?: FakeImapServer; taskRunning?: () => boolean; deps?: Partial<SyncDeps> } = {}) => {
   const store = new MailStore(':memory:');
   const server = opts.server ?? new FakeImapServer({ user: 'me', password: 'pw', idle: true });
   const audit: string[] = [];
@@ -49,6 +49,7 @@ const harness = (opts: { server?: FakeImapServer; taskRunning?: () => boolean } 
     credential: () => ({ kind: 'password', password: 'pw' }),
     canConnect: () => (opts.taskRunning?.() ? { ok: false, reason: 'an agent task is running' } : { ok: true }),
     audit: (e) => audit.push(`${e.kind}:${e.detail}`),
+    ...opts.deps,
   };
   store.addAccount({ id: 'work', name: 'Work', address: 'me@example.com', kind: 'imap', host: 'imap.example.com', port: 993, tls: 'implicit', username: 'me', sentFolder: 'Sent', trashFolder: 'Trash', junkFolder: 'Junk', archiveFolder: 'Archive' });
   const syncer = new MailSyncer(account(), deps);
@@ -448,5 +449,163 @@ describe('sync (36) — IDLE push', () => {
     const { syncer } = harness({ server });
     await syncer.push(() => undefined);
     expect(syncer.state).toBe('online');
+  });
+});
+
+// ------------------------------------------------------------------ regressions (review of ff68a31)
+
+describe('sync — non-ASCII mail does not desync the connection', () => {
+  it('a 200-header batch with a raw UTF-8 Subject and a non-ASCII body syncs every message', async () => {
+    const messages = Array.from({ length: 200 }, (_, i) => ({ uid: i + 1, flags: [] as string[], raw: `Subject: m${i + 1}\r\nFrom: a@b.c\r\n\r\nbody ${i + 1}\r\n` }));
+    messages[99].raw = 'Subject: café crème\r\nFrom: Zoë <z@b.c>\r\n\r\nthe café is open\r\n';
+    const server = new FakeImapServer({ user: 'me', password: 'pw', chunkSize: 1000, folders: [{ path: 'INBOX', uidValidity: 9, uidNext: 201, messages }] });
+    const { store, syncer } = harness({ server });
+    const report = await syncer.syncAll(['INBOX']);
+    expect(report.ok).toBe(true);
+    expect(report.folders[0].fetched).toBe(200);
+    expect(store.listMessages({ accountId: 'work', folder: 'INBOX' }).total).toBe(200);
+    expect(store.byUid('work', 'INBOX', 100)!.subject).toBe('café crème');
+    expect(store.byUid('work', 'INBOX', 101)!.subject).toBe('m101'); // the one AFTER it is still itself
+    const r = await syncer.fetchBody('INBOX', 100);
+    expect(r.ok).toBe(true);
+    expect(r.charsetLossy).toBeFalsy();
+    expect(store.body(store.byUid('work', 'INBOX', 100)!.id)!.bodyText).toContain('the café is open');
+  });
+
+  it('an 8-bit latin1 body is decoded per its declared charset, not as UTF-8', async () => {
+    const head = 'Subject: latin\r\nFrom: a@b.c\r\nContent-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: 8bit\r\n\r\n';
+    const bytes = Buffer.concat([Buffer.from(head, 'latin1'), Buffer.from('café crème\r\n', 'latin1')]);
+    const server = new FakeImapServer({ user: 'me', password: 'pw', folders: [{ path: 'INBOX', uidValidity: 9, uidNext: 2, messages: [{ uid: 1, flags: [], raw: head, bytes }] }] });
+    const { store, syncer } = harness({ server });
+    await syncer.syncAll(['INBOX']);
+    const r = await syncer.fetchBody('INBOX', 1);
+    expect(r.ok).toBe(true);
+    expect(r.charsetLossy).toBeFalsy();
+    expect(store.body(store.byUid('work', 'INBOX', 1)!.id)!.bodyText).toContain('café crème');
+  });
+});
+
+describe('sync — the task gate is checked per ACTION, not only on connect', () => {
+  it('a task starting after connect blocks sync, fetchBody, setFlags and move, and nothing reaches the server', async () => {
+    let running = false;
+    const { store, server, syncer } = harness({ taskRunning: () => running });
+    expect((await syncer.syncAll(['INBOX'])).ok).toBe(true);
+    running = true;
+    const before = server.transcript;
+    const sync = await syncer.syncAll(['INBOX']);
+    expect(sync.ok).toBe(false);
+    expect(sync.refused).toContain('agent task');
+    const f = await syncer.fetchBody('INBOX', 1, { markRead: true });
+    expect(f.ok).toBe(false);
+    expect(f.error).toContain('agent task');
+    const fl = await syncer.setFlags([1], 'INBOX', { flagged: true });
+    expect(fl.ok).toBe(false);
+    expect(fl.error).toContain('agent task');
+    const mv = await syncer.move([1], 'INBOX', 'Sent');
+    expect(mv.ok).toBe(false);
+    expect(mv.error).toContain('agent task');
+    expect(server.transcript).toBe(before);
+    // and nothing changed locally either
+    expect(store.byUid('work', 'INBOX', 1)!.flagged).toBe(false);
+    expect(store.byUid('work', 'INBOX', 1)!.bodyFetched).toBe(false);
+  });
+});
+
+describe('sync — a dropped connection is forgotten and the next action reconnects', () => {
+  it('the server drops after login: the next sync reconnects and succeeds', async () => {
+    const { server, syncer } = harness();
+    expect((await syncer.syncAll(['INBOX'])).ok).toBe(true);
+    server.drop(new Error('connection reset by peer'));
+    expect(syncer.state).toBe('error');
+    const again = await syncer.syncAll(); // full sync: LIST runs first, on the NEW connection
+    expect(again.ok).toBe(true);
+    expect(server.transcript.match(/ LOGIN /g)).toHaveLength(2);
+    expect(syncer.state).toBe('online');
+  });
+
+  it('a LIST failure is a report, not an exception thrown out of syncAll', async () => {
+    const server = new FakeImapServer({ user: 'me', password: 'pw' });
+    const { syncer } = harness({
+      server,
+      deps: {
+        makeSocket: async () => {
+          const sock = server.socket();
+          return { ...sock, write: (d: string) => (/ LIST /.test(d) ? server.drop(new Error('reset during LIST')) : sock.write(d)) };
+        },
+      },
+    });
+    const report = await syncer.syncAll();
+    expect(report.ok).toBe(false);
+    expect(report.error).toContain('reset during LIST');
+  });
+
+  it('a command timeout drops the connection, and the next sync reconnects', async () => {
+    const server = new FakeImapServer({ user: 'me', password: 'pw' });
+    let mute = false;
+    const { syncer } = harness({
+      server,
+      deps: {
+        commandTimeoutMs: 50,
+        makeSocket: async () => {
+          const sock = server.socket();
+          return { ...sock, write: (d: string) => (mute ? undefined : sock.write(d)) };
+        },
+      },
+    });
+    expect((await syncer.syncAll(['INBOX'])).ok).toBe(true);
+    mute = true;
+    const stuck = await syncer.syncAll(['INBOX']);
+    expect(stuck.ok).toBe(false);
+    expect(stuck.error).toMatch(/timed out/);
+    mute = false;
+    expect((await syncer.syncAll(['INBOX'])).ok).toBe(true);
+  });
+});
+
+describe('sync — moving into a folder that already holds the same uid', () => {
+  const withSentUid1 = (opts: { noCopyUid?: boolean } = {}) =>
+    new FakeImapServer({
+      user: 'me',
+      password: 'pw',
+      ...opts,
+      folders: [
+        { path: 'INBOX', uidValidity: 42, uidNext: 3, messages: [{ uid: 1, flags: [], raw: 'Subject: hello\r\nFrom: a@b.c\r\n\r\none\r\n' }, { uid: 2, flags: [], raw: 'Subject: two\r\nFrom: a@b.c\r\n\r\ntwo\r\n' }] },
+        { path: 'Sent', uidValidity: 7, uidNext: 2, messages: [{ uid: 1, flags: [], raw: 'Subject: already sent\r\nFrom: me@b.c\r\n\r\nsent\r\n' }] },
+      ],
+    });
+
+  it('with COPYUID the row is re-keyed in one step (no UNIQUE(account, folder, uid) violation)', async () => {
+    const server = withSentUid1();
+    const { store, syncer } = harness({ server });
+    await syncer.syncAll(['INBOX', 'Sent']);
+    expect(store.byUid('work', 'Sent', 1)!.subject).toBe('already sent');
+    const r = await syncer.move([1], 'INBOX', 'Sent');
+    expect(r.ok).toBe(true);
+    expect(store.listMessages({ accountId: 'work', folder: 'INBOX' }).total).toBe(1);
+    expect(store.byUid('work', 'Sent', 1)!.subject).toBe('already sent');
+    expect(store.byUid('work', 'Sent', 2)!.subject).toBe('hello');
+  });
+
+  it('without COPYUID the local row is dropped and the next sync of the target fetches it', async () => {
+    const server = withSentUid1({ noCopyUid: true });
+    const { store, syncer } = harness({ server });
+    await syncer.syncAll(['INBOX', 'Sent']);
+    const r = await syncer.move([1], 'INBOX', 'Sent');
+    expect(r.ok).toBe(true);
+    expect(store.byUid('work', 'INBOX', 1)).toBeFalsy();
+    expect(store.byUid('work', 'Sent', 1)!.subject).toBe('already sent'); // untouched, not overwritten
+    await syncer.syncAll(['Sent']);
+    expect(store.listMessages({ accountId: 'work', folder: 'Sent' }).total).toBe(2);
+  });
+});
+
+describe('sync — fetchBody opens the folder read-write', () => {
+  it('uses SELECT, so the \\Seen STORE after a body fetch is accepted', async () => {
+    const { server, syncer } = harness();
+    await syncer.syncAll(['INBOX']);
+    const r = await syncer.fetchBody('INBOX', 1, { markRead: true });
+    expect(r.ok).toBe(true);
+    expect(server.transcript).toMatch(/SELECT INBOX\r\n[^]*UID FETCH 1 \(BODY\.PEEK\[\]\)/);
+    expect(server.folders[0].messages.find((m) => m.uid === 1)!.flags).toContain('\\Seen');
   });
 });

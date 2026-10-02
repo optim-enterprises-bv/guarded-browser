@@ -331,7 +331,21 @@ function topLevelIndexOf(s: string, ch: string): number {
  * `truncated` instead of throwing, so a hostile message renders as a partial message rather than an
  * error dialog — and the caller can tell the user it was clipped.
  */
-export function parseMime(raw: string, depth = 0): MimePart {
+export function parseMime(raw: string | Buffer, depth = 0): MimePart {
+  // BYTES (what the IMAP layer delivers): the structure (boundaries, header names, blank lines) is
+  // ASCII, so it is parsed on a byte-preserving latin1 view, and only the leaves are decoded — headers
+  // as UTF-8 (RFC 6532), bodies per their declared charset
+  if (Buffer.isBuffer(raw)) return parseMimeText(raw.subarray(0, MAX_BODY_INPUT).toString('latin1'), depth, true);
+  return parseMimeText(raw, depth, false);
+}
+
+/** latin1-view bytes -> header text: UTF-8 when it is valid UTF-8, else the bytes as latin1 */
+function headerText(bin: string): string {
+  const utf8 = Buffer.from(bin, 'latin1').toString('utf8');
+  return utf8.includes('\uFFFD') ? bin : utf8;
+}
+
+function parseMimeText(raw: string, depth: number, binary: boolean): MimePart {
   const empty: MimePart = { headers: [], contentType: 'text/plain', params: {}, encoding: '7bit', body: '', parts: [], filename: '', contentId: '', truncated: false };
   if (depth > MAX_DEPTH) return { ...empty, truncated: true };
   const text = String(raw ?? '').slice(0, MAX_BODY_INPUT);
@@ -340,7 +354,7 @@ export function parseMime(raw: string, depth = 0): MimePart {
   const sepMatch = /\r\n\r\n|\n\n|\r\r/.exec(text);
   const headRaw = sepMatch ? text.slice(0, sepMatch.index) : text;
   const bodyRaw = sepMatch ? text.slice(sepMatch.index + sepMatch[0].length) : '';
-  const headers = parseHeaders(headRaw);
+  const headers = parseHeaders(binary ? headerText(headRaw) : headRaw);
 
   const ct = parseParams(headerGet(headers, 'content-type') ?? 'text/plain');
   const contentType = ct.value || 'text/plain';
@@ -372,18 +386,24 @@ export function parseMime(raw: string, depth = 0): MimePart {
         part.truncated = true;
         break;
       }
-      part.parts.push(parseMime(c, depth + 1));
+      part.parts.push(parseMimeText(c, depth + 1, binary));
     }
     return part;
   }
 
   if (contentType === 'message/rfc822') {
     // a nested message is parsed as ONE child, so its headers are not mistaken for ours
-    part.parts.push(parseMime(bodyRaw, depth + 1));
+    part.parts.push(parseMimeText(bodyRaw, depth + 1, binary));
     return part;
   }
 
-  part.body = decodeBody(encoding, bodyRaw, params.charset ?? 'utf-8');
+  const charset = params.charset ?? 'utf-8';
+  if (!binary) part.body = decodeBody(encoding, bodyRaw, charset);
+  else if (encoding === 'base64') part.body = decodeBody(encoding, bodyRaw, charset);
+  // quoted-printable should be ASCII; stray 8-bit bytes in it are read as UTF-8 before the =XX pass
+  else if (encoding === 'quoted-printable') part.body = decodeBody(encoding, Buffer.from(bodyRaw, 'latin1').toString('utf8'), charset);
+  // 7bit / 8bit / binary: the bytes ARE the text, in the part's charset
+  else part.body = cleanBody(bytesToString(Buffer.from(bodyRaw, 'latin1'), charset), MAX_BODY_TEXT);
   return part;
 }
 

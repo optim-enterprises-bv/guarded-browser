@@ -45,6 +45,8 @@ export interface SyncDeps {
   now?: () => number;
   /** how many folders one `syncAll` may touch (a server with 10 000 folders is bounded) */
   maxFoldersPerSync?: number;
+  /** per-command timeout; a timeout is fatal to the connection (default 30 s) */
+  commandTimeoutMs?: number;
 }
 
 /** Reconnect backoff, in ms, capped. Pure so the policy is testable without waiting. */
@@ -119,14 +121,30 @@ export class MailSyncer {
     return this.lastError;
   }
 
+  /**
+   * The task gate, checked by EVERY action that touches the network or writes server state — not
+   * only by connect: a connection opened before a task started must not be used during it.
+   * Returns the refusal reason, or null when the action may proceed.
+   */
+  private refused(action: string): string | null {
+    const allowed = this.deps.canConnect();
+    if (allowed.ok) return null;
+    const reason = allowed.reason ?? 'mail cannot connect right now';
+    this.deps.audit?.({ kind: 'error', detail: `${action} refused: ${reason}` });
+    return reason;
+  }
+
+  /** The live client, reconnecting when the last one was dropped (close / BYE / timeout). */
+  private async ensureClient(): Promise<{ client: ImapClient | null; error?: string; refused?: string }> {
+    if (this.client) return { client: this.client };
+    const r = await this.connect();
+    return r.ok ? { client: this.client } : { client: null, error: r.error, refused: r.refused };
+  }
+
   /** Connect + authenticate. Refuses (and does not retry) while a task is running. */
   async connect(): Promise<{ ok: boolean; error?: string; refused?: string }> {
-    const allowed = this.deps.canConnect();
-    if (!allowed.ok) {
-      const reason = allowed.reason ?? 'mail cannot connect right now';
-      this.deps.audit?.({ kind: 'error', detail: `connect refused: ${reason}` });
-      return { ok: false, refused: reason };
-    }
+    const reason = this.refused('connect');
+    if (reason) return { ok: false, refused: reason };
     const cred = this.deps.credential();
     if (!cred) return { ok: false, error: 'no credential is stored for this account' };
 
@@ -140,8 +158,18 @@ export class MailSyncer {
       this.deps.audit?.({ kind: 'error', detail: this.lastError });
       return { ok: false, error: this.lastError };
     }
-    const c = new ImapClient(socket, 30_000);
+    const c = new ImapClient(socket, this.deps.commandTimeoutMs ?? 30_000);
     this.client = c;
+    // a dropped connection (server close, BYE, a command timeout) is forgotten at once, so the next
+    // action reconnects instead of failing forever on a dead client
+    c.onEvent((e) => {
+      if (e.kind !== 'bye' || this.client !== c) return;
+      this.client = null;
+      this.socket = null;
+      this._state = 'error';
+      this.lastError = sanitizeDetail(e.text);
+      c.close();
+    });
     try {
       await c.greeting();
       await c.capability();
@@ -158,8 +186,9 @@ export class MailSyncer {
     } catch (e) {
       this._state = 'error';
       this.lastError = sanitizeDetail((e as Error).message);
-      c.close();
+      // forget it first, so the close's `bye` does not overwrite the real reason
       this.client = null;
+      c.close();
       this.deps.audit?.({ kind: 'error', detail: `login failed: ${this.lastError}` });
       return { ok: false, error: this.lastError };
     }
@@ -170,14 +199,16 @@ export class MailSyncer {
   }
 
   disconnect() {
-    try {
-      this.client?.close();
-    } catch {
-      /* already gone */
-    }
+    // forget the client BEFORE closing it: close() emits `bye`, and the drop handler must not recurse
+    const c = this.client;
     this.client = null;
     this.socket = null;
     this._state = 'offline';
+    try {
+      c?.close();
+    } catch {
+      /* already gone */
+    }
   }
 
   /**
@@ -205,6 +236,8 @@ export class MailSyncer {
   async syncFolder(path: string): Promise<SyncReport['folders'][number]> {
     const c = this.client;
     const kind = guessFolderKind(path, []);
+    const no = this.refused(`sync ${path}`);
+    if (no) return { path, kind, uidValidity: 0, fetched: 0, reset: false, error: no };
     if (!c) return { path, kind, uidValidity: 0, fetched: 0, reset: false, error: 'not connected' };
     const info = await c.select(path, true);
     this.deps.store.upsertFolder({ accountId: this.account.id, path, name: path, kind, uidValidity: info.uidValidity, uidNext: info.uidNext });
@@ -269,11 +302,21 @@ export class MailSyncer {
 
   /** Sync every watched folder that the account declared. */
   async syncAll(folders?: string[]): Promise<SyncReport> {
-    if (!this.client) {
-      const c = await this.connect();
-      if (!c.ok) return { ok: false, folders: [], error: c.error, refused: c.refused };
+    const no = this.refused('sync');
+    if (no) return { ok: false, folders: [], refused: no };
+    const ready = await this.ensureClient();
+    if (!ready.client) return { ok: false, folders: [], error: ready.error, refused: ready.refused };
+    let list: string[];
+    try {
+      list = folders ?? (await this.syncFolders()).map((f) => f.path);
+    } catch (e) {
+      // LIST failing means the connection is unusable: report it, do not throw out of the sync
+      const msg = sanitizeDetail((e as Error).message);
+      this.lastError = msg;
+      this._state = 'error';
+      this.deps.audit?.({ kind: 'error', detail: `folder list: ${msg}` });
+      return { ok: false, folders: [], error: msg };
     }
-    const list = folders ?? (await this.syncFolders()).map((f) => f.path);
     const wanted = list.filter((p) => this.watched.some((w) => w.toLowerCase() === p.toLowerCase()) || p.toLowerCase() === 'inbox');
     const out: SyncReport['folders'] = [];
     for (const p of wanted) {
@@ -299,20 +342,30 @@ export class MailSyncer {
    * `seen` (the server learns \Seen), while `readFlag` stays 0 until the user deals with it.
    */
   async fetchBody(folder: string, uid: number, opts: { markRead?: boolean } = {}): Promise<{ ok: boolean; error?: string; remoteContent?: boolean; attachments?: number; charsetLossy?: boolean }> {
-    const c = this.client;
-    if (!c) return { ok: false, error: 'not connected' };
+    const no = this.refused('fetch');
+    if (no) return { ok: false, error: no };
     const row = this.deps.store.byUid(this.account.id, folder, uid);
     if (!row) return { ok: false, error: 'unknown message' };
-    await c.select(folder, true);
-    const raw = await c.uidBody(uid);
-    if (!raw) {
+    const ready = await this.ensureClient();
+    const c = ready.client;
+    if (!c) return { ok: false, error: ready.refused ?? ready.error ?? 'not connected' };
+    let bytes: Buffer;
+    try {
+      // SELECT, not EXAMINE: a read-only mailbox refuses the \Seen STORE below
+      await c.select(folder, false);
+      bytes = await c.uidBodyBytes(uid);
+    } catch (e) {
+      this.lastError = sanitizeDetail((e as Error).message);
+      return { ok: false, error: this.lastError };
+    }
+    if (!bytes.length) {
       // a NIL body: record that we tried, so the UI does not spin forever
       this.deps.store.setBody(this.account.id, folder, uid, { text: '', rawHeader: '' });
       return { ok: false, error: 'the server returned no message body' };
     }
-    const root = parseMime(raw);
+    const root = parseMime(bytes);
     const content = extractContent(root);
-    const headerBlock = raw.split(/\r\n\r\n|\n\n/)[0] ?? '';
+    const headerBlock = bytes.toString('utf8').split(/\r\n\r\n|\n\n/)[0] ?? '';
     this.deps.store.setBody(this.account.id, folder, uid, {
       text: content.text,
       // the store's own HTML-to-text pass runs only when there is no plain part, and its
@@ -335,8 +388,11 @@ export class MailSyncer {
 
   /** Mark messages read / unread / flagged, locally and on the server. */
   async setFlags(uids: number[], folder: string, patch: { seen?: boolean; readFlag?: boolean; flagged?: boolean }): Promise<{ ok: boolean; error?: string; applied: number }> {
-    const c = this.client;
-    if (!c) return { ok: false, error: 'not connected', applied: 0 };
+    const no = this.refused('flags');
+    if (no) return { ok: false, error: no, applied: 0 };
+    const ready = await this.ensureClient();
+    const c = ready.client;
+    if (!c) return { ok: false, error: ready.refused ?? ready.error ?? 'not connected', applied: 0 };
     const rows = uids.map((u) => this.deps.store.byUid(this.account.id, folder, u)).filter((r): r is NonNullable<typeof r> => !!r);
     if (!rows.length) return { ok: false, error: 'unknown message', applied: 0 };
     const applied = this.deps.store.setFlags(rows.map((r) => r.id), patch);
@@ -356,20 +412,30 @@ export class MailSyncer {
 
   /** Move messages to another folder, re-keying the store rows from the server's COPYUID. */
   async move(uids: number[], from: string, to: string): Promise<{ ok: boolean; error?: string; moved: number }> {
-    const c = this.client;
-    if (!c) return { ok: false, error: 'not connected', moved: 0 };
-    await c.select(from, false);
-    const r = await c.uidMove(uids, to);
+    const no = this.refused('move');
+    if (no) return { ok: false, error: no, moved: 0 };
+    const ready = await this.ensureClient();
+    const c = ready.client;
+    if (!c) return { ok: false, error: ready.refused ?? ready.error ?? 'not connected', moved: 0 };
+    let r: Awaited<ReturnType<ImapClient['uidMove']>>;
+    try {
+      await c.select(from, false);
+      r = await c.uidMove(uids, to);
+    } catch (e) {
+      this.lastError = sanitizeDetail((e as Error).message);
+      return { ok: false, error: this.lastError, moved: 0 };
+    }
     if (!r.moved) return { ok: false, error: 'the server refused the move', moved: 0 };
     let moved = 0;
     for (const uid of uids) {
       const row = this.deps.store.byUid(this.account.id, from, uid);
       if (!row) continue;
-      this.deps.store.move([row.id], to);
       const nu = r.newUids.get(uid);
-      // without a new uid the row keeps the old one and the next sync reconciles it; with one, re-key
-      // now so the message is not stored twice
-      if (nu) this.deps.store.rekey(row.id, to, nu);
+      // The old uid means nothing in the target folder (and may belong to another message there), so
+      // the row is never moved keeping it. With COPYUID, folder+uid change in ONE statement; without
+      // it — or when the target row already exists locally — the local row is dropped and the next
+      // sync of the target fetches the message under its real uid.
+      if (!nu || !this.deps.store.rekey(row.id, to, nu).ok) this.deps.store.deleteMessages([row.id], true);
       moved++;
     }
     this.deps.audit?.({ kind: 'sync', detail: `moved ${moved} message(s) ${from} -> ${to}` });

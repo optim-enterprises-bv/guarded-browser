@@ -29,7 +29,8 @@ export const IDLE_RESTART_MS = 25 * 60_000;
 
 export interface ImapSocket {
   write(data: string): void;
-  onData(cb: (chunk: string) => void): void;
+  /** raw BYTES: literal sizes are octet counts, so the transport must not decode them into characters */
+  onData(cb: (chunk: Buffer) => void): void;
   onClose(cb: (err?: Error) => void): void;
   end(): void;
 }
@@ -48,13 +49,16 @@ export type ImapValue = string | ImapValue[];
 export interface ImapResponse {
   /** the full text with literal placeholders (`\u0000i\u0000`) inlined */
   text: string;
+  /** each literal decoded as UTF-8 (for envelopes, headers, quoted text) */
   literals: string[];
+  /** the same literals as the exact bytes the server sent, for a caller that decodes per charset */
+  literalBytes?: Buffer[];
   /**
    * One entry per untagged response, EACH WITH ITS OWN literals. A batched FETCH returns several
    * responses that all contain `\u00000\u0000`; resolving them against one shared literal array
    * silently returns the first message's body for every message (that bug cost a debugging pass).
    */
-  responses?: Array<{ text: string; literals: string[] }>;
+  responses?: Array<{ text: string; literals: string[]; literalBytes?: Buffer[] }>;
   /** the tag, for a tagged response */
   tag?: string;
   /** OK / NO / BAD for a tagged response */
@@ -76,50 +80,87 @@ export interface ImapResponse {
  * (re-scanning the raw buffer per lookup would be O(n^2) on a big message).
  */
 export class ImapParser {
-  private buf = '';
+  /** BYTES, not characters: a `{N}` literal size counts octets, and a decoded string cannot be sliced by it */
+  private buf: Buffer = Buffer.alloc(0);
+  private chunks: Buffer[] = [];
+  private queued = 0;
+  /** extraction is not retried until at least this many bytes are buffered (a big literal is not re-scanned per chunk) */
+  private need = 0;
+  private feeding = false;
   /** thrown-by-callback is not caught here: the caller's handler decides what to do */
   constructor(private readonly onResponse: (r: ImapResponse) => void) {}
 
-  feed(chunk: string) {
-    this.buf += chunk;
-    for (;;) {
-      const r = this.extract();
-      if (!r) return;
-      this.buf = this.buf.slice(r.consumed);
-      this.onResponse(r);
+  feed(chunk: Buffer | string) {
+    const b = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+    if (b.length) {
+      this.chunks.push(b);
+      this.queued += b.length;
+    }
+    // re-entrant feed (a response handler that writes, and the peer answers synchronously): the outer
+    // loop below picks the new bytes up
+    if (this.feeding) return;
+    this.feeding = true;
+    try {
+      for (;;) {
+        if (this.chunks.length) {
+          if (this.buf.length + this.queued < this.need) return;
+          this.buf = Buffer.concat([this.buf, ...this.chunks]);
+          this.chunks = [];
+          this.queued = 0;
+        }
+        const r = this.extract();
+        if (!r) {
+          if (!this.chunks.length) return;
+          continue;
+        }
+        this.need = 0;
+        this.buf = this.buf.subarray(r.consumed);
+        this.onResponse(r);
+      }
+    } finally {
+      this.feeding = false;
     }
   }
 
   /** true when bytes are pending (an incomplete line). Used by tests and by the reconnect logic. */
   get pending(): number {
-    return this.buf.length;
+    return this.buf.length + this.queued;
   }
 
-  private extract(): ({ text: string; literals: string[]; consumed: number } & ImapResponse) | null {
+  private extract(): ({ text: string; literals: string[]; literalBytes: Buffer[]; consumed: number } & ImapResponse) | null {
     let i = 0;
     const literals: string[] = [];
+    const literalBytes: Buffer[] = [];
     let text = '';
     let lines = 0;
     for (;;) {
-      const nl = this.buf.indexOf('\n', i);
-      if (nl < 0) return null; // incomplete line: wait
-      const line = this.buf.slice(i, nl + 1);
+      const nl = this.buf.indexOf(0x0a, i);
+      if (nl < 0) {
+        this.need = this.buf.length + 1; // incomplete line: wait for more
+        return null;
+      }
       if (++lines > MAX_RESPONSE_LINES) throw new Error('imap: response too long');
+      const line = this.buf.subarray(i, nl + 1);
       i = nl + 1;
-      const m = /\{(\d+)\}\r?\n$/.exec(line);
+      // the `{N}` marker is ASCII, so matching it on a latin1 view of the bytes is exact
+      const m = /\{(\d+)\}\r?\n$/.exec(line.toString('latin1'));
       if (m) {
         const n = Number(m[1]);
         if (!Number.isInteger(n) || n < 0) return null;
         if (n > MAX_LITERAL) throw new Error(`imap: literal of ${n} bytes refused (cap ${MAX_LITERAL})`);
-        if (this.buf.length < i + n) return null; // wait for the literal
-        const lit = this.buf.slice(i, i + n);
-        literals.push(lit);
-        text += `${line.slice(0, line.length - m[0].length)}\u0000${literals.length - 1}\u0000`;
+        if (this.buf.length < i + n) {
+          this.need = i + n; // wait for the literal
+          return null;
+        }
+        const lit = Buffer.from(this.buf.subarray(i, i + n));
+        literalBytes.push(lit);
+        literals.push(lit.toString('utf8'));
+        text += `${line.subarray(0, line.length - m[0].length).toString('utf8')}\u0000${literals.length - 1}\u0000`;
         i += n;
         continue;
       }
-      text += line;
-      return { text: text.replace(/[\r\n]+$/, ''), literals, consumed: i };
+      text += line.toString('utf8');
+      return { text: text.replace(/[\r\n]+$/, ''), literals, literalBytes, consumed: i };
     }
   }
 }
@@ -225,6 +266,8 @@ export interface FetchResult {
   internalDate?: number;
   /** section name (e.g. `HEADER`, `TEXT`, `1.2`) -> decoded text; '' when the server said NIL */
   sections: Record<string, string>;
+  /** the same sections as raw bytes, when they arrived as literals (a body is decoded per charset by mime.ts) */
+  sectionBytes: Record<string, Buffer>;
   /** the Gmail/Thunderbird-style thread id, when the server offers one */
   threadId?: string;
   envelope?: Envelope;
@@ -243,12 +286,12 @@ export interface Envelope {
  * Parse `* n FETCH (...)` into a result. Section keys lose their `[]` (FETCH (BODY[HEADER] {12})),
  * and `BODY[]` becomes the key `''`-less `BODY` — the caller asks for what it requested.
  */
-export function parseFetch(untagged: string, literals: string[]): FetchResult | null {
+export function parseFetch(untagged: string, literals: string[], literalBytes: Buffer[] = []): FetchResult | null {
   const m = /^\*?\s*(\d+)\s+FETCH\s+\(([\s\S]*)\)\s*$/i.exec(untagged.trim());
   if (!m) return null;
   const seq = Number(m[1]);
   const toks = tokenize(m[2]);
-  const out: FetchResult = { uid: 0, seq, sections: {} };
+  const out: FetchResult = { uid: 0, seq, sections: {}, sectionBytes: {} };
   for (let i = 0; i < toks.length; i++) {
     const key = toks[i];
     if (typeof key !== 'string' || isPlaceholder(key)) continue;
@@ -295,6 +338,8 @@ export function parseFetch(untagged: string, literals: string[]): FetchResult | 
         if (Array.isArray(toks[i + 1]) && /\bHEADER\.FIELDS$/i.test(name)) name += ` (${(toks[i + 1] as ImapValue[]).map(String).join(' ')})`;
         const value = literalAt(val, literals);
         out.sections[name.toUpperCase()] = partial ? value.slice(Number(partial[1])) : value;
+        const bytes = isPlaceholder(val) ? literalBytes[Number((val as string).slice(1, -1))] : undefined;
+        if (bytes) out.sectionBytes[name.toUpperCase()] = partial ? bytes.subarray(Number(partial[1])) : bytes;
         if (Array.isArray(toks[i + 1]) && /\bHEADER\.FIELDS$/i.test(name)) i++;
         i++;
         continue;
@@ -348,8 +393,10 @@ interface Pending {
   tag: string;
   cmd: string;
   untagged: ImapResponse[];
-  responses: Array<{ text: string; literals: string[] }>;
+  responses: Array<{ text: string; literals: string[]; literalBytes?: Buffer[] }>;
   literals: string[];
+  /** what to write on each `+` continuation, in order (a literal, or a SASL response) */
+  cont: string[];
   resolve: (r: ImapResponse) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout> | null;
@@ -373,6 +420,8 @@ export class ImapClient {
   /** set by the greeting; the client refuses to send commands after a BYE */
   private closed = false;
   private idleMode = false;
+  /** the connection is gone (socket closed or a command timed out); `bye` has been emitted */
+  private ended = false;
   private idleResolve: (() => void) | null = null;
 
   constructor(
@@ -405,6 +454,9 @@ export class ImapClient {
 
   private onClosed(err?: Error) {
     this.closed = true;
+    // once per connection: a timeout closes the socket itself, and the socket then reports the close
+    if (this.ended) return;
+    this.ended = true;
     const p = this.pending;
     if (p) {
       if (p.timer) clearTimeout(p.timer);
@@ -418,7 +470,13 @@ export class ImapClient {
 
   private onResponse(r: ImapResponse) {
     if (r.text.startsWith('+')) {
-      // a continuation request: AUTHENTICATE / IDLE
+      // a continuation request: the server is ready for a literal or a SASL response
+      const p = this.pending;
+      if (p && p.cont.length) {
+        this.socket.write(p.cont.shift()!);
+        return;
+      }
+      // IDLE
       if (this.idleMode) this.idleAccepted = true;
       this.idleResolve?.();
       this.idleResolve = null;
@@ -451,7 +509,7 @@ export class ImapClient {
         // matches on the wire form, and dropping the `*` here silently broke SEARCH and SELECT
         r.untagged = r.text;
         p.untagged.push(r);
-        p.responses.push({ text: r.text, literals: r.literals });
+        p.responses.push({ text: r.text, literals: r.literals, literalBytes: r.literalBytes });
         p.literals.push(...r.literals);
       }
       return;
@@ -470,27 +528,41 @@ export class ImapClient {
     p.resolve({ ...r, untagged: p.untagged.map((u) => u.text).join('\n') } as ImapResponse & { untagged: string });
   }
 
-  /** Run one tagged command and collect its untagged responses. */
-  private command(cmd: string, opts: { literal?: string; timeoutMs?: number } = {}): Promise<ImapResponse> {
+  /**
+   * Run one tagged command and collect its untagged responses.
+   *
+   * `literal`: RFC 3501 synchronizing literal — `TAG CMD {N}\r\n`, WAIT for the server's `+`, then the
+   * N bytes and the CRLF that ends the command line. With LITERAL+ (RFC 7888) the `{N+}` form is sent
+   * in one write. `continuation`: what to send after the first `+` with no literal (a SASL response).
+   */
+  private command(cmd: string, opts: { literal?: string; continuation?: string[]; timeoutMs?: number } = {}): Promise<ImapResponse> {
     if (this.closed) return Promise.reject(new Error('imap: the connection is closed'));
     if (this.pending) return Promise.reject(new Error('imap: a command is already in flight (commands are serialised by design)'));
     const tag = `A${String(++this.tagN).padStart(4, '0')}`;
     return new Promise<ImapResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pending?.tag === tag) {
-          this.pending = null;
-          // a timeout leaves the connection in an unknown state: the caller must drop it
-          reject(new Error(`imap: ${cmd.split(' ')[0]} timed out after ${opts.timeoutMs ?? this.timeoutMs}ms`));
+          // a timeout leaves the connection in an unknown state (a late answer would be read as the
+          // reply to the NEXT command), so it is fatal: the socket is closed and the caller reconnects
+          this.onClosed(new Error(`imap: ${cmd.split(' ')[0]} timed out after ${opts.timeoutMs ?? this.timeoutMs}ms`));
+          this.close();
         }
       }, opts.timeoutMs ?? this.timeoutMs);
-      this.pending = { tag, cmd, untagged: [], responses: [], literals: [], resolve, reject, timer };
-      // RFC 3501: a literal is announced on the SAME line as the command, as `{N}` followed by CRLF
-      // and then exactly N bytes. (Sending the command line first and the literal header on a second
-      // line is a protocol error, and it is the shape an earlier draft had.)
-      const body =
-        opts.literal === undefined
-          ? `${tag} ${cmd}\r\n`
-          : `${tag} ${cmd} {${Buffer.byteLength(opts.literal, 'utf8')}}\r\n${opts.literal}`;
+      let body: string;
+      const cont: string[] = [...(opts.continuation ?? [])];
+      if (opts.literal === undefined) {
+        body = `${tag} ${cmd}\r\n`;
+      } else {
+        // the literal is announced on the SAME line as the command; the command line then ends AFTER it
+        const n = Buffer.byteLength(opts.literal, 'utf8');
+        if (this.has('LITERAL+') || (this.has('LITERAL-') && n <= 4096)) {
+          body = `${tag} ${cmd} {${n}+}\r\n${opts.literal}\r\n`;
+        } else {
+          body = `${tag} ${cmd} {${n}}\r\n`;
+          cont.unshift(`${opts.literal}\r\n`);
+        }
+      }
+      this.pending = { tag, cmd, untagged: [], responses: [], literals: [], cont, resolve, reject, timer };
       try {
         this.socket.write(body);
       } catch (e) {
@@ -552,15 +624,25 @@ export class ImapClient {
   /** AUTHENTICATE PLAIN (base64 of NUL user NUL pass) — preferred over LOGIN when advertised. */
   async authenticatePlain(username: string, password: string): Promise<void> {
     const blob = Buffer.from(`\u0000${username}\u0000${password}`, 'utf8').toString('base64');
-    const r = await this.command('AUTHENTICATE PLAIN', { literal: blob });
+    const r = await this.authenticate('PLAIN', blob);
     if (r.status !== 'OK') throw new Error(`imap: PLAIN auth refused: ${sanitizeDetail(r.detail)}`);
   }
 
   /** Gmail's XOAUTH2: `user=<u>\x01auth=Bearer <token>\x01\x01`. */
   async authenticateXoauth2(username: string, accessToken: string): Promise<void> {
     const blob = Buffer.from(`user=${username}\u0001auth=Bearer ${accessToken}\u0001\u0001`, 'utf8').toString('base64');
-    const r = await this.command('AUTHENTICATE XOAUTH2', { literal: blob });
+    const r = await this.authenticate('XOAUTH2', blob);
     if (r.status !== 'OK') throw new Error(`imap: XOAUTH2 refused: ${sanitizeDetail(r.detail)}`);
+  }
+
+  /**
+   * RFC 3501 AUTHENTICATE: the SASL response is a base64 LINE, never a literal. With SASL-IR (RFC 4959)
+   * it rides on the command line; otherwise the client waits for `+` and sends it. A second `+` (an
+   * XOAUTH2 error challenge) is answered with an empty line, which makes the server send its tagged NO.
+   */
+  private authenticate(mech: string, b64: string): Promise<ImapResponse> {
+    if (this.has('SASL-IR')) return this.command(`AUTHENTICATE ${mech} ${b64}`, { continuation: ['\r\n'] });
+    return this.command(`AUTHENTICATE ${mech}`, { continuation: [`${b64}\r\n`, '\r\n'] });
   }
 
   async list(reference = '', pattern = '*'): Promise<Array<{ path: string; name: string; delimiter: string; flags: string[] }>> {
@@ -628,7 +710,7 @@ export class ImapClient {
     const out: FetchResult[] = [];
     // each response is parsed against ITS OWN literals (see ImapResponse.responses)
     for (const res of r.responses ?? []) {
-      const f = parseFetch(res.text, res.literals);
+      const f = parseFetch(res.text, res.literals, res.literalBytes);
       if (f && f.uid > 0) out.push(f);
     }
     return out;
@@ -642,6 +724,19 @@ export class ImapClient {
       if (f && f.uid === uid) return f.sections[''] ?? '';
     }
     return '';
+  }
+
+  /**
+   * One message's full text by uid as the server's BYTES, so mime.ts can decode each part per its
+   * declared charset (an 8-bit latin1 body is not UTF-8). Empty when the server answers NIL.
+   */
+  async uidBodyBytes(uid: number): Promise<Buffer> {
+    const r = await this.command(`UID FETCH ${uid} (BODY.PEEK[])`);
+    for (const res of r.responses ?? []) {
+      const f = parseFetch(res.text, res.literals, res.literalBytes);
+      if (f && f.uid === uid) return f.sectionBytes[''] ?? Buffer.from(f.sections[''] ?? '', 'utf8');
+    }
+    return Buffer.alloc(0);
   }
 
   /**
@@ -744,7 +839,9 @@ export class ImapClient {
   }
 
   close(): void {
-    this.closed = true;
+    // settle anything in flight NOW (an IDLE, a pending command): a transport that has been ended by
+    // us does not report its own close, and a caller awaiting it would otherwise wait for a timeout
+    this.onClosed(new Error('imap: the connection was closed'));
     try {
       this.socket.end();
     } catch {

@@ -1,0 +1,101 @@
+# Test fixture shaped like a real himalaya config (ticket 37b). SYNTHETIC: no real credential is in
+# this file; the unit suite must never read the user's ~/.config/himalaya/config.toml.
+
+[accounts.alice]
+email = "alice@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "alice@example.com"
+imap.sasl.plain.password.raw = "fixture-password-0"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.bob]
+email = "bob@example.com"
+imap.server = "imaps://imap.gmail.com:993"
+imap.sasl.plain.username = "bob@example.com"
+imap.sasl.plain.password.raw = "fixture-password-1"
+smtp.server = "smtp://smtp.gmail.com:587"
+mailbox.alias.sent = "Sent"
+
+[accounts.carol]
+email = "carol@example.com"
+imap.server = "imaps://imap.gmail.com:993"
+imap.sasl.plain.username = "carol@example.com"
+imap.sasl.plain.password.raw = "fixture-password-2"
+smtp.server = "smtp://smtp.gmail.com:587"
+mailbox.alias.sent = "Sent"
+
+[accounts.team-a]
+email = "team-a@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "team-a@example.com"
+imap.sasl.plain.password.raw = "fixture-password-3"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.team-b]
+email = "team-b@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "team-b@example.com"
+imap.sasl.plain.password.raw = "fixture-password-4"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.team-c]
+email = "team-c@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "team-c@example.com"
+imap.sasl.plain.password.raw = "fixture-password-5"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.team-d]
+email = "team-d@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "team-d@example.com"
+imap.sasl.plain.password.raw = "fixture-password-6"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.ops]
+email = "ops@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "ops@example.com"
+imap.sasl.plain.password.raw = "fixture-password-7"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.noc]
+email = "noc@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "noc@example.com"
+imap.sasl.plain.password.raw = "fixture-password-8"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.team-e]
+email = "team-e@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "team-e@example.com"
+imap.sasl.plain.password.raw = "fixture-password-9"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.team-f]
+email = "team-f@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "team-f@example.com"
+imap.sasl.plain.password.raw = "fixture-password-10"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[accounts.vault-user]
+email = "vault-user@example.com"
+imap.server = "imaps://mail.example.com:993"
+imap.sasl.plain.username = "vault-user@example.com"
+imap.sasl.plain.password.cmd = "pass show mail/vault-user"
+smtp.server = "smtps://mail.example.com:465"
+mailbox.alias.sent = "Sent"
+
+[settings]
+theme = "dark"

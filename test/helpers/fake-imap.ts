@@ -15,7 +15,8 @@ export interface FakeFolder {
   path: string;
   uidValidity: number;
   uidNext: number;
-  messages: Array<{ uid: number; flags: string[]; raw: string }>;
+  /** `bytes`, when set, is what the server sends instead of `raw` as UTF-8 (e.g. a latin1 body) */
+  messages: Array<{ uid: number; flags: string[]; raw: string; bytes?: Buffer }>;
 }
 
 export interface FakeServerOptions {
@@ -28,15 +29,17 @@ export interface FakeServerOptions {
   refuseAuth?: boolean;
   /** advertise IDLE and send unsolicited EXISTS when `pushExists()` is called */
   idle?: boolean;
-  /** split every server write into chunks of this many characters */
+  /** split every server write into chunks of this many BYTES (a UTF-8 character can be cut in two) */
   chunkSize?: number;
   /** emit a BYE right after the greeting */
   byeAfterGreeting?: boolean;
+  /** answer MOVE / COPY without the UIDPLUS COPYUID code */
+  noCopyUid?: boolean;
 }
 
 export class FakeImapServer {
   readonly log: string[] = [];
-  private dataCb: ((c: string) => void) | null = null;
+  private dataCb: ((c: Buffer) => void) | null = null;
   private closeCb: ((e?: Error) => void) | null = null;
   private closed = false;
   private idle = false;
@@ -45,8 +48,14 @@ export class FakeImapServer {
   literals = 0;
   /** the folder the last SELECT / EXAMINE opened; a fetch answers from here */
   selected: FakeFolder | null = null;
+  /** true when the folder was opened with EXAMINE: a real server refuses STORE / MOVE / EXPUNGE then */
+  selectedReadOnly = false;
   /** set by tests: the next `{N}` literal is announced with this size instead of the real one */
   lieAboutLiteralSize: number | null = null;
+  /** every BAD the server sent (a protocol violation by the client), for a test to assert is empty */
+  readonly bad: string[] = [];
+  /** the literals and SASL responses the client sent, decoded */
+  readonly received: string[] = [];
 
   constructor(private readonly opts: FakeServerOptions = {}) {
     this.folders = opts.folders ?? [
@@ -69,6 +78,8 @@ export class FakeImapServer {
     let greeted = false;
     // a dropped connection is per-connection: a real server keeps accepting new ones
     this.closed = false;
+    this.inbuf = Buffer.alloc(0);
+    this.state = { kind: 'line', prefix: '', literal: null };
     return {
       write: (d: string) => self.receive(d),
       onData: (cb) => {
@@ -92,10 +103,13 @@ export class FakeImapServer {
     };
   }
 
-  /** Push raw text to the client (used by tests to inject malformed data). */
-  push(text: string) {
+  /** Push raw text (or bytes) to the client (used by tests to inject malformed data). */
+  push(text: string | Buffer) {
     if (this.closed) return;
-    this.dataCb?.(text);
+    const b = typeof text === 'string' ? Buffer.from(text, 'utf8') : text;
+    const n = this.opts.chunkSize ?? 0;
+    if (n > 0) for (let i = 0; i < b.length; i += n) this.dataCb?.(b.subarray(i, i + n));
+    else this.dataCb?.(b);
   }
 
   /** Simulate the server dropping the connection. */
@@ -116,43 +130,118 @@ export class FakeImapServer {
 
   // ------------------------------------------------------------ command handling
 
+  // The command reader is a byte stream, and it is STRICT about RFC 3501 literals, because a real
+  // server is: a `{N}` (synchronizing) literal may only be sent after the server's `+` continuation,
+  // `{N+}` only when LITERAL+ is advertised, and the command line must END (CRLF) after the literal.
+  // An earlier fake accepted `TAG CMD {N}\r\n<literal>` in one write with no CRLF — the shape that
+  // hangs AUTHENTICATE and APPEND on Dovecot/Gmail — so the client shipped with exactly that bug.
+  private inbuf: Buffer = Buffer.alloc(0);
+  private state:
+    | { kind: 'line'; prefix: string; literal: string | null; afterLiteral?: boolean }
+    | { kind: 'literal'; prefix: string; size: number }
+    | { kind: 'sasl'; tag: string; mech: string } = { kind: 'line', prefix: '', literal: null };
+  private processing = false;
+
   private receive(chunk: string) {
     this.log.push(chunk);
-    // The client writes the command, the `{N}` announcement and the literal in ONE write, so the
-    // literal must be split off the same buffer. (An earlier draft expected the literal in a SECOND
-    // write, which is what a `{N}`-then-bytes client does — and which cost three timeouts here.)
-    const pending = this.sawLiteral;
-    this.sawLiteral = null;
-    if (pending) {
-      const literal = chunk.slice(0, pending.size);
-      this.handle(pending.cmd, literal, chunk.slice(pending.size));
-      return;
-    }
-    // the common case: `TAG CMD {N}\r\n` and the N literal bytes in the SAME write
-    const nl = chunk.indexOf('\r\n');
-    if (nl >= 0) {
-      const first = chunk.slice(0, nl);
-      const m = /\{(\d+)\}$/.exec(first);
-      if (m) {
-        const cmd = first.slice(0, m.index).trim();
-        const size = Number(m[1]);
-        const start = nl + 2;
-        this.handle(cmd, chunk.slice(start, start + size), chunk.slice(start + size));
-        return;
-      }
-    }
-    for (const line of chunk.split('\r\n')) {
-      if (!line) continue;
-      const m = /\{(\d+)\}$/.exec(line);
-      if (m) {
-        this.sawLiteral = { cmd: line.slice(0, m.index).trim(), size: Number(m[1]) };
-        continue;
-      }
-      this.handle(line, '', '');
+    this.inbuf = Buffer.concat([this.inbuf, Buffer.from(chunk, 'utf8')]);
+    // re-entrancy: a `+` we push makes the client write synchronously; the loop below picks it up
+    if (this.processing) return;
+    this.processing = true;
+    try {
+      while (!this.closed && this.step());
+    } finally {
+      this.processing = false;
     }
   }
 
-  private sawLiteral: { cmd: string; size: number } | null = null;
+  private caps(): string[] {
+    return this.opts.capabilities ?? ['IMAP4rev1', 'UIDPLUS', 'MOVE', ...(this.opts.idle ? ['IDLE'] : [])];
+  }
+
+  private reject(tag: string, why: string) {
+    this.bad.push(why);
+    this.inbuf = Buffer.alloc(0);
+    this.state = { kind: 'line', prefix: '', literal: null };
+    this.push(`${tag} BAD ${why}\r\n`);
+  }
+
+  /** consume one unit (a line, a literal, a SASL response); false when more bytes are needed */
+  private step(): boolean {
+    const st = this.state;
+    if (st.kind === 'literal') {
+      if (this.inbuf.length < st.size) return false;
+      const lit = this.inbuf.subarray(0, st.size).toString('utf8');
+      this.inbuf = this.inbuf.subarray(st.size);
+      this.received.push(lit);
+      this.state = { kind: 'line', prefix: st.prefix, literal: lit, afterLiteral: true };
+      return true;
+    }
+    if (st.kind === 'line' && st.afterLiteral) {
+      if (!this.inbuf.length) return false;
+      // after a literal the command line continues: CRLF ends it, SP starts another argument; anything
+      // else (typically the NEXT command's tag) means the client never terminated the line
+      const c = this.inbuf[0];
+      if (c !== 0x0d && c !== 0x20) {
+        this.reject(st.prefix.split(' ')[0] || '*', 'the command line was not terminated with CRLF after the literal');
+        return true;
+      }
+      this.state = { ...st, afterLiteral: false };
+    }
+    const nl = this.inbuf.indexOf('\r\n');
+    if (nl < 0) return false;
+    const line = this.inbuf.subarray(0, nl).toString('utf8');
+    this.inbuf = this.inbuf.subarray(nl + 2);
+
+    if (st.kind === 'sasl') {
+      this.state = { kind: 'line', prefix: '', literal: null };
+      this.received.push(line);
+      this.finishAuth(st.tag, st.mech, line);
+      return true;
+    }
+    const full = st.prefix + line;
+    const m = /\{(\d+)(\+?)\}$/.exec(line);
+    if (m) {
+      const tag = full.split(' ')[0] || '*';
+      const size = Number(m[1]);
+      const prefix = full.slice(0, full.length - m[0].length);
+      if (m[2] === '+') {
+        if (!this.caps().includes('LITERAL+')) {
+          this.reject(tag, 'non-synchronizing literal without LITERAL+');
+          return true;
+        }
+      } else {
+        // the client must WAIT for the continuation: bytes already queued behind `{N}` were sent early
+        if (this.inbuf.length) {
+          this.reject(tag, 'literal data sent before the continuation request');
+          return true;
+        }
+      }
+      this.state = { kind: 'literal', prefix, size };
+      if (m[2] !== '+') this.push('+ Ready for literal data\r\n');
+      return true;
+    }
+    const literal = st.kind === 'line' ? st.literal : null;
+    this.state = { kind: 'line', prefix: '', literal: null };
+    if (!full) return true;
+    this.handle(full, literal ?? '', '');
+    return true;
+  }
+
+  private finishAuth(tag: string, mech: string, b64: string) {
+    if (b64 === '*') return this.no(tag, 'AUTHENTICATE cancelled'); // RFC 3501 cancellation
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) return this.reject(tag, 'the SASL response is not base64');
+    if (this.opts.refuseAuth) return this.no(tag, '[AUTHENTICATIONFAILED] invalid credentials');
+    const dec = Buffer.from(b64, 'base64').toString('utf8');
+    if (mech === 'PLAIN') {
+      const [, user, pass] = dec.split('\u0000');
+      if (this.opts.user && user !== this.opts.user) return this.no(tag, '[AUTHENTICATIONFAILED] invalid credentials');
+      if (this.opts.password && pass !== this.opts.password) return this.no(tag, '[AUTHENTICATIONFAILED] invalid credentials');
+    } else if (this.opts.user && !dec.startsWith(`user=${this.opts.user}\u0001`)) {
+      return this.no(tag, '[AUTHENTICATIONFAILED] invalid credentials');
+    }
+    return this.ok(tag, 'AUTHENTICATE completed');
+  }
 
   private handle(line: string, literal: string, rest: string) {
     // DONE is the one command with NO tag (it ends an IDLE); splitting a tag off it first left
@@ -166,7 +255,7 @@ export class FakeImapServer {
     const tag = line.split(/\s+/)[0] ?? '*';
     const cmd = line.slice(tag.length).trim();
     const upper = cmd.toUpperCase();
-    const caps = this.opts.capabilities ?? ['IMAP4rev1', 'UIDPLUS', 'MOVE', ...(this.opts.idle ? ['IDLE'] : [])];
+    const caps = this.caps();
 
     if (upper.startsWith('CAPABILITY')) return this.ok(tag, 'CAPABILITY completed', [`* CAPABILITY ${caps.join(' ')}\r\n`]);
     if (upper.startsWith('LOGIN')) {
@@ -176,9 +265,20 @@ export class FakeImapServer {
       return this.ok(tag, 'LOGIN completed');
     }
     if (upper.startsWith('AUTHENTICATE')) {
-      if (this.opts.refuseAuth) return this.no(tag, '[AUTHENTICATIONFAILED] invalid credentials');
-      if (literal) this.push(''); // consume; a real server would decode it
-      return this.ok(tag, 'AUTHENTICATE completed');
+      // RFC 3501: the SASL response is a base64 LINE after `+`, never a literal; an initial response
+      // on the command line is only legal with SASL-IR (RFC 4959)
+      if (literal) return this.reject(tag, 'AUTHENTICATE does not take a literal');
+      const [, mech = '', initial] = cmd.split(/\s+/);
+      const MECH = mech.toUpperCase();
+      if (!caps.includes(`AUTH=${MECH}`)) return this.no(tag, `unsupported mechanism ${MECH}`);
+      if (initial !== undefined) {
+        if (!caps.includes('SASL-IR')) return this.reject(tag, 'initial response without SASL-IR');
+        this.received.push(initial);
+        return this.finishAuth(tag, MECH, initial === '=' ? '' : initial);
+      }
+      this.state = { kind: 'sasl', tag, mech: MECH };
+      this.push('+ \r\n');
+      return;
     }
     if (upper.startsWith('LIST')) {
       const lines = this.folders.map((f) => `* LIST (\\HasNoChildren) "/" "${f.path}"\r\n`);
@@ -189,6 +289,7 @@ export class FakeImapServer {
       const f = this.folders.find((x) => x.path === path);
       if (!f) return this.no(tag, `[NONEXISTENT] mailbox ${path}`);
       this.selected = f;
+      this.selectedReadOnly = upper.startsWith('EXAMINE');
       const lines = [
         `* ${f.messages.length} EXISTS\r\n`,
         `* 0 RECENT\r\n`,
@@ -209,6 +310,7 @@ export class FakeImapServer {
       return this.ok(tag, 'SEARCH completed', [`* SEARCH ${uids.join(' ')}\r\n`]);
     }
     if (upper.startsWith('UID FETCH')) return this.uidFetch(tag, cmd);
+    if (this.selectedReadOnly && /^(UID STORE|UID MOVE|EXPUNGE)/.test(upper)) return this.no(tag, '[READ-ONLY] the mailbox was opened with EXAMINE');
     if (upper.startsWith('UID STORE')) {
       const flags = /\(([^)]*)\)/.exec(cmd)?.[1] ?? '';
       this.uidStore(cmd, flags, upper.includes('+FLAGS') ? 'add' : upper.includes('-FLAGS') ? 'remove' : 'set');
@@ -226,7 +328,7 @@ export class FakeImapServer {
         }
       }
       const newUids = moved.map((_, i) => (f?.uidNext ?? 1) - moved.length + i).join(',');
-      const detail = `[COPYUID 42 ${uids} ${newUids}]`;
+      const detail = this.opts.noCopyUid ? '' : `[COPYUID 42 ${uids} ${newUids}]`;
       if (upper.startsWith('UID MOVE')) {
         // remove from the source
         for (const folder of this.folders) folder.messages = folder.messages.filter((m) => !moved.includes(m.uid) || folder.path === target);
@@ -276,7 +378,7 @@ export class FakeImapServer {
       const hi = r[2] === '*' ? Number.MAX_SAFE_INTEGER : Number(r[2]);
       return folder.messages.filter((m) => m.uid >= lo && m.uid <= hi).map((m) => m.uid);
     });
-    const lines: string[] = [];
+    const lines: Array<string | Buffer> = [];
     let seq = 0;
     for (const m of folder.messages) {
       seq++;
@@ -285,17 +387,18 @@ export class FakeImapServer {
       const wantsHeader = /BODY(\.PEEK)?\[HEADER/i.test(what);
       const date = /^Date:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? 'Mon, 01 Jan 2024 00:00:00 +0000';
       // a real server always sends INTERNALDATE; without it the store's sort order is the test's clock
-      const attrs = [`UID ${m.uid}`, `FLAGS (${m.flags.join(' ')})`, `RFC822.SIZE ${Buffer.byteLength(m.raw)}`, `INTERNALDATE "${date}"`];
+      const attrs = [`UID ${m.uid}`, `FLAGS (${m.flags.join(' ')})`, `RFC822.SIZE ${m.bytes?.length ?? Buffer.byteLength(m.raw)}`, `INTERNALDATE "${date}"`];
       if (/ENVELOPE/i.test(what)) {
         const subject = /^Subject:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? '';
         const from = /^From:\s*(.*)$/im.exec(m.raw)?.[1]?.trim() ?? '';
         attrs.push(`ENVELOPE ("Mon, 01 Jan 2024 00:00:00 +0000" "${subject}" (("" NIL "${from.split('@')[0]}" "${from.split('@')[1] ?? ''}")) NIL NIL NIL NIL NIL "<${subject.replace(/\s+/g, '.')}@example.com>")`);
       }
       if (wantsBody || wantsHeader) {
-        const payload = wantsHeader ? m.raw.split(/\r?\n\r?\n/)[0] + '\r\n' : m.raw;
-        const size = this.lieAboutLiteralSize ?? Buffer.byteLength(payload);
+        // BYTES: `{N}` is an octet count, so a non-ASCII message announces more than its JS length
+        const payload = wantsHeader ? Buffer.from(m.raw.split(/\r?\n\r?\n/)[0] + '\r\n', 'utf8') : (m.bytes ?? Buffer.from(m.raw, 'utf8'));
+        const size = this.lieAboutLiteralSize ?? payload.length;
         const section = wantsBody && !wantsHeader ? 'BODY[]' : 'BODY[HEADER]';
-        lines.push(`* ${seq} FETCH (${attrs.join(' ')} ${section} {${size}}\r\n${payload})\r\n`);
+        lines.push(Buffer.concat([Buffer.from(`* ${seq} FETCH (${attrs.join(' ')} ${section} {${size}}\r\n`, 'utf8'), payload, Buffer.from(')\r\n')]));
         this.literals++;
         continue;
       }
@@ -317,8 +420,8 @@ export class FakeImapServer {
     }
   }
 
-  private ok(tag: string, detail: string, extra: string[] = []) {
-    this.push(extra.join('') + `${tag} OK ${detail}\r\n`);
+  private ok(tag: string, detail: string, extra: Array<string | Buffer> = []) {
+    this.push(Buffer.concat([...extra.map((x) => (typeof x === 'string' ? Buffer.from(x, 'utf8') : x)), Buffer.from(`${tag} OK ${detail}\r\n`, 'utf8')]));
   }
 
   private no(tag: string, detail: string) {
