@@ -207,7 +207,9 @@ export class TabManager {
   /** chrome heights / widths around the pages (bookmarks bar, side panel, status bar) */
   setInsets(top: number, left: number, bottom = 0) {
     this.topInset = Math.max(TOP_BAR, top);
-    this.leftInset = Math.max(0, left);
+    // a chrome section may cover the whole page area (mail): the inset can reach the window width,
+    // the page area is then 0 wide and layout() hides every page view
+    this.leftInset = Math.max(0, Math.min(left, this.win.getContentBounds().width));
     this.bottomInset = Math.max(0, bottom);
     this.layout();
   }

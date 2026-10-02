@@ -171,7 +171,10 @@ export function register(on: (channel: string, fn: Handler) => void, rt: Runtime
 
   on('chrome:insets', (_e, top: unknown, left: unknown, bottom: unknown) => {
     const t = Math.max(0, Math.min(400, Math.round(Number(top) || 0)));
-    const l = Math.max(0, Math.min(600, Math.round(Number(left) || 0)));
+    // Bounded by the window's own width (in setInsets), NOT by a fixed 600: the mail panel covers
+    // the whole page area and asks for the full width, and a 600 cap left a live page view drawn
+    // on top of the mail panel (a see-through hole on a transparent about:blank).
+    const l = Math.max(0, Math.min(16_384, Math.round(Number(left) || 0)));
     const b = Math.max(0, Math.min(200, Math.round(Number(bottom) || 0)));
     rt.tabs.setInsets(t, l, b);
   });

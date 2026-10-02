@@ -24,4 +24,17 @@ test('the chord opens mail as a PANEL in this window, and no second window appea
   expect(uiWindows(a.app).length).toBe(chromeBefore);
   expect(await a.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(bwBefore);
   expect(a.app.windows().some((w) => w.url().includes('mail.html'))).toBe(false);
+
+  // the mail panel covers the page area, so NO page view may be drawn over it: a visible tab view
+  // here shows up as a see-through hole across the reading pane (the chrome screenshot cannot see
+  // native views, so this asks the main process)
+  await expect
+    .poll(() => a!.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().flatMap((w) => w.contentView.children.filter((v) => v.getVisible()).map((v) => v.getBounds()))))
+    .toEqual([]);
+
+  // closing mail gives the page its area back
+  await a.ui.locator('[data-testid=rail-mail]').click();
+  await expect
+    .poll(() => a!.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().flatMap((w) => w.contentView.children.filter((v) => v.getVisible()).length).reduce((x, y) => x + y, 0)))
+    .toBe(1);
 });
