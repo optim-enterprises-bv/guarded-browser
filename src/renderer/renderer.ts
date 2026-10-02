@@ -4,6 +4,11 @@ import type { Settings } from '../core/config';
 import type { ConfirmRequest } from '../core/types';
 import { initAppearance } from './appearance';
 import { initLibrary } from './library';
+import { initStatus } from './status-ui';
+import { initPanels, RAIL_WIDTH } from './panels';
+import { initPalette } from './palette';
+import { initStart } from './start';
+import { initWave2 } from './wave2';
 
 interface Bridge {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
@@ -26,8 +31,13 @@ function el(tag: string, attrs: Record<string, string> = {}, ...children: Array<
 }
 
 // ---------- tabs & navigation ----------
-interface TabInfo { id: number; title: string; url: string; loading: boolean; active: boolean; guardFlags: number; canGoBack: boolean; canGoForward: boolean; pane: number | null; selected: boolean; agent: boolean }
+interface TabInfo { id: number; title: string; url: string; loading: boolean; active: boolean; guardFlags: number; canGoBack: boolean; canGoForward: boolean; pane: number | null; selected: boolean; agent: boolean; audible: boolean; muted: boolean }
 let lastTabs: TabInfo[] = [];
+/** how many closed tabs Ctrl+Shift+T could bring back (shown in the tab menu) */
+let closedTabCount = 0;
+gb.on('closed-tabs', (list) => {
+  closedTabCount = Array.isArray(list) ? list.length : 0;
+});
 
 function renderTabs(list: TabInfo[]) {
   lastTabs = list;
@@ -43,6 +53,7 @@ function renderTabs(list: TabInfo[]) {
       ...(t.agent ? [el('span', { class: 'lock-agent-chip', title: 'the agent is operating this tab' }, 'AGENT')] : []),
       ...(t.guardFlags ? [el('span', { class: 'lock-flag', title: 'content withheld by the guard' }, '!')] : []),
       ...(t.pane ? [el('span', { class: 'pnum' }, `[${t.pane}]`)] : []),
+      ...(t.audible || t.muted ? [el('span', { class: 'audio-chip', title: t.muted ? 'Muted' : 'Playing audio' }, t.muted ? '\u{1F507}' : '\u{1F50A}')] : []),
       el('span', { class: 'title' }, `${t.loading ? '… ' : ''}${t.title}`), x);
     // Ctrl/Cmd+click selects tabs for tiling; plain click activates
     tab.onclick = (ev) => {
@@ -56,6 +67,9 @@ function renderTabs(list: TabInfo[]) {
     box.append(tab);
   }
   const active = list.find((t) => t.active);
+  // the start/new-tab page is CHROME drawn over an about:blank tab (ticket 13): no page scheme, no
+  // preload, nothing for the agent to reach. It shows exactly when the active tab is blank.
+  startUi?.setVisible(!!active && (active.url === '' || active.url === 'about:blank'));
   if (active) {
     const addr = $<HTMLInputElement>('address');
     if (document.activeElement !== addr) addr.value = active.url === 'about:blank' ? '' : active.url;
@@ -157,12 +171,20 @@ function showTabMenu(t: TabInfo, x: number, y: number) {
   };
   const selected = lastTabs.filter((x) => x.selected).map((x) => x.id);
   const ids = [...new Set([t.id, ...selected])];
+  const closedCount = closedTabCount;
   menu.replaceChildren(
+    item('Reopen closed tab' + (closedCount ? ` (${closedCount})` : ''), () => void gb.invoke('tabs:reopen')),
+    item('Duplicate tab', () => void gb.invoke('tabs:duplicate', t.id)),
+    item(t.muted ? 'Unmute tab' : 'Mute tab', () => void gb.invoke('tabs:mute', t.id, !t.muted)),
+    item('Reload', () => void gb.invoke('nav:reload')),
     item(t.selected ? 'Deselect for split view' : 'Select for split view', () => void gb.invoke('tabs:select', t.id)),
     item('Tile side by side', () => void gb.invoke('tiles:tile', ids.length >= 2 ? ids : undefined, 'columns')),
     item('Tile stacked', () => void gb.invoke('tiles:tile', ids.length >= 2 ? ids : undefined, 'rows')),
     item('Tile as grid', () => void gb.invoke('tiles:tile', ids.length >= 2 ? ids : undefined, 'grid')),
     item('Untile', () => void gb.invoke('tiles:untile')),
+    item('Close tab', () => void gb.invoke('tabs:close', t.id)),
+    item('Close other tabs', () => void gb.invoke('tabs:close-others', t.id)),
+    item('Close tabs to the right', () => void gb.invoke('tabs:close-right', t.id)),
   );
   Object.assign(menu.style, { left: `${x}px`, top: `${y}px` });
   menu.classList.remove('hidden');
@@ -176,13 +198,22 @@ $<HTMLSelectElement>('tile-layout').onchange = () => {
   if (geometry?.mode === 'tiled') void gb.invoke('tiles:layout', $<HTMLSelectElement>('tile-layout').value);
 };
 document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') {
-    e.preventDefault();
-    void gb.invoke('tiles:tile', undefined, $<HTMLSelectElement>('tile-layout').value);
-  } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'u') {
-    e.preventDefault();
-    void gb.invoke('tiles:untile');
-  }
+  // Chrome-focused keystrokes go through the same chord table as page-focused ones, so Ctrl+F /
+  // Ctrl+H / Ctrl+D and friends behave identically wherever the focus is. main answers whether it
+  // consumed the key; we only preventDefault when it did.
+  //
+  // No "am I in a text field" carve-out: the page path (before-input-event) has none either, and
+  // the chord table deliberately contains no text-editing keys (no Ctrl+A/C/V/X/Z/Y), so there is
+  // nothing here that collides with typing in the address bar or the task box.
+  const mod = e.ctrlKey || e.metaKey;
+  const plainFunctionKey = /^F\d+$/.test(e.key);
+  if (!mod && !e.altKey && !plainFunctionKey) return;
+  void gb
+    .invoke('chord', e.key, { ctrl: mod, shift: e.shiftKey, alt: e.altKey })
+    .then((r: { handled?: boolean }) => {
+      if (r?.handled) e.preventDefault();
+    })
+    .catch(() => undefined);
 });
 gb.on('geometry', renderPanes);
 
@@ -557,13 +588,98 @@ const appearanceUi = initAppearance(gb);
 void appearanceUi.load();
 const library = initLibrary(gb);
 void library.load();
+const statusUi = initStatus(gb, () => lastTabs.find((t) => t.active)?.id ?? null);
+
+/** the open/close of the section the rail is driving */
+const panelsUi: { active(): string | null; toggle(id: any): void; close(): void; setRailVisible(on: boolean): void } = initPanels(gb, {
+  // the rail drives the SAME column history and bookmarks already use — one panel system, not two
+  onInset: (left: number) => library.setRailWidth(left),
+  onShow: (id) => library.showSection(id as never),
+});
+const paletteUi = initPalette(gb, (item) => wave2Ui.runAction(item));
+
+// ---------- web panels (ticket 18) ----------
+// Pinning is chrome-initiated: the page cannot add itself to the sidebar. The main process owns the
+// list; this only asks for it.
+document.getElementById('wp-pin-current')?.addEventListener('click', async () => {
+  const r = await gb.invoke('panels:open-current').catch(() => ({ ok: false, error: 'failed' }));
+  const msg = document.getElementById('wp-msg');
+  if (msg) msg.textContent = r.ok ? 'Pinned to the sidebar.' : String(r.error ?? 'could not pin this page');
+  // reveal the section so the new panel is visible, and tell main where the column is so the panel
+  // view can be positioned over it
+  if (panelsUi.active() !== 'webpanels') panelsUi.toggle('webpanels');
+  else panelsUi.toggle('webpanels'), panelsUi.toggle('webpanels');
+  if (r.ok && r.id) void gb.invoke('panels:show-view', r.id);
+});
+gb.on('panels:list', () => {
+  if (panelsUi.active() === 'webpanels') void gb.invoke('panel:refresh', 'webpanels');
+});
+const wave2Ui = initWave2(gb, {
+  onInset: () => library.refreshInsets(),
+  paletteOpen: (q) => paletteUi.open(q ?? ''),
+  paletteClose: () => paletteUi.close(),
+  paletteIsOpen: () => paletteUi.isOpen(),
+});
+// the start page opens pages through the ordinary navigation path, where every gate applies
+const startUi = initStart(gb, (url) => void gb.invoke('nav:go', url));
+// panel shortcuts from main's chord table
+gb.on('shortcut', (what: string) => {
+  const m = /^panel:(history|bookmarks|downloads|sessions|workspaces)$/.exec(String(what));
+  if (m) panelsUi.toggle(m[1] as never);
+  else if (what === 'reader') void openReader();
+  else if (String(what).startsWith('capture:')) void runCapture(String(what).slice('capture:'.length));
+});
+async function openReader() {
+  const r = await gb.invoke('reader:open');
+  if (r?.ok) wave2Ui.openReader(r.article);
+  else window.alert(`Reader mode: ${r?.error ?? 'could not read this page'}`);
+}
+async function runCapture(mode: string) {
+  const r = mode === 'clipboard' ? await gb.invoke('capture:to-clipboard', { mode: 'visible' }) : await gb.invoke('capture:run', { mode: mode === 'full' ? 'full' : 'visible' });
+  if (!r?.ok && r?.error && r.error !== 'cancelled') window.alert(`Capture: ${r.error}`);
+}
+gb.on('stacks', (list: unknown) => renderStacks(list));
+gb.on('tabstrip', (p: { placement: string }) => applyTabStrip(p.placement));
+gb.on('translate', (p: { status?: string }) => wave2Ui.setCloudStatus(p?.status ?? ''));
+
+function renderStacks(list: unknown) {
+  const box = $('tabs');
+  const stacks = Array.isArray(list) ? list : [];
+  // a stack badge on the tab that leads it, so the strip reflects grouping without a second strip
+  for (const st of stacks) {
+    for (const id of st.tabs ?? []) {
+      const node = box.querySelector(`[data-tab-id="${id}"]`);
+      if (node && !(node as HTMLElement).dataset.stack) {
+        (node as HTMLElement).dataset.stack = st.id;
+        node.append(el('span', { class: 'stack-chip', title: st.name }, `\u25B8 ${st.collapsed ? st.tabs.length : st.name}`));
+      }
+    }
+  }
+}
+
+function applyTabStrip(placement: string) {
+  // the strip placement is a chrome-side class; the insets that follow from it are main's job
+  document.body.dataset.tabstrip = placement === 'left' || placement === 'right' || placement === 'bottom' ? placement : 'top';
+}
+
 gb.on('state', renderState);
 gb.on('tabs', (l: TabInfo[]) => {
   renderTabs(l);
+  statusUi.setTabs(l);
   if (geometry) renderPanes(geometry);
 });
 gb.on('egress', renderEgress);
 gb.on('fallback', renderFallback);
 gb.on('reputation', renderReputation);
 void gb.invoke('state:get').then(renderState);
+// apply the STORED chrome layout once at boot — read it, never write it (a boot-time write would
+// silently reset a placement the user chose)
+void gb.invoke('panels:state').then((s: any) => {
+  if (!s) return;
+  panelsUi.setRailVisible(s.railVisible !== false);
+  applyTabStrip(s.tabStrip ?? 'top');
+  document.getElementById('statusbar')?.classList.toggle('hidden', s.statusBar === false);
+  const strip = document.getElementById('opt-tabstrip') as HTMLSelectElement | null;
+  if (strip) strip.value = s.tabStrip ?? 'top';
+});
 void gb.invoke('audit:recent').then((events: any[]) => events.forEach(addTimeline));

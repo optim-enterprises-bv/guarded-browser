@@ -1,7 +1,7 @@
 :root {
   --bg: #f6f7f9; --fg: #1d2330; --muted: #6b7385; --line: #d9dde5; --card: #fff;
   --accent: #2f5bd3; --danger: #c0392b; --warn: #b7791f; --ok: #2f855a;
-  --top: 84px; --panel: 440px;
+  --top: 84px; --panel: 440px; --rail: 27px; --col: 220px; --status: 32px;
   --radius: 6px; --radius-sm: 4px; --pad: 4px 10px; --font-size: 13px; --accent-fg: #ffffff; --highlight: #fdf0d5;
   font: var(--font-size)/1.4 system-ui, sans-serif;
 }
@@ -155,7 +155,7 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .suggest .sug:hover, .suggest .sug.sel { background: var(--bg); }
 .suggest .kind { font-size: 10px; text-transform: uppercase; color: var(--muted); width: 58px; flex: none; }
 .suggest .u { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.side { position: fixed; left: 0; top: var(--top); bottom: 0; width: 340px; background: var(--card); border-right: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; z-index: 4; }
+.side { position: fixed; left: var(--rail); top: var(--top); bottom: var(--status); width: var(--col); background: var(--card); border-right: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; z-index: 4; }
 .side section { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
 .side-head { display: flex; justify-content: space-between; align-items: center; }
 .lib-list { overflow: auto; flex: 1; border-top: 1px solid var(--line); }
@@ -169,3 +169,102 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 .brow.dragover { outline: 2px dashed var(--accent); }
 .fav { width: 16px; height: 16px; border-radius: 3px; background: var(--line); }
 .bedit { display: grid; grid-template-columns: 70px 1fr; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 4px; margin: 4px 0; font-size: 12px; }
+
+/* ---------- status bar (bottom) : downloads, zoom, clock ---------- */
+#statusbar { position: fixed; left: 0; right: var(--panel); bottom: 0; height: var(--status); display: flex; align-items: center; gap: 10px; padding: 0 10px; border-top: 1px solid var(--line); background: var(--card); font-size: 12px; color: var(--muted); z-index: 3; }
+.sb-cell { white-space: nowrap; }
+.sb-spacer { flex: 1; }
+.sb-click { cursor: pointer; }
+.sb-click:hover { color: var(--fg); }
+.sb-btn { border: none; background: none; color: var(--muted); padding: 0 4px; cursor: pointer; font-size: 12px; }
+.sb-btn:hover { color: var(--fg); }
+.sb-zoom { display: flex; align-items: center; gap: 2px; }
+.sb-zoom-label { min-width: 44px; text-align: center; }
+.sb-zoom-off { color: var(--accent); font-weight: 700; }
+.sb-badge { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 8px; background: var(--accent); color: #fff; font-size: 10px; }
+
+/* ---------- find bar (overlay, top-right of the page area) ---------- */
+.findbar { position: fixed; top: calc(var(--top) + 8px); right: calc(var(--panel) + 24px); z-index: 25; display: flex; align-items: center; gap: 6px; padding: 5px 8px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+.findbar input { width: 220px; }
+.find-count { min-width: 58px; text-align: center; font-size: 12px; color: var(--muted); }
+
+/* ---------- downloads + page context menus ---------- */
+.dl-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 5px 10px; }
+.dl-name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-actions { display: flex; gap: 4px; }
+.menu-item { display: block; width: 100%; text-align: left; border: none; background: none; padding: 5px 10px; }
+.menu-item:disabled { opacity: .45; }
+.menu-head { padding: 4px 10px; text-transform: uppercase; letter-spacing: .04em; }
+.menu-sep { height: 1px; margin: 4px 0; background: var(--line); }
+
+/* ---------- wave 2: the left icon rail (ticket 17) ----------
+   Geometry from docs/target-ui.md: rail 51 physical = 27 logical wide, icon pitch 37 logical,
+   bottom-pinned group above the status bar. The rail is a sibling of the column, NOT inside it:
+   the column slides out beside the rail and the rail keeps its place. */
+#rail, #rail-bottom {
+  position: fixed; left: 0; width: var(--rail); z-index: 5;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 6px 0; background: var(--card); border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+#rail { top: var(--top); bottom: calc(var(--status) + 58px); overflow-y: auto; }
+#rail-bottom { bottom: var(--status); border-top: 1px solid var(--line); border-right: 1px solid var(--line); }
+#rail.hidden, #rail-bottom.hidden { display: none; }
+.rail-btn {
+  width: calc(var(--rail) - 4px); height: 26px; padding: 0; font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  border: none; background: none; color: var(--muted); border-radius: 5px; cursor: pointer;
+}
+.rail-btn:hover { background: var(--bg); color: var(--fg); }
+.rail-btn.active { background: var(--accent); color: var(--accent-fg); }
+.rail-btn.rail-bottom-btn { color: var(--muted); }
+
+/* ---------- wave 2: start page (ticket 13) ----------
+   Drawn as chrome over an about:blank tab, so it is inside the window's own document and the
+   agent has no handle on it. */
+#startpage { position: fixed; left: calc(var(--rail) + var(--col)); top: var(--top); right: var(--panel); bottom: var(--status); overflow: auto; padding: 48px 40px; z-index: 2; background: var(--bg); }
+#startpage.hidden { display: none; }
+.sp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-top: 14px; }
+.sp-tile { display: flex; flex-direction: column; gap: 4px; padding: 12px; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; overflow: hidden; }
+.sp-tile:hover { border-color: var(--accent); }
+.sp-tile .sp-t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-tile .sp-u { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-head { display: flex; align-items: baseline; gap: 10px; }
+.sp-sec { margin-top: 26px; }
+.sp-sec h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.sp-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.sp-empty { color: var(--muted); }
+
+/* ---------- wave 2: quick commands palette (ticket 14) ---------- */
+#palette { position: fixed; z-index: 40; left: 50%; top: 90px; transform: translateX(-50%); width: min(620px, calc(100vw - 80px)); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.4); padding: 8px; }
+#palette.hidden { display: none; }
+#palette-q { width: 100%; margin-bottom: 6px; }
+#palette-list { max-height: 46vh; overflow: auto; }
+.pal-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 8px; border-radius: 5px; cursor: pointer; }
+.pal-row.sel { background: var(--accent); color: var(--accent-fg); }
+.pal-row .pal-kind { color: var(--muted); font-size: 12px; }
+.pal-row.sel .pal-kind { color: var(--accent-fg); }
+.pal-empty { padding: 8px; color: var(--muted); }
+
+/* ---------- wave 2: reader mode (ticket 24) ---------- */
+#reader { position: fixed; left: calc(var(--rail) + var(--col)); top: var(--top); right: var(--panel); bottom: var(--status); overflow: auto; background: var(--bg); z-index: 12; padding: 32px 0; }
+#reader.hidden { display: none; }
+#reader-head { position: sticky; top: 0; display: flex; gap: 8px; align-items: center; padding: 8px 16px; background: var(--card); border-bottom: 1px solid var(--line); }
+#reader-head strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#reader-body { max-width: 720px; margin: 24px auto; padding: 0 24px; line-height: 1.65; font-size: 17px; }
+#reader-body h1, #reader-body h2 { line-height: 1.25; }
+#reader-body img { max-width: 100%; height: auto; }
+#reader-body p { margin: 0 0 1.05em; }
+#reader.wide #reader-body { max-width: 1100px; }
+#reader.narrow #reader-body { max-width: 520px; }
+
+/* ---------- wave 2: mouse-gesture trail (ticket 29) ---------- */
+#gesture-trail { position: fixed; z-index: 50; pointer-events: none; inset: 0; }
+#gesture-trail.hidden { display: none; }
+
+/* ---------- wave 2: cloud / translate banner (ticket 25) ---------- */
+#cloud-banner { position: fixed; z-index: 35; left: calc(var(--rail) + 12px); right: calc(var(--panel) + 12px); top: calc(var(--top) + 8px); }
+
+/* a panel title is a button (it shows the live view), so it must not look like a form control */
+.link-title { border: none; background: none; color: var(--fg); padding: 0; text-align: left; cursor: pointer; }
+.link-title:hover { color: var(--accent); }

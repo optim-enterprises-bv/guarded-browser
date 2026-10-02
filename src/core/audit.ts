@@ -6,7 +6,9 @@ import { createHash } from 'node:crypto';
 
 export type AuditType =
   | 'task-start' | 'task-end' | 'navigation' | 'snapshot' | 'guard' | 'reader' | 'judge' | 'policy'
-  | 'confirmation' | 'planner-action' | 'action-result' | 'egress' | 'fallback' | 'error';
+  | 'confirmation' | 'planner-action' | 'action-result' | 'egress' | 'fallback' | 'error'
+  // wave 2: new surfaces that change what the user (or the agent) can see
+  | 'page-actions' | 'panel' | 'hibernate' | 'translate' | 'capture' | 'bundle' | 'extensions' | 'session' | 'workspace' | 'stack';
 
 export interface AuditEvent {
   ts: string;

@@ -26,6 +26,12 @@ export class ConfirmBroker {
     });
   }
 
+  /** How many confirmations are open. Used to refuse a capture that would photograph the security
+   *  UI (ticket 26). Read-only: it grants no capability. */
+  pendingCount(): number {
+    return this.pending.size;
+  }
+
   answer(id: string, outcome: ConfirmOutcome) {
     const p = this.pending.get(id);
     if (!p) return;

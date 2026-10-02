@@ -654,7 +654,7 @@ scripts/        build, e2e runner (xvfb), smoke:local
 
 ## Test results
 
-Run on titan (Fedora 44, Node 26.8.2, Electron 44.4.5), 2026-09-28. `npm test` = typecheck +
+Run on titan (Fedora 44, Node 26.8.2, Electron 44.4.5), 2026-09-30. `npm test` = typecheck +
 vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is the real model on CPU.
 
 | suite | file | tests | result |
@@ -674,6 +674,11 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/profiles.test.ts` (registry, migration, validation, sweeps, quarantine) | 8 | pass |
 | unit | `test/unit/bookmarks-history.test.ts` (stores, Netscape parser incl. malicious input and timing, search, flood limit) | 13 | pass |
 | unit | `test/unit/theme.test.ts` (colour parsing, schema, readability, contrast, agent-yellow distance, schedule) | 14 | pass |
+| unit | `test/unit/tab-guard.test.ts` (the post-task gate book: set / lift / forget rules) | 7 | pass |
+| unit | `test/unit/closed-tabs.test.ts` (reopen stack: caps, atomic write, holds no gate state) | 9 | pass |
+| unit | `test/unit/ipc-channels.test.ts` (the three IPC allowlists agree; no duplicate channel; menu actions exist) | 6 | pass |
+| unit | `test/unit/wave1-core.test.ts` (zoom, session state, chords, search, downloads) | 25 | pass |
+| unit | `test/unit/wave2-core.test.ts` (keybindings, page actions, sessions, workspaces, stacks, gestures, bundle, hibernation, quick commands, bookmarks panel, reader) | 75 | pass |
 | e2e | `test/e2e/attacks.spec.ts` | 10 | pass |
 | e2e | `test/e2e/regressions.spec.ts` (review exploits, rounds 1-4, ported, plus controls) | 30 | pass |
 | e2e | `test/e2e/benign.spec.ts` | 3 | pass |
@@ -686,7 +691,10 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/profiles.spec.ts` (two-window isolation, delete, migration, IPC spoofing) | 7 | pass |
 | e2e | `test/e2e/profiles-hardening.spec.ts` (proxy robustness, cross-profile proxy, open/delete race, sweeps, app-wide guard settings) | 5 | pass |
 | e2e | `test/e2e/library.spec.ts` (history, bookmarks, import/export, suggestions, agent / page / profile isolation, crash clear) | 11 | pass |
-| **total** | | **250** (160 unit + 90 e2e) | **all pass** |
+| e2e | `test/e2e/reopen.spec.ts` (reopen stack, session restore, a gated tab reopens UNGATED) | 3 | pass |
+| e2e | `test/e2e/wave1.spec.ts` (zoom, find, print, reopen, ordering, search engine, page menu, downloads) | 12 | pass |
+| e2e | `test/e2e/wave2.spec.ts` (start page, quick commands, panel rail, stacks, workspaces, saved sessions, reader, capture, keybindings, gestures, status bar, translate, web panels) | 24 | pass |
+| **total** | | **407** (282 unit + 125 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 

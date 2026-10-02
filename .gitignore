@@ -7,3 +7,6 @@ playwright-report/
 reports/
 dist-pkg/
 .cache-test/
+
+# openlore analysis artifacts
+.openlore/

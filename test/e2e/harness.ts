@@ -24,6 +24,8 @@ export interface LaunchOpts {
   keepServiceWorkers?: boolean;
   feeds?: FeedConfig[];
   maxSteps?: number;
+  /** a custom search-engine template (e.g. a local fixture server) instead of DuckDuckGo */
+  searchTemplate?: string;
 }
 
 export interface App {
@@ -46,6 +48,8 @@ export async function launch(o: LaunchOpts): Promise<App> {
   s.agent.maxSteps = o.maxSteps ?? 10;
   s.agent.confirmTimeoutMs = o.confirmTimeoutMs ?? 30_000;
   s.reputation.feeds = o.feeds ?? []; // never touch the network in tests
+  // a custom search engine pointed at a local fixture server (so search never needs the network)
+  if (o.searchTemplate) s.general = { ...s.general, search: { engine: 'custom', customTemplate: o.searchTemplate } };
   mkdirSync(userData, { recursive: true });
   if (!o.userData) writeFileSync(join(userData, 'settings.json'), JSON.stringify(s, null, 2));
   const env: Record<string, string> = {

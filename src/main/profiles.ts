@@ -20,6 +20,16 @@ export const ProfileSchema = z
     /** Chromium partition; `persist:profile-<id>` for new profiles, never reused after delete */
     partition: z.string().regex(/^persist:(guarded|profile-[0-9a-f-]{36})$/),
     createdAt: z.string().max(40),
+    /**
+     * Ephemeral (ticket 29): a first-class profile FLAVOUR, not a bypass. The guard, policy, egress
+     * and reputation layers are identical to any other profile — the only differences are that the
+     * partition and profile directory are removed when the window closes, history writes are off,
+     * and the closed-tab stack is not persisted.
+     *
+     * Deliberately NOT a `private: true` flag read by the security layers: if any of them could see
+     * it, it would become a switch that changes their behaviour, which is exactly the wrong shape.
+     */
+    ephemeral: z.boolean().optional(),
   })
   .strict();
 
@@ -125,7 +135,7 @@ export class ProfileRegistry {
     return reg;
   }
 
-  create(name: string, color?: string): Profile {
+  create(name: string, color?: string, opts: { ephemeral?: boolean } = {}): Profile {
     const id = randomUUID();
     const partition = `persist:profile-${id}`;
     if (this.reg.retiredPartitions.includes(partition)) throw new Error('partition already used');
@@ -135,6 +145,7 @@ export class ProfileRegistry {
       color: (color ?? PROFILE_COLORS[this.reg.profiles.length % PROFILE_COLORS.length]).toLowerCase(),
       partition,
       createdAt: new Date().toISOString(),
+      ...(opts.ephemeral ? { ephemeral: true } : {}),
     });
     mkdirSync(this.dirOf(id), { recursive: true, mode: 0o700 });
     this.reg.profiles.push(p);

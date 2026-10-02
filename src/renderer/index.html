@@ -29,6 +29,27 @@
   </div>
   <div id="bmbar" class="bmbar hidden" data-testid="bookmarks-bar"></div>
 </header>
+<div id="statusbar" data-testid="status-bar">
+  <span id="sb-left" class="sb-cell" data-testid="status-left"></span>
+  <span class="sb-spacer"></span>
+  <span id="sb-downloads" class="sb-cell sb-click" title="Downloads" data-testid="status-downloads">Downloads<span id="sb-dl-badge" class="sb-badge hidden" data-testid="downloads-badge"></span></span>
+  <span class="sb-cell sb-zoom" data-testid="status-zoom">
+    <button id="zoom-out" class="sb-btn" title="Zoom out (Ctrl+-)" data-testid="zoom-out">&#8722;</button>
+    <button id="zoom-label" class="sb-btn sb-zoom-label" title="Reset zoom (Ctrl+0)" data-testid="zoom-label">100 %</button>
+    <button id="zoom-in" class="sb-btn" title="Zoom in (Ctrl+=)" data-testid="zoom-in">+</button>
+  </span>
+  <span id="sb-clock" class="sb-cell" data-testid="status-clock"></span>
+</div>
+<div id="findbar" class="findbar hidden" data-testid="find-bar">
+  <input id="find-q" placeholder="Find in page" data-testid="find-input" spellcheck="false" autocomplete="off">
+  <span id="find-count" class="find-count" data-testid="find-count"></span>
+  <button id="find-prev" title="Previous (Shift+Enter)" data-testid="find-prev">&#8593;</button>
+  <button id="find-next" title="Next (Enter)" data-testid="find-next">&#8595;</button>
+  <label class="small sb-click"><input id="find-case" type="checkbox" data-testid="find-case"> Aa</label>
+  <button id="find-close" title="Close (Esc)" data-testid="find-close">&#215;</button>
+</div>
+<div id="page-menu" class="menu hidden" data-testid="page-menu" role="menu"></div>
+<div id="dl-menu" class="menu hidden" data-testid="downloads-menu" role="menu"></div>
 <div id="panes" data-testid="panes"></div>
 <div id="suggest" class="suggest hidden" data-testid="suggestions" role="listbox"></div>
 <aside id="side" class="side hidden" data-testid="side-panel">
@@ -61,10 +82,72 @@
       </div>
     </details>
     <span id="b-msg" class="muted small" data-testid="bookmarks-msg"></span>
+    <div class="row">
+      <label class="small">Sort: <select id="b-sort" data-testid="bookmarks-sort">
+        <option value="manual">Manually</option><option value="title">By title</option>
+        <option value="url">By address</option><option value="added">By date added</option>
+      </select></label>
+      <button id="b-trash-view" data-testid="bookmarks-trash">Trash</button>
+    </div>
+    <div id="b-detail" class="detail hidden" data-testid="bookmark-detail">
+      <label class="small">Name <input id="bd-title" data-testid="bookmark-title"></label>
+      <label class="small">Nickname <input id="bd-nick" data-testid="bookmark-nickname"></label>
+      <label class="small">Description <textarea id="bd-desc" rows="2" data-testid="bookmark-description"></textarea></label>
+      <label class="small"><input id="bd-dial" type="checkbox" data-testid="bookmark-speeddial"> Speed Dial</label>
+      <label class="small"><input id="bd-bar" type="checkbox" data-testid="bookmark-in-bar"> Bookmark Bar</label>
+      <p class="muted small" id="bd-added" data-testid="bookmark-added"></p>
+      <div class="row"><button id="bd-save" class="primary" data-testid="bookmark-save">Save</button><button id="bd-close">Close</button></div>
+    </div>
+    <div id="b-trash" class="hidden" data-testid="bookmarks-trash-list"></div>
+  </section>
+  <section id="downloads-view" class="hidden" data-testid="downloads-panel">
+    <p class="muted small">The list observes transfers; it never decides them.</p>
+    <div id="dl-panel-list" class="lib-list" data-testid="downloads-list"></div>
+  </section>
+  <section id="sessions-view" class="hidden" data-testid="sessions-panel">
+    <div class="row"><input id="session-name" placeholder="Name this session" maxlength="80" data-testid="session-name"><button id="session-save" data-testid="session-save">Save current tabs</button></div>
+    <span id="sess-msg" class="muted small"></span>
+    <div id="sessions-list" class="lib-list" data-testid="sessions-list"></div>
+  </section>
+  <section id="workspaces-view" class="hidden" data-testid="workspaces-panel">
+    <div class="row"><input id="ws-name" placeholder="New workspace" maxlength="40" data-testid="ws-name"><button id="ws-create" data-testid="ws-create">Create</button></div>
+    <span id="ws-msg" class="muted small"></span>
+    <p class="muted small">Workspaces share this profile's cookies and storage. They are a view over tabs, not a separate identity.</p>
+    <div id="workspaces-list" class="lib-list" data-testid="workspaces-list"></div>
+  </section>
+  <section id="webpanels-view" class="hidden" data-testid="webpanels-panel">
+    <div class="row"><button id="wp-pin-current" data-testid="webpanel-pin">Pin current site to sidebar</button></div>
+    <span id="wp-msg" class="muted small" data-testid="webpanel-msg"></span>
+    <p class="muted small">A web panel is a live website pinned into this column. It uses this profile's session, so the same proxy, host allowlist and reputation rules apply. It is never the agent's tab.</p>
+    <div id="webpanels-list" class="lib-list" data-testid="webpanels-list"></div>
   </section>
 </aside>
 <div id="tile-notice" class="tile-notice hidden" data-testid="tile-notice" role="status"></div>
 <div id="tab-menu" class="menu hidden" data-testid="tab-menu" role="menu"></div>
+<!-- ===== wave 2 chrome: left icon rail + panel column (ticket 17), start page (13),
+     quick commands (14), reader (24), settings for the new features (15/23/25/28/32) ===== -->
+<div id="rail" data-testid="rail"></div>
+<div id="rail-bottom" data-testid="rail-bottom"></div>
+<div id="startpage" class="hidden" data-testid="start-page"></div>
+<div id="palette" class="hidden" data-testid="palette">
+  <input id="palette-q" placeholder="Quick Commands — type to search" spellcheck="false" autocomplete="off" data-testid="palette-input">
+  <div id="palette-list" data-testid="palette-list"></div>
+</div>
+<div id="reader" class="hidden" data-testid="reader-view">
+  <div id="reader-head">
+    <strong id="reader-title"></strong>
+    <span class="row">
+      <button id="reader-smaller" data-testid="reader-smaller">A&#8722;</button>
+      <button id="reader-bigger" data-testid="reader-bigger">A+</button>
+      <button id="reader-narrow" data-testid="reader-narrow">Narrow</button>
+      <button id="reader-wide" data-testid="reader-wide">Wide</button>
+      <button id="reader-close" data-testid="reader-close">Close</button>
+    </span>
+  </div>
+  <div id="reader-body" data-testid="reader-body"></div>
+</div>
+<div id="gesture-trail" class="hidden" data-testid="gesture-trail"></div>
+<div id="cloud-banner" class="banner warn hidden" data-testid="cloud-banner"></div>
 <aside id="panel">
   <div id="panel-head">
     <strong>Agent</strong>
@@ -180,6 +263,51 @@
         <table id="rep-table" data-testid="reputation-table"></table>
         <p class="muted small" id="rep-files"></p>
         <button id="rep-refresh" data-testid="reputation-refresh">Update feeds now + reload local lists</button>
+      </fieldset>
+      <fieldset><legend>keybindings (ticket 15)</legend>
+        <p class="muted small">One chord per action. An empty field leaves the action unbound. Conflicts are refused.</p>
+        <table id="kb-table" data-testid="keybindings-table"></table>
+        <div class="row">
+          <button id="kb-reset" data-testid="keybindings-reset">Reset to defaults</button>
+          <span id="kb-msg" class="muted small"></span>
+        </div>
+      </fieldset>
+      <fieldset><legend>tab hibernation (ticket 23)</legend>
+        <p class="muted small">Off by default. A tab that is the agent's pane, under the post-task gate, audible, active or pinned is NEVER hibernated.</p>
+        <label class="small"><input id="hib-enabled" type="checkbox" data-testid="hibernation-enabled"> Hibernate inactive tabs</label>
+        <div class="row"><label class="small">after <input id="hib-minutes" type="number" min="1" max="1440" style="width:5em" data-testid="hibernation-minutes"> minutes</label>
+        <label class="small"><input id="hib-form" type="checkbox" data-testid="hibernation-form-state"> also discard tabs with unsaved form state (data loss)</label></div>
+        <div class="row"><button id="hib-sweep" data-testid="hibernation-sweep">Sweep now</button><span id="hib-msg" class="muted small"></span></div>
+      </fieldset>
+      <fieldset><legend>translate (ticket 25)</legend>
+        <p class="muted small"><strong>Off by default.</strong> When on, the page text you translate is sent to the endpoint you configure — it leaves this machine. Refused while an agent task is running.</p>
+        <label class="small"><input id="tr-enabled" type="checkbox" data-testid="translate-enabled"> Enable translate</label>
+        <div class="row"><input id="tr-endpoint" placeholder="https://your-endpoint/v1/chat/completions" data-testid="translate-endpoint"></div>
+        <div class="row"><input id="tr-model" placeholder="model name (optional)" data-testid="translate-model">
+          <select id="tr-lang" data-testid="translate-target"></select></div>
+        <span id="tr-msg" class="muted small"></span>
+      </fieldset>
+      <fieldset><legend>unpacked extensions (ticket 32)</legend>
+        <p class="banner warn" id="ext-warning" data-testid="extensions-warning"></p>
+        <div class="row"><label class="small"><input id="ext-enabled" type="checkbox" data-testid="extensions-enabled"> Allow unpacked extensions</label>
+          <button id="ext-add" data-testid="extensions-add">Add folder…</button></div>
+        <div id="ext-list" class="lib-list" data-testid="extensions-list"></div>
+        <span id="ext-msg" class="muted small"></span>
+      </fieldset>
+      <fieldset><legend>profile bundle (ticket 30)</legend>
+        <p class="muted small">Move settings, themes, bookmarks, keybindings, sessions and workspaces between machines as one file. No account, no server. Nicknames are never exported.</p>
+        <div class="row"><button id="bundle-export" data-testid="bundle-export">Export…</button>
+          <button id="bundle-import" data-testid="bundle-import">Import…</button>
+          <button id="bundle-preview" data-testid="bundle-preview">Preview</button></div>
+        <textarea id="bundle-text" rows="5" spellcheck="false" data-testid="bundle-text" placeholder="paste a bundle here to preview or import"></textarea>
+        <span id="bundle-msg" class="muted small" data-testid="bundle-msg"></span>
+      </fieldset>
+      <fieldset><legend>chrome layout (tickets 17/21/28)</legend>
+        <label class="small"><input id="opt-rail" type="checkbox" data-testid="opt-rail"> Show the left icon rail</label>
+        <label class="small"><input id="opt-status" type="checkbox" data-testid="opt-status"> Show the status bar</label>
+        <div class="row"><label class="small">Tab strip: <select id="opt-tabstrip" data-testid="opt-tabstrip">
+          <option value="top">top (default)</option><option value="left">left</option><option value="right">right</option><option value="bottom">bottom</option>
+        </select></label></div>
       </fieldset>
       <div class="row">
         <button id="s-save" class="primary" data-testid="settings-save">Save</button>

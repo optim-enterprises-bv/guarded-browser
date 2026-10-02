@@ -24,6 +24,10 @@ export interface BookmarkNode {
   title: string;
   url: string;
   nickname?: string;
+  /** free text the user writes about the page (ticket 33). Never page-derived, always a text node. */
+  description?: string;
+  /** shown on the speed-dial start page (ticket 33) */
+  speedDial?: boolean;
   added: number;
 }
 export interface FolderNode {
@@ -56,18 +60,28 @@ export function safeUrl(u: unknown): string | null {
   }
 }
 
-const BookmarkSchema = z
+export const MAX_DESCRIPTION = 2000;
+
+export const BookmarkSchema = z
   .object({
     type: z.literal('bookmark'),
     id: ID,
     title: Title,
     url: z.string().max(MAX_URL).refine((u) => safeUrl(u) === u, 'only http(s) URLs'),
     nickname: z.string().regex(NICK).optional(),
+    // control characters stripped on the way in (same discipline as cleanTitle): a description is
+    // user text that gets rendered, so it must not carry newlines/escapes into the panel
+    description: z
+      .string()
+      .max(MAX_DESCRIPTION)
+      .transform((s) => s.replace(/[\u0000-\u001f\u007f]/g, ' '))
+      .optional(),
+    speedDial: z.boolean().optional(),
     added: z.number().int().nonnegative(),
   })
   .strict();
 
-const FolderSchema: z.ZodType<FolderNode> = z.lazy(() =>
+export const FolderSchema: z.ZodType<FolderNode> = z.lazy(() =>
   z
     .object({
       type: z.literal('folder'),
@@ -210,7 +224,7 @@ export class BookmarkStore {
     return structuredClone(f);
   }
 
-  update(id: string, patch: { title?: string; url?: string; nickname?: string | null }) {
+  update(id: string, patch: { title?: string; url?: string; nickname?: string | null; description?: string; speedDial?: boolean }) {
     const f = this.find(id);
     if (!f || id === BAR_ID || id === OTHER_ID) throw new Error('no such bookmark');
     if (patch.title !== undefined) f.node.title = cleanTitle(patch.title) || f.node.title;
@@ -224,6 +238,17 @@ export class BookmarkStore {
         const nick = this.checkNickname(patch.nickname ?? undefined, id);
         if (nick) f.node.nickname = nick;
         else delete f.node.nickname;
+      }
+      // a description is user text rendered in the panel: control characters stripped, length capped,
+      // and an empty value removes the field rather than storing ''
+      if (patch.description !== undefined) {
+        const d = cleanTitle(patch.description).slice(0, MAX_DESCRIPTION);
+        if (d) f.node.description = d;
+        else delete f.node.description;
+      }
+      if (patch.speedDial !== undefined) {
+        if (patch.speedDial) f.node.speedDial = true;
+        else delete f.node.speedDial;
       }
     }
     this.save();

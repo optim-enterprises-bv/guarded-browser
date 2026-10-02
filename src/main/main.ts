@@ -147,6 +147,16 @@ function broadcastProfiles() {
   buildMenu();
 }
 
+/**
+ * A private window (ticket 18/30): a fresh EPHEMERAL profile. It is a real profile — same gate, same
+ * proxy, same allowlist — whose partition is discarded on close, so nothing is carried between one
+ * private window and the next. It is deliberately NOT a "no security" mode.
+ */
+async function openPrivateWindow(): Promise<void> {
+  const p = registry.create(`Private ${registry.list().length + 1}`, undefined, { ephemeral: true });
+  await openProfile(p.id);
+}
+
 async function openProfile(id: string, startUrl?: string): Promise<Runtime> {
   const existing = runtimes.get(id);
   if (existing && !existing.win.isDestroyed()) {
@@ -242,7 +252,12 @@ async function deleteProfile(id: string, requester: Runtime): Promise<{ ok: bool
 
 const PROFILE_CHANNELS = new Set(['profiles:list', 'profiles:create', 'profiles:update', 'profiles:open', 'profiles:delete']);
 const RUNTIME_CHANNELS = [
-  'state:get', 'tabs:new', 'tabs:close', 'tabs:activate', 'tabs:select', 'tiles:tile', 'tiles:untile', 'tiles:layout', 'tiles:drag', 'tiles:state',
+  'state:get', 'tabs:new', 'tabs:close', 'tabs:reopen', 'tabs:closed-list', 'tabs:guard-state', 'tabs:activate', 'tabs:select', 'tiles:tile', 'tiles:untile', 'tiles:layout', 'tiles:drag', 'tiles:state',
+  'tabs:move', 'tabs:duplicate', 'tabs:close-others', 'tabs:close-right', 'tabs:mute',
+  'zoom:get', 'zoom:set', 'zoom:step', 'zoom:reset', 'find:start', 'find:stop', 'page:print',
+  'downloads:list', 'downloads:action', 'downloads:clear', 'search:get', 'session:info', 'page:contextmenu', 'chord',
+  // wave 2 (tickets 14-33)
+  'bookmarks:set-description', 'bookmarks:set-speeddial', 'bookmarks:sort', 'bookmarks:trash', 'bookmarks:trash-empty', 'bookmarks:trash-restore', 'bookmarks:tree-sorted', 'bundle:dry-run', 'bundle:export', 'bundle:export-file', 'bundle:import', 'bundle:import-file', 'capture:run', 'capture:to-clipboard', 'action:run', 'commands:search', 'extensions:add', 'extensions:enable', 'extensions:list', 'extensions:pick', 'extensions:remove', 'extensions:set-enabled', 'gesture:trail', 'hibernation:set', 'hibernation:state', 'hibernation:sweep', 'keybindings:get', 'keybindings:reset', 'keybindings:save', 'pageactions:get', 'pageactions:set', 'panel:refresh', 'panels:state', 'panels:list', 'panels:add', 'panels:open-current', 'panels:remove', 'panels:close', 'panels:rect', 'panels:show', 'panels:show-view', 'profiles:create-ephemeral', 'rail:set', 'reader:open', 'sessions:delete', 'sessions:export', 'sessions:list', 'sessions:rename', 'sessions:restore', 'sessions:save', 'stacks:close', 'stacks:collapse', 'stacks:color', 'stacks:create', 'stacks:dissolve', 'stacks:list', 'stacks:rename', 'status:set', 'tabstrip:set', 'translate:run', 'translate:set', 'translate:state', 'workspaces:create', 'workspaces:delete', 'workspaces:list', 'workspaces:rename', 'workspaces:switch',
   'nav:go', 'nav:back', 'nav:forward', 'nav:reload', 'agent:preview', 'agent:start', 'agent:stop', 'confirm:answer', 'egress:allow',
   'settings:get', 'settings:save', 'audit:recent', 'reputation:refresh', 'appearance:get', 'appearance:save', 'theme:import', 'theme:import-file', 'theme:export-file',
   'history:list', 'history:delete', 'history:delete-range', 'history:clear-on-exit', 'history:open', 'bookmarks:tree', 'bookmarks:add', 'bookmarks:add-current', 'bookmarks:add-folder', 'bookmarks:update', 'bookmarks:remove', 'bookmarks:move', 'bookmarks:search', 'bookmarks:set-bar', 'bookmarks:is-bookmarked', 'bookmarks:open', 'bookmarks:import', 'bookmarks:import-file', 'bookmarks:export', 'bookmarks:export-file', 'suggest', 'favicon:get', 'chrome:insets', 'chrome:overlay',
@@ -308,10 +323,73 @@ function registerIpc() {
   ipcMain.handle('profiles:delete', (e, id: unknown) => deleteProfile(String(id), requester(e)));
 }
 
+/**
+ * The application menu (ticket 11). Every item that changes browser state goes through the runtime's
+ * ONE action dispatcher (`api.runAction`), which is the same path a chord and the palette use — so a
+ * menu item cannot reach anything a chord cannot, and the chord table stays the single source of
+ * truth for what an action is called and what key it has.
+ *
+ * Accelerators are taken from the chord table, so rebinding a chord (ticket 15) moves the menu item
+ * with it instead of leaving a stale label.
+ */
 function buildMenu() {
   const focused = () => runtimeOfUi(BrowserWindow.getFocusedWindow()?.webContents as WebContents) ?? [...runtimes.values()][0];
+  /** an action item: label from the chord table's accelerator, disabled when there is no runtime */
+  const act = (label: string, action: string): Electron.MenuItemConstructorOptions => ({
+    label,
+    click: () => void focused()?.runAction(action),
+  });
   const tpl: Electron.MenuItemConstructorOptions[] = [
-    { role: 'editMenu' },
+    {
+      label: 'File',
+      submenu: [
+        { role: 'close', label: 'Close Window' },
+        { role: 'quit', label: 'Quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
+        { type: 'separator' },
+        { label: 'Find in Page…', accelerator: 'CmdOrCtrl+F', click: () => void focused()?.runAction('view.find') },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        act('New Tab', 'tab.new'),
+        act('Reload', 'tab.reload'),
+        act('Zoom In', 'view.zoomIn'),
+        act('Zoom Out', 'view.zoomOut'),
+        act('Reset Zoom', 'view.zoomReset'),
+        { type: 'separator' },
+        act('Toggle Tiling', 'tiles.tile'),
+        act('Untile', 'tiles.untile'),
+        { type: 'separator' },
+        act('History Panel', 'panel.history'),
+        act('Bookmarks Panel', 'panel.bookmarks'),
+        act('Downloads Panel', 'panel.downloads'),
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+        { role: 'toggleDevTools' },
+      ],
+    },
+    {
+      label: 'Tools',
+      submenu: [
+        act('Quick Commands…', 'palette.open'),
+        act('Reader Mode', 'reader.toggle'),
+        act('Translate Page', 'view.translate'),
+        act('Capture Page…', 'capture.visible'),
+        act('Print…', 'view.print'),
+        { type: 'separator' },
+        // a private window is app-level (it creates a PROFILE), not a browser action, so it goes to
+        // the profile registry rather than the action dispatcher
+        { label: 'New Window (private)', click: () => void openPrivateWindow() },
+      ],
+    },
     {
       label: 'Profiles',
       submenu: [
@@ -321,6 +399,12 @@ function buildMenu() {
       ],
     },
     { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        { label: 'Keyboard shortcuts', click: () => focused()?.win.webContents.send('shortcut', 'settings-keybindings') },
+      ],
+    },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(tpl));
 }
@@ -408,6 +492,12 @@ app.whenReady().then(async () => {
     rt.audit('error', { where: 'migration', error: 'single-profile files reappeared after migration and were quarantined', moved: strays.moved, quarantine: strays.dir });
   }
   if (swept.length) rt.audit('egress', { layer: 'webrequest', decision: 'block', host: '-', method: '-', reason: `removed ${swept.length} reappeared partition dir(s) of deleted profiles` });
+});
+
+// An async throw inside whenReady() is otherwise swallowed (the app exits 0 with no window and no
+// message). Surfacing it is worth four lines: a silent startup failure is the hardest kind to debug.
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`[guarded-browser] unhandled rejection: ${reason instanceof Error ? reason.stack : String(reason)}\n`);
 });
 
 app.on('before-quit', () => {

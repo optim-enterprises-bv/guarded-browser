@@ -4,12 +4,21 @@
 
 type Bridge = { invoke(channel: string, ...args: unknown[]): Promise<any>; on(channel: string, fn: (p: any) => void): void };
 
+/** the sections the shared panel column can show */
+export type SectionId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels';
+
 interface BNode { type: 'bookmark' | 'folder'; id: string; title: string; url?: string; nickname?: string; children?: BNode[] }
 interface HEntry { url: string; title: string; lastVisit: number; visits: number; sources: string[] }
 
 const TOP = 84;
 const BAR = 28;
-const SIDE = 340;
+// measured (docs/target-ui.md): panel column 220 logical, rail 27 logical
+const SIDE = 220;
+/** the rail's own width, added to the left inset while a panel is open under it (ticket 17);
+ *  the rail itself reports the real value, so this starts at 0 */
+let RAIL = 0;
+/** the status bar's height; the page area stops above it (see index.html #statusbar) */
+const STATUS = 32; // status bar: 36 physical / 19 logical measured; 32 keeps the hit targets usable
 
 export function initLibrary(gb: Bridge) {
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -21,7 +30,8 @@ export function initLibrary(gb: Bridge) {
   };
   let roots: BNode[] = [];
   let showBar = false;
-  let side: 'history' | 'bookmarks' | null = null;
+  /** which section the shared column shows; the rail drives this (ticket 17) */
+  let side: SectionId | null = null;
   let editing: string | null = null;
   let currentUrl = '';
 
@@ -29,7 +39,13 @@ export function initLibrary(gb: Bridge) {
   function insets() {
     const top = TOP + (showBar ? BAR : 0);
     document.documentElement.style.setProperty('--top', `${top}px`);
-    void gb.invoke('chrome:insets', top, side ? SIDE : 0);
+    // the rail is always a left inset while it is visible; the column adds to it when open
+    void gb.invoke('chrome:insets', top, RAIL + (side ? SIDE : 0), STATUS);
+    // a web panel is a WebContentsView positioned by main, so main needs the column's real box.
+    // The rect is measured from the DOM (not assumed) because the column width is a CSS token.
+    const col = document.getElementById(side ? `${side}-view` : '');
+    const r = col && !$('side').classList.contains('hidden') ? col.getBoundingClientRect() : null;
+    void gb.invoke('panels:rect', r ? { x: r.x, y: r.y, width: r.width, height: r.height } : null);
   }
 
   // ---------- favicons: bytes from main, decoded here (sandboxed renderer) ----------
@@ -55,21 +71,34 @@ export function initLibrary(gb: Bridge) {
     return img;
   }
 
-  // ---------- side panel ----------
-  function openSide(which: 'history' | 'bookmarks') {
+  // ---------- side panel (the shared panel column; the rail drives it — ticket 17) ----------
+  const SECTION_TITLE: Record<SectionId, string> = {
+    history: 'History',
+    bookmarks: 'Bookmarks',
+    downloads: 'Downloads',
+    sessions: 'Sessions',
+    workspaces: 'Workspaces',
+    webpanels: 'Web panels',
+  };
+  function openSide(which: SectionId) {
     side = which;
     $('side').classList.remove('hidden');
-    $('side-title').textContent = which === 'history' ? 'History' : 'Bookmarks';
-    $('history-view').classList.toggle('hidden', which !== 'history');
-    $('bookmarks-view').classList.toggle('hidden', which !== 'bookmarks');
+    $('side-title').textContent = SECTION_TITLE[which];
+    for (const id of Object.keys(SECTION_TITLE) as SectionId[]) {
+      const sec = $(`${id}-view`);
+      if (sec) sec.classList.toggle('hidden', id !== which);
+    }
     insets();
+    // a built-in section and a live web panel are never drawn at once: show the section, hide panels
+    void gb.invoke('panels:show', null);
     if (which === 'history') void renderHistory();
-    else void renderBookmarks();
+    else if (which === 'bookmarks') void renderBookmarks();
   }
   function closeSide() {
     side = null;
     $('side').classList.add('hidden');
     insets();
+    void gb.invoke('panels:show', null);
   }
   function toggleSide(which: 'history' | 'bookmarks') {
     if (side === which) closeSide();
@@ -402,15 +431,9 @@ export function initLibrary(gb: Bridge) {
     else if (name === 'toggle-bar') void gb.invoke('bookmarks:set-bar', !showBar);
   }
   gb.on('shortcut', shortcut);
-  document.addEventListener('keydown', (e) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
-    const k = e.key.toLowerCase();
-    if (!e.shiftKey && k === 'h') shortcut('history');
-    else if (!e.shiftKey && k === 'd') shortcut('bookmark-page');
-    else if (e.shiftKey && k === 'b') shortcut('toggle-bar');
-    else return;
-    e.preventDefault();
-  });
+  // No local keydown handler here: every chord is owned by main's table (src/core/chords.ts) and
+  // arrives on the 'shortcut' event above. Handling Ctrl+H locally as well would toggle it twice
+  // and look broken.
 
   return {
     async load() {
@@ -426,5 +449,17 @@ export function initLibrary(gb: Bridge) {
       }
       if (side === 'history') void renderHistory();
     },
+    /** the rail shows/hides a section in this column (ticket 17) */
+    showSection(which: SectionId | null) {
+      if (which) openSide(which);
+      else closeSide();
+    },
+    /** the rail's width is part of the left inset, so it is set here rather than duplicated */
+    setRailWidth(px: number) {
+      RAIL = Math.max(0, Math.round(px));
+      insets();
+    },
+    /** re-run the inset calculation after another module changes the geometry */
+    refreshInsets: insets,
   };
 }

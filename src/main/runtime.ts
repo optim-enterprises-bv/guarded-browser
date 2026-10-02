@@ -4,13 +4,13 @@
 // model and the public reputation feeds are shared (passed in through the context). IPC handlers
 // are looked up by main.ts from the SENDER's window, never from an id the renderer sends.
 
-import { app, BrowserWindow, dialog, session, type Session, type WebContents } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, session, type Session, type WebContents } from 'electron';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
-import { loadSettings, saveSettings, type Role, type Settings } from '../core/config';
+import { loadSettings, saveSettings, MAX_WEB_PANELS, type Role, type Settings } from '../core/config';
 import { EgressController, hostKey, parseBody, startProxy, type ProxyHandle } from '../core/egress';
 import { LlmClient } from '../core/llm';
 import { originOf, originsInTask } from '../core/policy';
@@ -24,7 +24,27 @@ import { AppearanceSchema, BUILTIN_THEMES, ThemeSchema, parseColor, toHex, type 
 import type { Profile } from './profiles';
 import { testEnv } from './test-hooks';
 import { HistoryStore, recordable } from '../core/history';
+import { ClosedTabStore } from '../core/closed-tabs';
+import { SessionStore } from '../core/session-state';
+import { ZoomStore, clampZoom, stepZoom } from '../core/zoom';
+import { SEARCH_ENGINES, searchUrl, SearchSettingsSchema } from '../core/search';
+import { DownloadList } from '../core/downloads';
+import { resolveChord, type Chord } from '../core/chords';
 import { BAR_ID, BookmarkStore, OTHER_ID, type ParsedImport } from '../core/bookmarks';
+import { SavedSessionStore } from '../core/saved-sessions';
+import { SortModeSchema, sortTree, TrashStore, type SortMode } from '../core/bookmarks-panel';
+import { WorkspaceStore } from '../core/workspaces';
+import { StackModel } from '../core/tab-stacks';
+import { PageActionsSchema, PageActionsStore, defaultPageActions, pageActionCss, affectsAgentSnapshot, describePageActions, type PageActions } from '../core/page-actions';
+import { planSweep, decideHibernation, HibernationSettingsSchema, type HibernationFacts } from '../core/hibernation';
+import { toChords, validateBindings, defaultKeybindings, KeybindingsSchema, ACTION_LABELS, formatChord } from '../core/keybindings';
+import { resolveGesture, pathFrom, type Point } from '../core/gestures';
+import { clampItems, type PaletteItem } from '../core/quick-commands';
+import { buildBundle, dryRun, parseBundle, MAX_BUNDLE_BYTES } from '../core/profile-bundle';
+import { CaptureRequestSchema, clampRect, clampFullHeight, captureFilename, writeCapture } from './capture';
+import { EXTRACT_ARTICLE_JS, normalizeArticle } from './reader-mode';
+import { canTranslate, chunkText, cloudStatus, translatePrompt, TRANSLATE_SYSTEM, TranslateSettingsSchema, LANGUAGES, defaultTranslate } from './translate';
+import { ExtensionList, EXTENSION_WARNING, extensionListFile, loadExtensions } from './extensions';
 import { Worker } from 'node:worker_threads';
 import { lookup } from 'node:dns/promises';
 
@@ -76,6 +96,38 @@ const localLists = new LocalLists(join(profileDir, 'reputation'));
 // a reference to these stores; they are only reachable through the UI window's IPC handlers.
 const history = new HistoryStore(join(profileDir, 'history.json'));
 const bookmarks = new BookmarkStore(join(profileDir, 'bookmarks.json'));
+// Closed-tab stack for Ctrl+Shift+T. Holds a URL, a title, a position and a timestamp and nothing
+// else — see src/core/closed-tabs.ts for why gate state is not representable here.
+const closedTabs = new ClosedTabStore(join(profileDir, 'closed-tabs.json'));
+// Session state for "start where you left off". URLs, titles, selection and tiling only; gate
+// state is deliberately not representable (see src/core/session-state.ts).
+const sessionState = new SessionStore(join(profileDir, 'session.json'));
+// Per-origin zoom. A chrome view property, private to the profile.
+const zoom = new ZoomStore(join(profileDir, 'zoom.json'));
+// The downloads panel's list. Observes transfers only — see src/core/downloads.ts.
+const downloads = new DownloadList((list) => sendUI('downloads', list));
+// ---------------------------------- wave 2 stores ----------------------------------
+// Named, reusable tab sets the user creates deliberately (ticket 22). URLs + titles only; the
+// schema has no field for gate state, so a restored session's tabs start clean.
+const savedSessions = new SavedSessionStore(join(profileDir, 'saved-sessions.json'));
+// Named tab sets you switch between (ticket 20). NOT an identity boundary: workspaces share this
+// profile's cookies, storage and every security layer. Only the profile is an identity.
+const workspaces = new WorkspaceStore(join(profileDir, 'workspaces.json'));
+// Tab stacks (ticket 19). Pure presentation over tab ids — collapsing one unloads and un-gates
+// nothing.
+const stacks = StackModel.load(join(profileDir, 'tab-stacks.json')).model;
+// Per-origin page transforms (ticket 27). The applied set is agent-visible state, so it is audited.
+const pageActions = new PageActionsStore(join(profileDir, 'page-actions.json'));
+// Bookmarks panel extras: sort mode + a Trash that never discards silently (ticket 33).
+const bookmarkTrash = new TrashStore(join(profileDir, 'bookmarks-trash.json'));
+// Unpacked extensions (ticket 32). Outside the threat model — see the warning in extensions.ts.
+const extensions = new ExtensionList(extensionListFile(profileDir));
+/** last activation time per tab id, for the hibernation sweep (ticket 23) */
+const activatedAt = new Map<number, number>();
+/** gesture trail from the MAIN process's own input events; never page-reported (ticket 16) */
+let gestureTrail: Point[] = [];
+/** the bookmarks panel's sort mode (ticket 33); presentation only */
+let bookmarkSort: SortMode = 'manual';
 /** favicon bytes by origin (in memory only; decoded in the sandboxed renderer) */
 const faviconCache = new Map<string, { mime: string; data: string }>();
 const reputation: ReputationChecker = { check: (h) => feeds.check(h, localLists) };
@@ -87,17 +139,10 @@ const sbCache = new Map<string, { verdict: string | null; at: number }>();
 const fallbackActive: Partial<Record<Role, string>> = {};
 /** webRequest-layer flows the user denied during the current task (not asked again) */
 let deniedFlows = new Set<string>();
-/**
- * Tabs whose current document was driven by an agent task. They stay under the state-change gate
- * after the task ends (a page could otherwise wait for the task to finish, then submit), until the
- * user navigates the tab themselves or closes it.
- */
-const postTaskGuard = new Set<number>();
-/**
- * Origins the agent's tab visited during tasks. Requests that belong to no tab (service workers,
- * shared workers) to one of these origins are gated while any tab is under the post-task gate.
- */
-const guardedOrigins = new Set<string>();
+// Post-task state-change gate: the per-tab rules live in TabGuardBook (src/main/tab-guard.ts) and
+// are reached through TabManager (tabs.setGate / tabs.isGated / tabs.gatedOrigins). Reopening or
+// restoring a tab constructs a new tab id, which is absent from the book and therefore ungated —
+// gate state is never resurrected from anything persisted.
 let guardedSession: Session | null = null;
 let disposed = false;
 
@@ -205,6 +250,16 @@ function sourceOf(wcId: number | undefined): ConfirmRequest['source'] {
 
 function isTabRequest(id: number | undefined): boolean {
   return id !== undefined && tabs.list().some((t) => tabs.byId(t.id)?.wc.id === id);
+}
+
+/**
+ * The webRequest layer sees WebContents ids, but tab security state lives in TabGuardBook. The
+ * two are kept in lockstep by TabManager.create()/close(), so one lookup is enough — and if a
+ * WebContents has no live tab (a destroyed tab, a devtools target) the answer is "not gated",
+ * which is what the old `postTaskGuard.has(id)` gave once the tab was gone.
+ */
+function tabIdOf(wcId: number): number {
+  return tabs.list().find((t) => tabs.byId(t.id)?.wc.id === wcId)?.id ?? -1;
 }
 const inflightFlows = new Map<string, Promise<ConfirmOutcome>>();
 
@@ -398,8 +453,8 @@ function setupEgress(ses: Session) {
     const inTask = !!current && egress.mode === 'agent';
     const host = hostKey(d.url) ?? '?';
     const base = { host, method: d.method, url: d.url.slice(0, 500) };
-    const workerOfGuardedOrigin = postTaskGuard.size > 0 && !isTabRequest(d.webContentsId) && guardedOrigins.has(originOf(d.url) ?? '');
-    const gated = inTask || (d.webContentsId !== undefined && postTaskGuard.has(d.webContentsId)) || workerOfGuardedOrigin;
+    const workerOfGuardedOrigin = tabs.anyGated() && !isTabRequest(d.webContentsId) && tabs.gatedOrigins().has(originOf(d.url) ?? '');
+    const gated = inTask || (d.webContentsId !== undefined && tabs.isGated(tabIdOf(d.webContentsId))) || workerOfGuardedOrigin;
 
     // hosts the proxy refuses anyway are cancelled here first: no pointless prompts, and a prompt
     // can never reveal to the page whether a host is on the allowlist
@@ -492,6 +547,13 @@ function setupEgress(ses: Session) {
   });
 
   ses.on('will-download', (_e, item, dlWc) => {
+    // The downloads panel only OBSERVES the transfer: the staging / confirm / rename logic below is
+    // unchanged. Recording happens regardless of who started it, so the user can see the bytes.
+    const dlId = downloads.add(item, {
+      agentTask: !!current,
+      host: hostKey(item.getURL()) ?? '',
+      source: current ? 'agent' : 'user',
+    });
     if (!current) {
       // manual browsing: Electron's save dialog (no silent writes, no overwrites without asking)
       audit.write('egress', { layer: 'download', decision: 'log', host: hostKey(item.getURL()), method: 'GET', url: item.getURL(), reason: 'manual download (save dialog)' });
@@ -517,12 +579,16 @@ function setupEgress(ses: Session) {
           if (state === 'completed' && existsSync(tmp)) {
             const dest = uniquePath(testEnv('GUARDED_DOWNLOAD_DIR') || app.getPath('downloads'), name);
             renameSync(tmp, dest);
+            downloads.saved(dlId, dest);
             audit.write('egress', { layer: 'download', decision: 'allow', host: hostKey(url), method: 'GET', url, reason: `saved as ${dest}` });
+          } else {
+            downloads.failed(dlId, state);
           }
         } else {
           if (item.getState() === 'progressing') item.cancel();
           await done;
           rmSync(tmp, { force: true });
+          downloads.failed(dlId, 'denied');
         }
       });
   });
@@ -541,32 +607,410 @@ function uniquePath(dir: string, name: string): string {
   }
 }
 
-/** Ctrl+Shift+S tiles the selected tabs, Ctrl+Shift+U untiles; works while a page has focus too. */
+/**
+ * Close a tab: ends the task if it is the agent's pane, forgets its security state, and pushes it
+ * onto the closed-tab stack so Ctrl+Shift+T can bring it back. Shared with the ✕ button and
+ * Ctrl+W so both paths capture identically.
+ */
+function closeTab(id: number) {
+  const t = tabs.byId(id);
+  if (!t) return;
+  const isAgentPane = !!current && current.tab === t;
+  if (isAgentPane) stopTask();
+  tabs.forgetTab(t.id);
+  // The agent task's own pane is not captured: offering the document the agent drove back as a
+  // "reopen" would resurrect the very page the post-task gate exists to contain.
+  tabs.silentCloseId = isAgentPane ? id : null;
+  tabs.close(id);
+  tabs.silentCloseId = null;
+}
+
+/**
+ * Reopen the most recently closed tab. Built exactly like a plain user navigation: a NEW tab id
+ * (so TabGuardBook has no entry and the tab is ungated) at the old position, with no guard origin
+ * recorded. Only the URL and title survive a close — see src/core/closed-tabs.ts.
+ */
+function reopenClosed(): { ok: boolean; url?: string } {
+  const entry = closedTabs.pop();
+  if (!entry) return { ok: false };
+  sendUI('closed-tabs', closedTabs.list());
+  const t = tabs.createAt(entry.url, { at: entry.pos });
+  t.navSource = 'user';
+  audit.write('navigation', { url: entry.url, tab: t.id, by: 'user', reopen: true });
+  return { ok: true, url: entry.url };
+}
+
+/**
+ * Dispatch a chord while a page has focus. Every action in src/core/chords.ts lands here, so the
+ * keymap has exactly one implementation (ticket 15 will edit the table, not this function).
+ */
 function installShortcuts(wc: WebContents) {
   wc.on('before-input-event', (e, input) => {
-    if (input.type !== 'keyDown' || !(input.control || input.meta)) return;
-    const k = input.key.toLowerCase();
-    // library shortcuts while a page has focus: forwarded to this profile's chrome UI
-    if (!input.shift && (k === 'h' || k === 'd')) {
-      e.preventDefault();
-      sendUI('shortcut', k === 'h' ? 'history' : 'bookmark-page');
-      return;
-    }
-    if (input.shift && k === 'b') {
-      e.preventDefault();
-      sendUI('shortcut', 'toggle-bar');
-      return;
-    }
-    if (!input.shift) return;
-    if (k === 's') {
-      e.preventDefault();
-      tabs.tile(undefined, 'columns');
-    } else if (k === 'u') {
-      e.preventDefault();
-      tabs.untile();
-    }
+    if (runChord(input)) e.preventDefault();
   });
 }
+
+/**
+ * Run one chord against this window. Returns true when the keystroke was consumed.
+ *
+ * `before-input-event` only fires for a focused *page* view, so the chrome UI's own keydown
+ * handler calls into the same path through the `chord` IPC channel (see the handler below). One
+ * implementation, two entry points: the keymap has a single place to change (ticket 15 edits the
+ * table in src/core/chords.ts and nothing else).
+ *
+ * `e` is the Electron event when available; the IPC path passes null and nothing needs to be
+ * prevented (the renderer already called preventDefault on its own event).
+ */
+function runChord(input: { key: string; control?: boolean; meta?: boolean; shift?: boolean; alt?: boolean; type?: string }): boolean {
+  const key = input.key.toLowerCase();
+  const action = resolveChord(input, chordTable());
+  // Ctrl+1..9 selects a tab by index (1..8), Ctrl+9 the last one
+  if (!action && (input.control || input.meta) && !input.shift && /^[1-9]$/.test(key)) {
+    const list = tabs.list();
+    const idx = key === '9' ? list.length - 1 : Number(key) - 1;
+    const t = list[idx];
+    if (t) tabs.activate(t.id);
+    return true;
+  }
+  if (!action) return false;
+  const active = tabs.active();
+  switch (action) {
+    case 'tab.new':
+      // the agent's pane is fixed for the duration of its task
+      if (current) return true;
+      tabs.create(tabStartUrl()).navSource = 'user';
+      break;
+    case 'tab.close':
+      if (active) closeTab(active.id);
+      break;
+    case 'tab.reopen':
+      reopenClosed();
+      break;
+    case 'tab.next':
+    case 'tab.prev': {
+      const id = tabs.nextInMru(action === 'tab.next' ? 1 : -1);
+      if (id !== undefined) tabs.activate(id);
+      break;
+    }
+    case 'tab.duplicate':
+      tabs.duplicate(active?.id ?? -1);
+      break;
+    case 'tab.closeOthers':
+      if (active) tabs.closeOthers(active.id, !!current);
+      break;
+    case 'tab.mute':
+      if (active) tabs.setAudioMuted(active.id, !active.wc.isAudioMuted());
+      sendUI('tabs', tabs.list());
+      break;
+    case 'tab.reload':
+      if (active) {
+        active.navSource = 'user';
+        active.wc.reload();
+      }
+      break;
+    case 'nav.back':
+      if (active && !current) {
+        tabs.setGate(active.id, 'none');
+        active.navSource = 'user';
+        active.wc.navigationHistory.goBack();
+      }
+      break;
+    case 'nav.forward':
+      if (active && !current) {
+        tabs.setGate(active.id, 'none');
+        active.navSource = 'user';
+        active.wc.navigationHistory.goForward();
+      }
+      break;
+    case 'nav.focusAddress':
+      sendUI('shortcut', 'focus-address');
+      break;
+    case 'view.zoomIn':
+    case 'view.zoomOut':
+    case 'view.zoomReset': {
+      if (!active) break;
+      const origin = originOf(active.wc.getURL());
+      const factor =
+        action === 'view.zoomReset' ? 1 : stepZoom(active.wc.getZoomFactor(), action === 'view.zoomIn' ? 1 : -1);
+      active.wc.setZoomFactor(factor);
+      if (origin) zoom.set(origin, factor);
+      sendUI('zoom', { tab: active.id, factor });
+      break;
+    }
+    case 'view.find':
+      sendUI('shortcut', 'find');
+      break;
+    case 'view.print':
+      // chrome-initiated print of the page the user is looking at. A page-initiated window.print()
+      // is neutralised in the page's own world in setupTab.
+      if (active) void printTab(active);
+      break;
+    case 'view.fullscreen':
+      win.setFullScreen(!win.isFullScreen());
+      break;
+    case 'library.history':
+      sendUI('shortcut', 'history');
+      break;
+    case 'library.bookmarkPage':
+      sendUI('shortcut', 'bookmark-page');
+      break;
+    case 'library.toggleBar':
+      sendUI('shortcut', 'toggle-bar');
+      break;
+    case 'tiles.tile':
+      tabs.tile(undefined, 'columns');
+      break;
+    case 'tiles.untile':
+      tabs.untile();
+      break;
+    // ---- wave 2 ----
+    case 'palette.open':
+      sendUI('shortcut', 'palette');
+      break;
+    case 'panel.history':
+      sendUI('shortcut', 'panel:history');
+      break;
+    case 'panel.bookmarks':
+      sendUI('shortcut', 'panel:bookmarks');
+      break;
+    case 'panel.downloads':
+      sendUI('shortcut', 'panel:downloads');
+      break;
+    case 'panel.sessions':
+      sendUI('shortcut', 'panel:sessions');
+      break;
+    case 'panel.workspaces':
+      sendUI('shortcut', 'panel:workspaces');
+      break;
+    case 'reader.toggle':
+      sendUI('shortcut', 'reader');
+      break;
+    case 'capture.visible':
+      sendUI('shortcut', 'capture:visible');
+      break;
+    case 'capture.full':
+      sendUI('shortcut', 'capture:full');
+      break;
+    case 'capture.clipboard':
+      sendUI('shortcut', 'capture:clipboard');
+      break;
+    case 'session.save':
+      sendUI('shortcut', 'session:save');
+      break;
+    case 'tab.stripToggle': {
+      // cycles the strip placement, so the chord is useful without a settings visit
+      const order: Array<'top' | 'left' | 'right' | 'bottom'> = ['top', 'left', 'bottom', 'right'];
+      const next = order[(order.indexOf(settings.general.tabStrip) + 1) % order.length];
+      settings.general.tabStrip = next;
+      saveSettings(settingsFile, settings);
+      sendUI('tabstrip', { placement: next });
+      break;
+    }
+    case 'view.translate':
+      sendUI('shortcut', 'translate');
+      break;
+  }
+  return true;
+}
+
+// The shortcuts above can close several tabs at once; closeTab sends the stack notification.
+
+
+/**
+ * Where a new tab goes. Still `about:blank` by default; ticket 13 introduces the chrome start page
+ * and this is the single place that decides, so the agent's snapshot never sees the start page as
+ * a page.
+ */
+function tabStartUrl(): string {
+  return 'about:blank';
+}
+
+/** The chord table in force: the user's remappings applied over the defaults. */
+function chordTable(): Chord[] {
+  const custom = toChords(settings.keybindings);
+  return custom.length ? custom : resolveChordTable();
+}
+
+/** The default table, kept as a function so keybindings.ts stays the single source of defaults. */
+function resolveChordTable(): Chord[] {
+  return toChords(defaultKeybindings());
+}
+
+/**
+ * Run an action from the keybinding table by NAME. This is the one entry point for anything that
+ * wants to trigger a bound action (a gesture, a Quick Commands row, a menu item), so a gesture can
+ * never do something a chord cannot, and vice versa.
+ *
+ * It is implemented on top of the same switch runChord uses, reached by synthesising the chord that
+ * is currently bound to the action — that keeps ONE dispatch table rather than two that can drift.
+ */
+function runAction(action: string): boolean {
+  const c = chordTable().find((x) => x.action === action);
+  if (!c) return false;
+  return runChord({ key: c.key, control: c.ctrl, shift: c.shift, alt: c.alt, type: 'keyDown' });
+}
+
+/**
+ * The Quick Commands aggregate (ticket 14). Built from lists the chrome already owns — commands,
+ * open tabs, bookmarks, history, saved sessions, workspaces, settings pages. It reads NO page content
+ * and never reaches the agent.
+ *
+ * Every bookmark/history entry is marked `untrusted` so the matcher scores it below a real command
+ * (a page titled "Close tab" cannot outrank the actual action) and the UI labels where it came from.
+ */
+function commandItems(): PaletteItem[] {
+  const out: PaletteItem[] = [];
+  for (const c of chordTable()) {
+    out.push({ kind: 'command', id: c.action, title: ACTION_LABELS[c.action] ?? c.action, chord: formatChord(`${c.ctrl ? 'ctrl+' : ''}${c.shift ? 'shift+' : ''}${c.alt ? 'alt+' : ''}${c.key}`) });
+  }
+  for (const t of tabs.list()) {
+    out.push({ kind: 'tab', id: String(t.id), title: t.title || t.url || 'New tab', subtitle: t.url || 'about:blank', untrusted: false });
+  }
+  for (const b of bookmarks.all()) {
+    out.push({ kind: 'bookmark', id: b.id, title: b.title, subtitle: b.url, untrusted: true });
+  }
+  for (const h of history.suggest('', 100)) {
+    out.push({ kind: 'history', id: h.url, title: h.title || h.url, subtitle: h.url, untrusted: true });
+  }
+  for (const s of savedSessions.list()) {
+    out.push({ kind: 'session', id: s.id, title: `Session: ${s.name}`, subtitle: `${s.tabs.length} tabs` });
+  }
+  for (const w of workspaces.list()) {
+    out.push({ kind: 'workspace', id: w.id, title: `Workspace: ${w.name}`, subtitle: w.id === workspaces.activeId ? 'active' : '' });
+  }
+  for (const p of ['History', 'Bookmarks', 'Downloads', 'Sessions', 'Workspaces', 'Settings']) {
+    out.push({ kind: 'setting', id: `panel:${p.toLowerCase()}`, title: `Open ${p}` });
+  }
+  return out;
+}
+
+/**
+ * Apply page actions to a tab (ticket 27). Injected into the PAGE's own world as a stylesheet, so
+ * chrome is untouched. An action set that changes what a snapshot reports is audited and surfaced to
+ * the agent's context — the agent must not reason about a page the user has visually rewritten.
+ */
+function applyPageActions(tab: Tab, origin: string) {
+  const pa = pageActions.byOrigin(origin);
+  const css = pageActionCss(pa);
+  try {
+    if (css) {
+      void tab.wc.insertCSS(css, { cssOrigin: 'user' }).catch(() => undefined);
+    }
+    if (affectsAgentSnapshot(pa)) {
+      audit.write('page-actions', { taskId: current?.task.id, url: tab.wc.getURL(), actions: describePageActions(pa), agentVisible: true });
+    }
+  } catch {
+    /* a page that cannot take CSS is not an error worth failing a navigation over */
+  }
+}
+
+/** Facts for the hibernation decision (ticket 23). Gathered here; DECIDED by planSweep. */
+function hibernationFacts(): HibernationFacts[] {
+  const all = tabs.list();
+  return all.map((t) => ({
+    tabId: t.id,
+    isAgentTab: tabs.agentTab === t.id,
+    isGated: tabs.isGated(t.id),
+    audible: t.audible,
+    active: t.active,
+    tabCount: all.length,
+    idleMs: Date.now() - (activatedAt.get(t.id) ?? 0),
+    loading: t.loading,
+    pinned: false, // no pin feature yet; the field exists so a pin cannot be forgotten when it lands
+    hasFormState: false, // best-effort; a discard with form state is guarded by the setting
+  }));
+}
+
+/** Sweep now. Returns the ids actually discarded. The decision is planSweep's, never this function's. */
+function hibernationSweep(): number[] {
+  if (settings.hibernation.enabled !== true) return [];
+  const ids = planSweep(hibernationFacts(), {
+    idleMs: settings.hibernation.idleMinutes * 60_000,
+    allowFormState: settings.hibernation.allowFormState,
+    maxPerSweep: settings.hibernation.maxPerSweep,
+  });
+  const done: number[] = [];
+  for (const id of ids) {
+    // re-check against the live facts immediately before discarding: a tab could have become active
+    // or gained a gate between the plan and the act
+    const f = hibernationFacts().find((x) => x.tabId === id);
+    if (!f || !decideHibernation(f, { idleMs: settings.hibernation.idleMinutes * 60_000, allowFormState: settings.hibernation.allowFormState }).hibernate) continue;
+    if (tabs.hibernate(id)) {
+      done.push(id);
+      audit.write('hibernate', { taskId: current?.task.id, tab: id });
+    }
+  }
+  if (done.length) sendUI('tabs', tabs.list());
+  return done;
+}
+
+let hibernationTimer: ReturnType<typeof setInterval> | null = null;
+/** Start/stop the sweep timer to match the setting. */
+function scheduleHibernation() {
+  if (hibernationTimer) clearInterval(hibernationTimer);
+  hibernationTimer = null;
+  if (settings.hibernation.enabled !== true) return;
+  hibernationTimer = setInterval(() => hibernationSweep(), 60_000);
+  hibernationTimer.unref?.();
+}
+
+
+/**
+ * Save the session (debounced). Called on navigation, tab open/close, tiling and quit. Only URLs,
+ * titles, the active index and the tiling are written — never gate state.
+ */
+function saveSessionSoon() {
+  if (disposed) return;
+  const list = tabs?.list() ?? [];
+  const activeIndex = list.findIndex((t) => t.active);
+  const tiles = tabs?.tileState();
+  const tiling = tiles
+    ? {
+        indexes: tiles.ids.map((id) => list.findIndex((t) => t.id === id)).filter((i) => i >= 0),
+        layout: tiles.layout,
+        ratios: tiles.ratios,
+      }
+    : null;
+  sessionState.saveSoon(
+    list.map((t) => ({ url: t.url, title: t.title })),
+    activeIndex < 0 ? 0 : activeIndex,
+    tiling && tiling.indexes.length >= 2 ? tiling : null,
+    false,
+  );
+}
+
+/**
+ * Print the active page through the system dialog. Chrome-initiated only: a page calling
+ * `window.print()` is handled separately in setupTab and refused while a task runs, so this
+ * function is never reachable from page script.
+ */
+async function printTab(tab: Tab): Promise<boolean> {
+  if (current?.tab === tab) {
+    // never put a native dialog over security UI while the agent is driving this tab
+    audit.write('policy', { taskId: current.task.id, action: 'page:print', decision: 'block', reasons: ['printing the agent-driven tab is refused while its task runs'] });
+    return false;
+  }
+  if (broker.list().length) {
+    audit.write('policy', { action: 'page:print', decision: 'block', reasons: ['a confirmation is pending; no native dialog is opened over it'] });
+    return false;
+  }
+  audit.write('policy', { action: 'page:print', decision: 'allow', destination: tab.wc.getURL() });
+  return new Promise<boolean>((resolve) => {
+    tab.wc.print({ silent: false }, (ok: boolean) => resolve(ok));
+  });
+}
+
+/**
+ * Apply the remembered zoom for a URL's origin (called on arrival). Kept here so navigation,
+ * restore and reopen all go through one path.
+ */
+function applyZoom(wc: WebContents) {
+  const o = originOf(wc.getURL());
+  if (o) wc.setZoomFactor(zoom.get(o));
+}
+
+/** the query the user last typed in the find bar, per tab (for the found-in-page echo) */
+const lastFindQuery = new Map<number, string>();
 
 function setupTab(tab: Tab) {
   const wc = tab.wc;
@@ -592,7 +1036,7 @@ function setupTab(tab: Tab) {
   wc.setWindowOpenHandler(({ url }) => {
     if (current?.tab === tab) {
       audit.write('navigation', { url, by: 'page', blocked: true, reason: 'popup during agent task' });
-    } else if (postTaskGuard.has(wc.id)) {
+    } else if (tabs.isGated(tab.id)) {
       // a new tab would escape the post-task gate: refuse until the user navigates this tab themselves
       audit.write('navigation', { url, by: 'page', blocked: true, reason: 'popup from a tab under the post-task gate (navigate the tab yourself to lift it)' });
     } else if (current && originOf(url)) {
@@ -648,15 +1092,75 @@ function setupTab(tab: Tab) {
   wc.on('did-navigate', (_e, url) => {
     if (current?.tab === tab) {
       const o = originOf(url);
-      if (o) guardedOrigins.add(o);
+      if (o) tabs.addGuardOrigin(tab.id, o);
     }
     // who started it: 'page' (renderer-initiated: will-navigate fired, or a popup tab), 'agent' (the
     // driver's navigate), otherwise 'user' (address bar, new tab, back / forward / reload)
     const by = tab.navSource ?? 'user';
     tab.navSource = undefined;
     audit.write('navigation', { url, tab: tab.id, by, agentTab: current?.tab === tab });
-    // history: real web pages only (never the interstitial / data: / blob: / internal pages)
-    if (recordable(url)) history.record(url, wc.getTitle() === url ? '' : wc.getTitle(), current?.tab === tab && by !== 'user' ? 'agent' : by);
+    // zoom is per origin: apply the remembered factor on arrival, and 100% when arriving at an
+    // origin with none. Purely a view property — the snapshot the agent sees is unaffected.
+    const o = originOf(url);
+    if (o) {
+      const z = zoom.get(o);
+      wc.setZoomFactor(z);
+      sendUI('zoom', { tab: tab.id, factor: z });
+    }
+    // history: real web pages only (never the interstitial / data: / blob: / internal pages).
+    // A session restore re-navigates to the tabs that were open; with "clear history on exit" the
+    // user asked for no surviving history, so those restore-driven navigations must not be
+    // recorded — otherwise the restored URL is written straight back into history at launch and
+    // the setting silently fails after a crash.
+    if (recordable(url) && !(tab.restored && history.clearOnExit)) {
+      history.record(url, wc.getTitle() === url ? '' : wc.getTitle(), current?.tab === tab && by !== 'user' ? 'agent' : by);
+    }
+    // the tab is no longer "restored" once anything else navigates it
+    if (tab.restored) tab.restored = false;
+    // session state follows real navigations (debounced inside saveSoon)
+    saveSessionSoon();
+  });
+  // A page-initiated window.print() must never put a native dialog over security UI, and must not
+  // decide when the user sees one. It is neutralised in the page's own world: printing is reached
+  // only through the chrome (menu / Ctrl+P), which is a user action. The audit line makes the
+  // refusal visible rather than silent.
+  wc.on('did-finish-load', () => {
+    applyZoom(wc);
+    // per-origin page actions are REMEMBERED, so they must be re-applied on every arrival — not only
+    // when the user toggles one. A stylesheet does not survive a navigation.
+    const o = originOf(wc.getURL());
+    const tab2 = tabs.byWebContents(wc);
+    if (o && tab2) applyPageActions(tab2, o);
+    void wc.executeJavaScript(
+      `(() => {
+        if (window.__gbPrintNeutralised) return;
+        window.__gbPrintNeutralised = true;
+        try { Object.defineProperty(window, 'print', { value: () => undefined, writable: false, configurable: false }); } catch (e) {}
+      })()`,
+      true,
+    ).catch(() => undefined);
+  });
+  wc.on('audio-state-changed', () => sendUI('tabs', tabs.list()));
+  // The page's own context menu is replaced by chrome UI: the coordinates and the link URL are
+  // passed to this window's renderer only (never back into any page), and the menu's items are
+  // fixed chrome actions.
+  wc.on('context-menu', (_e, params) => {
+    if (tabs.byWebContents(wc)?.id !== tabs.active()?.id) return; // only the active pane opens a menu
+    sendUI('page:contextmenu', {
+      x: Math.max(0, Math.min(params.x, win.getContentBounds().width - 240)),
+      y: Math.max(0, Math.min(params.y, win.getContentBounds().height - 280)),
+      hasSelection: !!params.selectionText,
+      link: params.linkURL || null,
+    });
+  });
+  wc.on('found-in-page', (_e, result) => {
+    sendUI('find:result', {
+      tab: tab.id,
+      matches: result.matches,
+      active: result.activeMatchOrdinal,
+      final: result.finalUpdate,
+      query: lastFindQuery.get(tab.id) ?? '',
+    });
   });
   wc.on('page-title-updated', (_e, title) => {
     const u = wc.getURL();
@@ -692,7 +1196,7 @@ async function startTask(text: string, origins?: string[]) {
   const tab = tabs.active();
   if (!tab) throw new Error('no active tab');
   deniedFlows = new Set();
-  postTaskGuard.add(tab.wc.id);
+  tabs.setGate(tab.id, 'post-task');
   const task = new AgentTask(text, {
     planner: llm('planner'),
     reader: llm('reader'),
@@ -724,10 +1228,12 @@ async function startTask(text: string, origins?: string[]) {
       current = null;
       tabs.setAgentTab(null);
       // Service workers registered by pages the agent visited would outlive the task and act
-      // without a tab: unregister them for every origin the agent's tab visited.
+      // without a tab: unregister them for every origin still held by a gated tab. The gate is
+      // lifted only by the user taking the tab back or by closing it, so this is the same set the
+      // pre-refactor code read from `guardedOrigins`.
       // (TEST ONLY: GUARDED_TEST_KEEP_SW=1 skips this to show the worker gate holds on its own)
       const keepSw = testEnv('GUARDED_TEST_KEEP_SW') === '1';
-      for (const origin of keepSw ? [] : guardedOrigins) {
+      for (const origin of keepSw ? [] : tabs.gatedOrigins()) {
         void guardedSession
           ?.clearStorageData({ origin, storages: ['serviceworkers'] })
           .then(() => audit.write('egress', { layer: 'webrequest', decision: 'block', host: hostKey(origin) ?? origin, method: '-', reason: `service workers of ${origin} unregistered at task end` }))
@@ -737,6 +1243,29 @@ async function startTask(text: string, origins?: string[]) {
     });
   return task.id;
 }
+
+/** the saved panel list, with the LIVE ones marked and their real titles */
+const panelState = () => {
+  const live = new Map(tabs.panelList().map((t) => [t.id, t]));
+  return {
+    saved: settings.general.webPanels.map((p) => {
+      const t = [...live.values()].find((x) => (x.intendedUrl || x.wc.getURL()) === p.url);
+      return { url: p.url, title: t?.wc.getTitle() || p.title, open: !!t };
+    }),
+    open: tabs.panelList().map((t) => ({ id: t.id, url: t.intendedUrl || t.wc.getURL(), title: t.wc.getTitle() })),
+  };
+};
+
+/** open a panel for a saved entry (used at startup and by the UI toggle) */
+const openPanel = (url: string): { ok: boolean; error?: string; id?: number } => {
+  if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'a panel must be an http(s) site' };
+  if (tabs.panelList().some((t) => (t.intendedUrl || t.wc.getURL()) === url)) return { ok: true };
+  const t = tabs.createPanel(url);
+  audit.write('panel', { url, open: true });
+  void tabs.layout();
+  sendUI('panels', { railVisible: settings.general.railVisible, statusBar: settings.general.statusBar, tabStrip: settings.general.tabStrip, inset: tabs.insets() });
+  return { ok: true, id: t.id };
+};
 
 function registerIpc() {
   const on = (channel: string, fn: Handler) => {
@@ -748,16 +1277,133 @@ function registerIpc() {
     t.navSource = 'user';
     return t.id;
   });
-  on('tabs:close', (_e, id: number) => {
-    const t = tabs.byId(id);
-    if (current && current.tab === t) stopTask(); // closing the agent's pane ends its task
-    if (t) postTaskGuard.delete(t.wc.id);
-    if (!postTaskGuard.size) guardedOrigins.clear();
-    tabs.close(id);
+  on('tabs:close', (_e, id: number) => closeTab(Number(id)));
+  on('tabs:reopen', () => reopenClosed());
+  on('tabs:closed-list', () => closedTabs.list());
+  /**
+   * The active tab's security state, for the chrome UI and for tests. Read-only, and it reports
+   * booleans and origins rather than granting any capability.
+   */
+  on('tabs:guard-state', () => {
+    const t = tabs.active();
+    if (!t) return { gated: false, origins: [], agentTab: false, taskRunning: !!current };
+    const s = tabs.guardStateOf(t.id);
+    return { gated: s?.gate === 'post-task', origins: s?.gateOrigins ?? [], agentTab: s?.agentTab ?? false, taskRunning: !!current };
   });
   on('tabs:activate', (_e, id: number) => {
-    tabs.activate(id);
+    tabs.activate(Number(id));
+    tabs.noteActivated(Number(id));
+    saveSessionSoon();
     void updateSiteAccent();
+  });
+  on('tabs:move', (_e, id: unknown, to: unknown) => {
+    const order = tabs.move(Number(id), Number(to));
+    saveSessionSoon();
+    return order;
+  });
+  on('tabs:duplicate', (_e, id: unknown) => {
+    const target = id === undefined || id === null ? tabs.active()?.id : Number(id);
+    const t = tabs.duplicate(target ?? -1);
+    saveSessionSoon();
+    return t?.id ?? null;
+  });
+  on('tabs:close-others', (_e, id: unknown) => {
+    const n = tabs.closeOthers(Number(id), !!current);
+    saveSessionSoon();
+    return n;
+  });
+  on('tabs:close-right', (_e, id: unknown) => {
+    const n = tabs.closeRight(Number(id), !!current);
+    saveSessionSoon();
+    return n;
+  });
+  on('tabs:mute', (_e, id: unknown, muted: unknown) => {
+    const wasMuted = tabs.byId(Number(id))?.wc.isAudioMuted() ?? false;
+    tabs.setAudioMuted(Number(id), typeof muted === 'boolean' ? muted : !wasMuted);
+    sendUI('tabs', tabs.list());
+  });
+
+  // ---------- zoom (view property; per origin) ----------
+  on('zoom:get', () => {
+    const t = tabs.active();
+    if (!t) return { factor: 1, origin: null };
+    return { factor: t.wc.getZoomFactor(), origin: originOf(t.wc.getURL()) };
+  });
+  on('zoom:set', (_e, factor: unknown) => {
+    const t = tabs.active();
+    if (!t) return { factor: 1 };
+    const f = clampZoom(Number(factor) || 1);
+    t.wc.setZoomFactor(f);
+    const o = originOf(t.wc.getURL());
+    if (o) zoom.set(o, f);
+    sendUI('zoom', { tab: t.id, factor: f });
+    return { factor: f };
+  });
+  on('zoom:step', (_e, dir: unknown) => {
+    const t = tabs.active();
+    if (!t) return { factor: 1 };
+    const f = stepZoom(t.wc.getZoomFactor(), Number(dir) === 1 ? 1 : -1);
+    t.wc.setZoomFactor(f);
+    const o = originOf(t.wc.getURL());
+    if (o) zoom.set(o, f);
+    sendUI('zoom', { tab: t.id, factor: f });
+    return { factor: f };
+  });
+  on('zoom:reset', () => {
+    const t = tabs.active();
+    if (!t) return { factor: 1 };
+    t.wc.setZoomFactor(1);
+    const o = originOf(t.wc.getURL());
+    if (o) zoom.clear(o);
+    sendUI('zoom', { tab: t.id, factor: 1 });
+    return { factor: 1 };
+  });
+
+  // ---------- find in page (Chromium reports counts, never content) ----------
+  on('find:start', (_e, query: unknown, opts: unknown) => {
+    const t = tabs.active();
+    if (!t) return { requestId: 0 };
+    const q = String(query ?? '').slice(0, 200);
+    const o = (opts ?? {}) as { forward?: boolean; findNext?: boolean; matchCase?: boolean };
+    const prev = lastFindQuery.get(t.id);
+    lastFindQuery.set(t.id, q);
+    if (!q) {
+      tabs.stopFind(t.id);
+      return { requestId: 0, cleared: true };
+    }
+    // The FIRST request of a find session must carry findNext:true (Electron's own docs); only
+    // repeat requests within the same query use findNext:false. A fresh query resets the session.
+    const freshQuery = prev !== q;
+    const rid = tabs.findInPage(t.id, q, { ...o, findNext: freshQuery ? true : o.findNext === true });
+    return { requestId: rid };
+  });
+  on('find:stop', () => {
+    const t = tabs.active();
+    if (t) tabs.stopFind(t.id, 'clearSelection');
+  });
+
+  // ---------- print (chrome-initiated only) ----------
+  on('page:print', async () => {
+    const t = tabs.active();
+    if (!t) return { ok: false, error: 'no active tab' };
+    return { ok: await printTab(t) };
+  });
+
+  // ---------- downloads panel (observes the transfer; never decides) ----------
+  on('downloads:list', () => downloads.list());
+  on('downloads:action', (_e, id: unknown, what: unknown) => downloads.action(Number(id), String(what) as 'pause' | 'resume' | 'cancel' | 'remove'));
+  on('downloads:clear', () => {
+    downloads.clearFinished();
+    return downloads.list();
+  });
+
+  // ---------- search engine setting ----------
+  on('search:get', () => ({ engines: SEARCH_ENGINES, current: settings.general.search }));
+
+  // ---------- session restore ----------
+  on('session:info', () => {
+    const r = sessionState.restorableTabs();
+    return { tabs: r.tabs, activeIndex: r.activeIndex, crashed: sessionState.crashed, startup: settings.general.startup };
   });
   on('tabs:select', (_e, id: number, on?: boolean) => tabs.toggleSelected(Number(id), typeof on === 'boolean' ? on : undefined));
   const LAYOUTS = new Set(['columns', 'rows', 'grid']);
@@ -774,13 +1420,12 @@ function registerIpc() {
   on('nav:go', (_e, input: string) => {
     const t = tabs.active();
     if (!t) return;
-    if (!current) postTaskGuard.delete(t.wc.id); // the user took the tab back
+    if (!current) tabs.setGate(t.id, 'none'); // the user took the tab back
     t.navSource = 'user';
-    if (!postTaskGuard.size) guardedOrigins.clear();
     let url = input.trim();
     const nick = bookmarks.byNickname(url);
     if (nick) url = nick.url; // a bookmark nickname typed in the address bar
-    else if (!/^[a-z]+:/i.test(url)) url = /^[\w.-]+(:\d+)?(\/|$)/.test(url) ? `http://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
+    else if (!/^[a-z]+:/i.test(url)) url = /^[\w.-]+(:\d+)?(\/|$)/.test(url) ? `http://${url}` : searchUrl(url, settings.general.search);
     void t.wc.loadURL(url).catch(() => undefined);
   });
 
@@ -795,7 +1440,7 @@ function registerIpc() {
     } else {
       const t = tabs.active();
       if (!t) return { ok: false };
-      if (!current) postTaskGuard.delete(t.wc.id);
+      if (!current) tabs.setGate(t.id, 'none');
       t.navSource = 'user';
       void t.wc.loadURL(url).catch(() => undefined);
     }
@@ -917,17 +1562,25 @@ function registerIpc() {
     const o = originOf(String(url ?? ''));
     return o ? faviconCache.get(o) ?? null : null;
   });
-  on('chrome:insets', (_e, top: unknown, left: unknown) => {
+  on('chrome:insets', (_e, top: unknown, left: unknown, bottom: unknown) => {
     const t = Math.max(0, Math.min(400, Math.round(Number(top) || 0)));
     const l = Math.max(0, Math.min(600, Math.round(Number(left) || 0)));
-    tabs.setInsets(t, l);
+    const b = Math.max(0, Math.min(200, Math.round(Number(bottom) || 0)));
+    tabs.setInsets(t, l, b);
   });
   on('chrome:overlay', (_e, on: unknown) => tabs.setOverlay(on === true));
+  // The chrome window's own keydown handler forwards keystrokes here, so the chord table applies
+  // whether a page or the chrome has focus. Only a key event is accepted; the payload is a plain
+  // description, never anything page-derived.
+  on('chord', (_e, key: unknown, mods: unknown) => {
+    const m = (mods ?? {}) as { ctrl?: boolean; shift?: boolean; alt?: boolean };
+    if (typeof key !== 'string' || key.length > 32) return { handled: false };
+    return { handled: runChord({ key, control: m.ctrl === true, shift: m.shift === true, alt: m.alt === true, type: 'keyDown' }) };
+  });
   const userNav = (fn: (wc: WebContents) => void) => {
     const t = tabs.active();
     if (!t) return;
-    if (!current) postTaskGuard.delete(t.wc.id);
-    if (!postTaskGuard.size) guardedOrigins.clear();
+    if (!current) tabs.setGate(t.id, 'none');
     t.navSource = 'user';
     fn(t.wc);
   };
@@ -994,6 +1647,606 @@ function registerIpc() {
     return reputationState();
   });
   on('audit:recent', () => audit.read().slice(-400));
+
+  // ================================ wave 2 (tickets 14-33) ================================
+
+  // ---------- 15: remappable keybindings ----------
+  on('keybindings:get', () => ({ bindings: settings.keybindings, chords: chordTable() }));
+  on('keybindings:save', (_e, b: unknown) => {
+    const r = KeybindingsSchema.safeParse(b);
+    if (!r.success) return { ok: false, error: r.error.issues[0]?.message ?? 'invalid' };
+    const problems = validateBindings(r.data.bindings);
+    if (problems.length) return { ok: false, error: problems.map((p) => `${p.action}: ${p.problem}`).join('; ').slice(0, 300) };
+    settings.keybindings = r.data;
+    saveSettings(settingsFile, settings);
+    sendUI('keybindings', settings.keybindings);
+    return { ok: true };
+  });
+  on('keybindings:reset', () => {
+    settings.keybindings = defaultKeybindings();
+    saveSettings(settingsFile, settings);
+    sendUI('keybindings', settings.keybindings);
+    return { ok: true, bindings: settings.keybindings };
+  });
+
+  // ---------- 16: gestures ----------
+  // The trail is fed from the page view's own input events (below), never by page script. A gesture
+  // is REFUSED while a task runs: it could otherwise move the agent's tab out from under the gate.
+  on('gesture:trail', (_e, phase: unknown, x: unknown, y: unknown) => {
+    if (settings.gestures.enabled !== true) return { action: null };
+    if (phase === 'start') gestureTrail = [{ x: Number(x) || 0, y: Number(y) || 0 }];
+    else if (phase === 'move') gestureTrail.push({ x: Number(x) || 0, y: Number(y) || 0 });
+    else if (phase === 'end') {
+      // The final point IS part of the path: a flick sends start then end, with no 'move' in
+      // between, so dropping the end point left a one-point trail and no gesture ever resolved.
+      gestureTrail.push({ x: Number(x) || 0, y: Number(y) || 0 });
+      const path = pathFrom(gestureTrail);
+      gestureTrail = [];
+      const r = resolveGesture(path, { suppressed: !!current });
+      if ('suppressed' in r) {
+        sendUI('gesture', { path, suppressed: true, reason: 'an agent task is running' });
+        return { suppressed: true };
+      }
+      if (r.action) runAction(r.action);
+      return { action: r.action };
+    }
+    return { action: null };
+  });
+
+  // ---------- 17/18: panels ----------
+  on('panel:refresh', (_e, which: unknown) => {
+    if (which === 'history') sendUI('history', { groups: history.grouped('', undefined), clearOnExit: history.clearOnExit });
+    if (which === 'bookmarks') libraryChanged();
+    if (which === 'downloads') sendUI('downloads', downloads.list());
+    return { ok: true };
+  });
+  // The renderer asks for this on boot, and boot happens BEFORE `tabs` exists (the UI is loaded
+  // first so the window paints early). So this must not assume a TabManager; the real geometry is
+  // pushed by sendUI('geometry') once there is one.
+  on('panels:state', () => ({
+    railVisible: settings.general.railVisible,
+    statusBar: settings.general.statusBar,
+    tabStrip: settings.general.tabStrip,
+    inset: tabs?.insets() ?? { top: 0, left: 0, bottom: 0 },
+  }));
+
+  // ---------- 18: web panels ----------
+  // A panel is a website pinned into the sidebar. It is NOT a strip tab, it is never `active()`, and
+  // `setAgentTab` refuses a panel id — so a panel cannot become the agent's tab and cannot be an
+  // escape hatch around a task's allowlist. Its requests still pass through the same session, proxy,
+  // host allowlist, reputation feed and webRequest content filter as any tab.
+
+  on('panels:list', () => panelState());
+  /** the chrome reports where the sidebar column landed; panels are drawn exactly there */
+  on('panels:rect', (_e, r: unknown) => {
+    const o = (r ?? null) as { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | null;
+    if (!o) {
+      tabs.setPanelRect(null);
+      return { ok: true };
+    }
+    tabs.setPanelRect({
+      x: Math.max(0, Math.round(Number(o.x) || 0)),
+      y: Math.max(0, Math.round(Number(o.y) || 0)),
+      width: Math.max(0, Math.round(Number(o.width) || 0)),
+      height: Math.max(0, Math.round(Number(o.height) || 0)),
+    });
+    return { ok: true };
+  });
+  /** show a panel in the column (or none). Only http(s) URLs can ever be shown. */
+  on('panels:show', (_e, url: unknown) => {
+    const u = url === null ? null : String(url ?? '');
+    if (u !== null && !tabs.panelList().some((t) => (t.intendedUrl || t.wc.getURL()) === u)) return { ok: false, error: 'no such panel' };
+    tabs.setPanelShown(u);
+    return { ok: true };
+  });
+  /** pin the active tab into the sidebar AND show it immediately */
+  on('panels:show-view', (_e, id: unknown) => {
+    const t = tabs.panelList().find((x) => x.id === Number(id));
+    if (!t) return { ok: false, error: 'no such panel' };
+    tabs.setPanelShown(t.intendedUrl || t.wc.getURL());
+    return { ok: true };
+  });
+  on('panels:add', (_e, url: unknown) => {
+    const u = String(url ?? '');
+    if (!/^https?:\/\//i.test(u)) return { ok: false, error: 'a panel must be an http(s) site' };
+    if (settings.general.webPanels.length >= MAX_WEB_PANELS) return { ok: false, error: `no more than ${MAX_WEB_PANELS} panels` };
+    if (!settings.general.webPanels.some((p) => p.url === u)) {
+      settings.general.webPanels.push({ url: u.slice(0, 2048), title: '' });
+      saveSettings(settingsFile, settings);
+    }
+    const r = openPanel(u);
+    if (r.ok) sendUI('panels:list', panelState());
+    return r;
+  });
+  on('panels:open-current', () => {
+    const t = tabs.active();
+    const u = t?.wc.getURL() ?? '';
+    if (!/^https?:\/\//i.test(u)) return { ok: false, error: 'the active tab is not an http(s) site' };
+    if (settings.general.webPanels.length >= MAX_WEB_PANELS) return { ok: false, error: `no more than ${MAX_WEB_PANELS} panels` };
+    if (!settings.general.webPanels.some((p) => p.url === u)) {
+      settings.general.webPanels.push({ url: u.slice(0, 2048), title: t?.wc.getTitle() ?? '' });
+      saveSettings(settingsFile, settings);
+    }
+    const r = openPanel(u);
+    sendUI('panels:list', panelState());
+    return r;
+  });
+  on('panels:remove', (_e, url: unknown) => {
+    const u = String(url ?? '');
+    settings.general.webPanels = settings.general.webPanels.filter((p) => p.url !== u);
+    saveSettings(settingsFile, settings);
+    const open = tabs.panelList().find((t) => (t.intendedUrl || t.wc.getURL()) === u);
+    if (open) tabs.closePanel(open.id);
+    audit.write('panel', { url: u, open: false });
+    sendUI('panels:list', panelState());
+    return { ok: true };
+  });
+  on('panels:close', (_e, id: unknown) => {
+    const n = Number(id);
+    // a panel is closed through the SAME reporting path as a tab, so it lands on the reopen stack
+    tabs.closePanel(n, (url, title, pos) => {
+      closedTabs.push(url, title, pos);
+      sendUI('closed-tabs', closedTabs.list());
+    });
+    sendUI('panels:list', panelState());
+    return { ok: true };
+  });
+
+  // ---------- 14: quick commands ----------
+  on('commands:search', () => clampItems(commandItems()));
+  /** Run a bound action by NAME. The palette reaches actions through this, so it cannot do anything
+   *  a chord cannot, and there is a single dispatch path (runAction). */
+  on('action:run', (_e, action: unknown) => ({ ok: runAction(String(action ?? '')) }));
+
+  // ---------- 19: tab stacks ----------
+  on('stacks:list', () => stacks.list());
+  on('stacks:create', (_e, ids: unknown, name: unknown) => {
+    const live = tabs.list().map((t) => t.id);
+    const r = stacks.create(Array.isArray(ids) ? ids.map(Number).filter((n) => live.includes(n)) : [], String(name ?? ''));
+    stacks.flush(join(profileDir, 'tab-stacks.json'));
+    sendUI('stacks', stacks.list());
+    return r;
+  });
+  on('stacks:collapse', (_e, id: unknown, collapsed: unknown) => {
+    const ok = stacks.toggleCollapsed(String(id), typeof collapsed === 'boolean' ? collapsed : undefined);
+    stacks.flush(join(profileDir, 'tab-stacks.json'));
+    sendUI('stacks', stacks.list());
+    return { ok };
+  });
+  on('stacks:rename', (_e, id: unknown, name: unknown) => {
+    const ok = stacks.rename(String(id), String(name ?? ''));
+    stacks.flush(join(profileDir, 'tab-stacks.json'));
+    sendUI('stacks', stacks.list());
+    return { ok };
+  });
+  on('stacks:color', (_e, id: unknown, index: unknown) => {
+    const ok = stacks.setColor(String(id), Number(index) || 0);
+    stacks.flush(join(profileDir, 'tab-stacks.json'));
+    sendUI('stacks', stacks.list());
+    return { ok };
+  });
+  on('stacks:dissolve', (_e, id: unknown) => {
+    const ok = stacks.dissolve(String(id));
+    stacks.flush(join(profileDir, 'tab-stacks.json'));
+    sendUI('stacks', stacks.list());
+    return { ok };
+  });
+  /**
+   * "Close stack" resolves to a list of ids and runs them through the ORDINARY close path, so every
+   * tab is captured to the closed-tab stack and a gated tab keeps its gate until it is closed.
+   * There is deliberately no bulk close that bypasses closeTab().
+   */
+  on('stacks:close', (_e, id: unknown) => {
+    const ids = stacks.members(String(id));
+    let n = 0;
+    for (const tid of ids) {
+      // never close the agent's pane out from under a running task
+      if (current && tabs.agentTab === tid) continue;
+      closeTab(tid);
+      n++;
+    }
+    stacks.dissolve(String(id));
+    stacks.flush(join(profileDir, 'tab-stacks.json'));
+    sendUI('stacks', stacks.list());
+    return { ok: true, closed: n };
+  });
+
+  // ---------- 20: workspaces ----------
+  on('workspaces:list', () => ({ workspaces: workspaces.list(), activeId: workspaces.activeId }));
+  on('workspaces:create', (_e, name: unknown, colorIndex: unknown) => {
+    const r = workspaces.create(String(name ?? ''), Number(colorIndex) || 0);
+    sendUI('workspaces', { workspaces: workspaces.list(), activeId: workspaces.activeId });
+    return r;
+  });
+  on('workspaces:rename', (_e, id: unknown, name: unknown) => {
+    const ok = workspaces.rename(String(id), String(name ?? ''));
+    sendUI('workspaces', { workspaces: workspaces.list(), activeId: workspaces.activeId });
+    return { ok };
+  });
+  on('workspaces:delete', (_e, id: unknown) => {
+    const r = workspaces.remove(String(id));
+    sendUI('workspaces', { workspaces: workspaces.list(), activeId: workspaces.activeId });
+    return r;
+  });
+  /**
+   * Switching workspaces is REFUSED while an agent task runs. The agent's tab belongs to the
+   * workspace the task started in; letting a switch hide it would make the security UI describe a
+   * state that is no longer on screen (the same reasoning as "untile shows the agent's tab").
+   */
+  on('workspaces:switch', (_e, id: unknown) => {
+    if (current) return { ok: false, error: 'a workspace cannot be switched while an agent task is running: the agent tab would leave the screen' };
+    const currentTabs = tabs.list().map((t) => ({ url: t.url, title: t.title }));
+    const r = workspaces.switchTo(String(id), currentTabs);
+    if (!r.ok) return r;
+    // open the target workspace's tabs: close the non-agent tabs, then create the saved set
+    const keep = tabs.agentTab;
+    for (const t of tabs.list()) if (t.id !== keep) closeTab(t.id);
+    for (const x of r.tabs) {
+      const t = tabs.create(x.url);
+      t.navSource = 'user';
+    }
+    // Only fall back to a blank tab when the switch genuinely left nothing on screen. A workspace
+    // with no saved tabs used to add a blank ON TOP of the tab that was already there.
+    if (!tabs.list().length) {
+      const t = tabs.create('about:blank');
+      t.navSource = 'user';
+    }
+    saveSessionSoon();
+    sendUI('workspaces', { workspaces: workspaces.list(), activeId: workspaces.activeId });
+    void tabs.layout();
+    return { ok: true };
+  });
+
+  // ---------- 21: tab strip placement ----------
+  on('tabstrip:set', (_e, placement: unknown) => {
+    const OK = new Set(['top', 'left', 'right', 'bottom']);
+    const p = OK.has(String(placement)) ? (String(placement) as 'top') : 'top';
+    settings.general.tabStrip = p;
+    saveSettings(settingsFile, settings);
+    sendUI('tabstrip', { placement: p });
+    return { ok: true, placement: p };
+  });
+
+  // ---------- 22: saved sessions ----------
+  on('sessions:list', () => ({ sessions: savedSessions.list() }));
+  on('sessions:save', (_e, name: unknown) => {
+    const list = tabs.list().map((t) => ({ url: t.url, title: t.title }));
+    const r = savedSessions.save(String(name ?? ''), list);
+    sendUI('sessions', { sessions: savedSessions.list() });
+    return r;
+  });
+  on('sessions:restore', (_e, id: unknown) => {
+    const r = savedSessions.restorableTabs(String(id));
+    if (!r.length) return { ok: false, error: 'that session has no restorable tabs' };
+    const created: number[] = [];
+    for (const t of r) {
+      const tab = tabs.create(t.url);
+      // a restored session's tabs start CLEAN: navSource 'user' records history as a user action,
+      // and there is no gate state to resurrect because none is stored
+      tab.navSource = 'user';
+      created.push(tab.id);
+    }
+    saveSessionSoon();
+    return { ok: true, opened: created.length };
+  });
+  on('sessions:rename', (_e, id: unknown, name: unknown) => {
+    const ok = savedSessions.rename(String(id), String(name ?? ''));
+    sendUI('sessions', { sessions: savedSessions.list() });
+    return { ok };
+  });
+  on('sessions:delete', (_e, id: unknown) => {
+    const ok = savedSessions.remove(String(id));
+    sendUI('sessions', { sessions: savedSessions.list() });
+    return { ok };
+  });
+  on('sessions:export', () => savedSessions.toJson());
+
+  // ---------- 23: hibernation ----------
+  on('hibernation:state', () => ({ settings: settings.hibernation, hibernated: tabs.hibernatedIds() }));
+  on('hibernation:set', (_e, patch: unknown) => {
+    const r = HibernationSettingsSchema.safeParse({ ...settings.hibernation, ...(patch as object) });
+    if (!r.success) return { ok: false, error: r.error.issues[0]?.message ?? 'invalid' };
+    settings.hibernation = r.data;
+    saveSettings(settingsFile, settings);
+    scheduleHibernation();
+    return { ok: true, settings: r.data };
+  });
+  /** Sweep now. The decision is delegated to planSweep — this handler does not decide anything. */
+  on('hibernation:sweep', () => ({ swept: hibernationSweep() }));
+
+  // ---------- 24: reader mode (HUMAN-ONLY output) ----------
+  on('reader:open', async () => {
+    const t = tabs.active();
+    if (!t) return { ok: false, error: 'no active tab' };
+    if (t.wc.getURL() === '' || t.wc.getURL() === 'about:blank') return { ok: false, error: 'nothing to read' };
+    try {
+      // runs in the page's own ISOLATED WORLD; its output is text and is shown to the human only
+      const raw = await t.wc.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD, [{ code: EXTRACT_ARTICLE_JS }]);
+      const article = normalizeArticle(raw);
+      if (!article.ok) return { ok: false, error: article.error ?? 'no readable content' };
+      // NOTE, and it is the point of this ticket: this NEVER calls runReader, never touches taint,
+      // and never reaches the planner. Reader mode is not a text channel into any model.
+      audit.write('reader', { taskId: current?.task.id, url: t.wc.getURL(), blocks: article.blocks.length, humanOnly: true });
+      return { ok: true, article };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message.slice(0, 200) };
+    }
+  });
+
+  // ---------- 25: translate (opt-in, off by default, refused during a task) ----------
+  on('translate:state', () => ({ settings: settings.translate, languages: LANGUAGES, status: cloudStatus(settings.translate) }));
+  on('translate:set', (_e, patch: unknown) => {
+    const r = TranslateSettingsSchema.safeParse({ ...settings.translate, ...(patch as object) });
+    if (!r.success) return { ok: false, error: r.error.issues[0]?.message ?? 'invalid' };
+    settings.translate = r.data;
+    saveSettings(settingsFile, settings);
+    sendUI('translate', { settings: r.data, status: cloudStatus(r.data) });
+    return { ok: true, settings: r.data, status: cloudStatus(r.data) };
+  });
+  on('translate:run', async (_e, langCode: unknown) => {
+    const gate = canTranslate(settings.translate, { taskRunning: !!current });
+    if (!gate.ok) return { ok: false, error: gate.error };
+    const t = tabs.active();
+    if (!t) return { ok: false, error: 'no active tab' };
+    const target = String(langCode ?? settings.translate.targetLang);
+    const label = LANGUAGES.find((l) => l.code === target)?.label ?? target;
+    try {
+      const text = String(await t.wc.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD, [{ code: '(() => (document.body && document.body.innerText) || "")()' }]) ?? '');
+      const chunks = chunkText(text);
+      if (!chunks.length) return { ok: false, error: 'nothing to translate' };
+      const out: string[] = [];
+      for (const c of chunks.slice(0, 10)) {
+        const r = await fetch(settings.translate.endpoint, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: settings.translate.model || undefined,
+            messages: [
+              { role: 'system', content: TRANSLATE_SYSTEM },
+              { role: 'user', content: translatePrompt(c, label) },
+            ],
+          }),
+        });
+        if (!r.ok) return { ok: false, error: `endpoint returned ${r.status}` };
+        const j = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        out.push(String(j.choices?.[0]?.message?.content ?? '').slice(0, 20_000));
+      }
+      // deliberately NOT recorded as taint: this text went to the user's OWN configured endpoint for
+      // the user, and marking the page tainted would silently change the agent's behaviour on it
+      audit.write('translate', { taskId: current?.task.id, url: t.wc.getURL(), target: label, chunks: out.length, taint: false });
+      return { ok: true, text: out.join('\n\n'), target: label, status: cloudStatus(settings.translate) };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message.slice(0, 200) };
+    }
+  });
+
+  // ---------- 26: capture ----------
+  on('capture:run', async (_e, req: unknown) => {
+    // (1) chrome-initiated only: there is no path from a page to this handler. (2) never while a
+    // confirmation is pending — that would photograph the security UI.
+    if (broker.pendingCount() > 0) return { ok: false, error: 'a confirmation dialog is open; a capture now would include the security UI' };
+    const parsed = CaptureRequestSchema.safeParse(req);
+    if (!parsed.success) return { ok: false, error: 'bad capture request' };
+    const t = tabs.active();
+    if (!t || t.wc.isDestroyed()) return { ok: false, error: 'no active tab' };
+    try {
+      const b = tabs.paneBounds(t.id);
+      const w = b.width;
+      const h = b.height;
+      let image: Electron.NativeImage;
+      if (parsed.data.mode === 'visible') {
+        image = await t.wc.capturePage();
+      } else {
+        const rect = parsed.data.mode === 'region' && parsed.data.rect ? clampRect(parsed.data.rect, { width: w, height: h }) : { x: 0, y: 0, width: w, height: h };
+        if (parsed.data.mode === 'full') {
+          // a page can report an enormous scroll height; cap it and say so rather than OOM
+          const { height, clipped } = clampFullHeight(h, w);
+          image = await t.wc.capturePage({ x: 0, y: 0, width: w, height });
+          if (clipped) audit.write('capture', { taskId: current?.task.id, mode: 'full', clipped: true, height });
+        } else {
+          image = await t.wc.capturePage(rect);
+        }
+      }
+      const png = image.toPNG();
+      const save = await dialog.showSaveDialog(win, { title: 'Save capture', defaultPath: captureFilename(originOf(t.wc.getURL())?.replace(/^https?:\/\//, '') ?? 'page') });
+      if (save.canceled || !save.filePath) return { ok: false, error: 'cancelled', bytes: png.length };
+      const w2 = writeCapture(save.filePath, png);
+      audit.write('capture', { taskId: current?.task.id, mode: parsed.data.mode, bytes: png.length, ok: w2.ok });
+      return { ok: w2.ok, bytes: png.length, file: save.filePath, error: w2.ok ? undefined : w2.error };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message.slice(0, 200) };
+    }
+  });
+  on('capture:to-clipboard', async (_e, req: unknown) => {
+    if (broker.pendingCount() > 0) return { ok: false, error: 'a confirmation dialog is open; a capture now would include the security UI' };
+    const parsed = CaptureRequestSchema.safeParse(req);
+    if (!parsed.success) return { ok: false, error: 'bad capture request' };
+    const t = tabs.active();
+    if (!t || t.wc.isDestroyed()) return { ok: false, error: 'no active tab' };
+    try {
+      const bb = tabs.paneBounds(t.id);
+      const image = await t.wc.capturePage(parsed.data.rect ? clampRect(parsed.data.rect, bb) : undefined);
+      const png = image.toPNG();
+      // Electron 44 removed Clipboard.writeImage; the supported path is the async ClipboardItem API
+      // the DOM lib also declares ClipboardItem with an incompatible getType signature, so this
+      // goes through unknown; at runtime it is Electron's own ClipboardItem the module expects
+      const item = new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) }) as unknown as Electron.ClipboardItem;
+      await clipboard.write([item]);
+      audit.write('capture', { taskId: current?.task.id, mode: 'clipboard', bytes: png.length });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message.slice(0, 200) };
+    }
+  });
+
+  // ---------- 27: page actions ----------
+  on('pageactions:get', () => {
+    const o = originOf(tabs.active()?.wc.getURL() ?? '');
+    return { actions: o ? pageActions.byOrigin(o) : defaultPageActions(), custom: o ? pageActions.byOrigin(o).customCss : '' };
+  });
+  on('pageactions:set', (_e, patch: unknown) => {
+    const t = tabs.active();
+    if (!t) return { ok: false, error: 'no active tab' };
+    const o = originOf(t.wc.getURL());
+    if (!o) return { ok: false, error: 'this page has no origin to remember actions for' };
+    const r = PageActionsSchema.safeParse({ ...pageActions.byOrigin(o), ...(patch as object) });
+    if (!r.success) return { ok: false, error: r.error.issues[0]?.message ?? 'invalid' };
+    pageActions.set(o, r.data);
+    applyPageActions(t, o);
+    return { ok: true, actions: r.data };
+  });
+
+  // ---------- 28: status bar ----------
+  on('status:set', (_e, on: unknown) => {
+    settings.general.statusBar = on !== false;
+    saveSettings(settingsFile, settings);
+    return { ok: true, on: settings.general.statusBar };
+  });
+  on('rail:set', (_e, on: unknown) => {
+    settings.general.railVisible = on !== false;
+    saveSettings(settingsFile, settings);
+    return { ok: true, on: settings.general.railVisible };
+  });
+
+  // ---------- 29: ephemeral window ----------
+  on('profiles:create-ephemeral', (_e, name: unknown) => {
+    const p = ctx.profile();
+    if (p.ephemeral) return { ok: false, error: 'this window is already ephemeral' };
+    return { ok: true, hint: 'create it from the profile manager; the window is removed when it closes' };
+  });
+
+  // ---------- 30: profile bundle ----------
+  on('bundle:export', (): string => {
+    const b = buildBundle({
+      settings: { general: settings.general, hibernation: settings.hibernation, translate: settings.translate, gestures: settings.gestures, extensions: settings.extensions },
+      themes: { custom: settings.appearance.custom as unknown as Array<Record<string, unknown>>, activeId: settings.appearance.theme },
+      bookmarks: bookmarks.tree() as never,
+      keybindings: settings.keybindings.bindings,
+      savedSessions: savedSessions.list().map((s) => ({ name: s.name, createdAt: s.createdAt, tabs: s.tabs })),
+      workspaces: workspaces.list().map((w) => ({ name: w.name, colorIndex: w.colorIndex, tabs: w.tabs })),
+    });
+    return JSON.stringify(b, null, 2) + '\n';
+  });
+  on('bundle:dry-run', (_e, text: unknown) => dryRun(String(text ?? '')));
+  on('bundle:import', (_e, text: unknown) => {
+    const r = parseBundle(String(text ?? ''));
+    if (!r.ok) return { ok: false, error: r.error };
+    const b = r.bundle;
+    const applied: string[] = [];
+    // validated as a whole before anything is touched; a bundle that fails anywhere changes nothing
+    if (b.settings) {
+      const g = b.settings.general as Settings['general'] | undefined;
+      if (g && typeof g === 'object') {
+        settings.general = { ...settings.general, startup: g.startup === 'last-session' ? 'last-session' : settings.general.startup, tabStrip: settings.general.tabStrip };
+        applied.push('settings');
+      }
+    }
+    if (b.keybindings) {
+      const merged = { version: 1 as const, bindings: { ...defaultKeybindings().bindings, ...b.keybindings } };
+      const problems = validateBindings(merged.bindings);
+      if (!problems.length) {
+        settings.keybindings = merged;
+        applied.push('keybindings');
+      }
+    }
+    if (b.savedSessions) {
+      for (const s of b.savedSessions) savedSessions.save(s.name, s.tabs);
+      applied.push(`sessions (${b.savedSessions.length})`);
+    }
+    if (b.workspaces) {
+      for (const w of b.workspaces) {
+        const c = workspaces.create(w.name, w.colorIndex);
+        if (c.ok) workspaces.remember(w.tabs, c.workspace.id);
+      }
+      applied.push(`workspaces (${b.workspaces.length})`);
+    }
+    saveSettings(settingsFile, settings);
+    audit.write('bundle', { taskId: current?.task.id, applied: applied.join(', '), bookmarks: b.bookmarks?.length ?? 0 });
+    return { ok: true, applied };
+  });
+  on('bundle:export-file', async () => {
+    const save = await dialog.showSaveDialog(win, { title: 'Export profile bundle', defaultPath: 'guarded-browser-profile.json' });
+    if (save.canceled || !save.filePath) return { ok: false, error: 'cancelled' };
+    const text = JSON.stringify(
+      buildBundle({
+        settings: { general: settings.general, hibernation: settings.hibernation, translate: settings.translate, gestures: settings.gestures, extensions: settings.extensions },
+        themes: { custom: settings.appearance.custom as unknown as Array<Record<string, unknown>>, activeId: settings.appearance.theme },
+        bookmarks: bookmarks.tree() as never,
+        keybindings: settings.keybindings.bindings,
+        savedSessions: savedSessions.list().map((s) => ({ name: s.name, createdAt: s.createdAt, tabs: s.tabs })),
+        workspaces: workspaces.list().map((w) => ({ name: w.name, colorIndex: w.colorIndex, tabs: w.tabs })),
+      }),
+      null,
+      2,
+    );
+    if (text.length > MAX_BUNDLE_BYTES) return { ok: false, error: 'bundle too large to write' };
+    writeFileSync(save.filePath, text, { mode: 0o600 });
+    return { ok: true };
+  });
+  on('bundle:import-file', async () => {
+    const open = await dialog.showOpenDialog(win, { title: 'Import profile bundle', filters: [{ name: 'Bundle JSON', extensions: ['json'] }], properties: ['openFile'] });
+    if (open.canceled || !open.filePaths[0]) return { ok: false, error: 'cancelled' };
+    if (statSync(open.filePaths[0]).size > MAX_BUNDLE_BYTES) return { ok: false, error: 'file too large' };
+    return handlers['bundle:import']({}, readFileSync(open.filePaths[0], 'utf8')) as { ok: boolean };
+  });
+
+  // ---------- 32: unpacked extensions ----------
+  on('extensions:list', () => ({ entries: extensions.list(), warning: EXTENSION_WARNING, enabled: settings.extensions.enabled }));
+  on('extensions:add', (_e, dir: unknown) => {
+    const r = extensions.add(String(dir ?? ''));
+    sendUI('extensions', { entries: extensions.list(), warning: EXTENSION_WARNING });
+    return r;
+  });
+  on('extensions:enable', (_e, dir: unknown, on: unknown) => {
+    const ok = extensions.setEnabled(String(dir), on !== false);
+    sendUI('extensions', { entries: extensions.list(), warning: EXTENSION_WARNING });
+    return { ok };
+  });
+  on('extensions:remove', (_e, dir: unknown) => {
+    const ok = extensions.remove(String(dir));
+    sendUI('extensions', { entries: extensions.list(), warning: EXTENSION_WARNING });
+    return { ok };
+  });
+  on('extensions:pick', async () => {
+    const r = await dialog.showOpenDialog(win, { title: 'Add an unpacked extension', properties: ['openDirectory'] });
+    if (r.canceled || !r.filePaths[0]) return { ok: false, error: 'cancelled' };
+    const added = extensions.add(r.filePaths[0]);
+    sendUI('extensions', { entries: extensions.list(), warning: EXTENSION_WARNING });
+    return added;
+  });
+  on('extensions:set-enabled', (_e, on: unknown) => {
+    settings.extensions.enabled = on !== false;
+    saveSettings(settingsFile, settings);
+    return { ok: true, enabled: settings.extensions.enabled };
+  });
+
+  // ---------- 33: bookmarks panel extras ----------
+  on('bookmarks:set-description', (_e, id: unknown, text: unknown) => wrap(() => bookmarks.update(String(id), { description: String(text ?? '').slice(0, 2000) })));
+  on('bookmarks:set-speeddial', (_e, id: unknown, on: unknown) => wrap(() => bookmarks.update(String(id), { speedDial: on === true })));
+  on('bookmarks:sort', (_e, mode: unknown) => {
+    const r = SortModeSchema.safeParse(mode);
+    if (!r.success) return { ok: false, error: 'unknown sort mode' };
+    bookmarkSort = r.data;
+    saveSettings(settingsFile, settings);
+    return { ok: true, mode: bookmarkSort, tree: sortTree(bookmarks.tree(), bookmarkSort) };
+  });
+  on('bookmarks:tree-sorted', () => ({ roots: sortTree(bookmarks.tree(), bookmarkSort), showBar: bookmarks.showBar, sort: bookmarkSort }));
+  on('bookmarks:trash', () => ({ entries: bookmarkTrash.list().map((e) => ({ id: e.node.id, title: e.node.title, type: e.node.type, deletedAt: e.deletedAt })), count: bookmarkTrash.count() }));
+  on('bookmarks:trash-restore', (_e, id: unknown) => {
+    const e = bookmarkTrash.get(String(id));
+    if (!e) return { ok: false, error: 'not in the trash' };
+    const parent = bookmarks.tree().find((f) => f.id === e.parentId) ?? bookmarks.tree()[0];
+    bookmarkTrash.remove(e.node.id);
+    // restore through the ordinary add path so the store's own validation still applies
+    const n = e.node;
+    if (n.type === 'bookmark') return wrap(() => bookmarks.addBookmark(parent.id, n.title, n.url));
+    return wrap(() => bookmarks.addFolder(parent.id, e.node.title));
+  });
+  on('bookmarks:trash-empty', (_e, confirm: unknown) => {
+    const r = bookmarkTrash.empty(confirm === true);
+    audit.write('bundle', { taskId: current?.task.id, action: 'empty bookmarks trash', wouldDiscard: r.wouldDiscard, ok: r.ok });
+    return r;
+  });
 }
 
 
@@ -1054,6 +2307,11 @@ const api = {
     sendUI('state', state());
   },
   guardChanged: () => sendUI('state', state()),
+  /** the ONE action dispatcher: the menu, the palette and the chords all land here, so a menu item
+   *  can never do something a chord cannot */
+  runAction: (action: string) => runAction(action),
+  /** the chord table (for menu accelerators) */
+  chordTable: () => chordTable(),
   audit: (type: Parameters<AuditLog['write']>[0], data: Record<string, unknown>) => audit.write(type, data),
   confirm: (req: ConfirmRequest) => broker.request(req),
   dispose,
@@ -1066,12 +2324,41 @@ ctx.register(api);
 win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 win.webContents.on('will-navigate', (e) => e.preventDefault());
 win.on('page-title-updated', (e) => e.preventDefault());
-await win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
+// Created BEFORE the UI loads: the renderer calls tabs/panels/hibernation handlers during
+// boot, and any handler that runs before this assignment sees `tabs === undefined`.
 tabs = new TabManager(win, ses, () => sendUI('tabs', tabs.list()), setupTab);
+await win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
+// Every close — including close-others and close-right — lands on the closed-tab stack once.
+tabs.onTabClosed = (url, title, pos) => {
+  closedTabs.push(url, title, pos);
+  sendUI('closed-tabs', closedTabs.list());
+  saveSessionSoon();
+};
 tabs.onGeometry = (g) => sendUI('geometry', g);
 installShortcuts(win.webContents);
-tabs.create(ctx.startUrl || 'about:blank');
+// Start where the user left off when the profile says so; a crashed exit restores regardless, so
+// work is not lost silently. Every restored tab is a NEW tab (ungated by construction).
+const restore = settings.general.startup === 'last-session' || sessionState.crashed;
+const saved = restore ? sessionState.restorableTabs() : null;
+if (saved?.tabs.length) {
+  tabs.restore(saved.tabs, saved.activeIndex, sessionState.restorableTiles(saved.tabs));
+  if (sessionState.crashed) audit.write('navigation', { url: '', by: 'user', restore: 'after unclean exit', tabs: saved.tabs.length });
+} else {
+  tabs.create(ctx.startUrl || tabStartUrl());
+}
+if (sessionState.crashed) sendUI('session:crashed', { tabs: saved?.tabs.length ?? 0 });
 sendUI('state', state());
+// restore the saved web panels: each one is a fresh WebContents, so none of them carries gate state
+for (const p of settings.general.webPanels) openPanel(p.url);
+sendUI('panels:list', panelState());
+// The rail sizes the column from the window, so it needs one push with real geometry. This is the
+// same channel a settings change uses, so there is a single source of truth for panel state.
+sendUI('panels', {
+  railVisible: settings.general.railVisible,
+  statusBar: settings.general.statusBar,
+  tabStrip: settings.general.tabStrip,
+  inset: tabs.insets(),
+});
 
 function windowTitle() {
   return `Guarded Browser — ${profile().name}`;
@@ -1080,6 +2367,27 @@ function windowTitle() {
 async function dispose() {
   if (disposed) return;
   disposed = true;
+  // a clean exit marks the session clean, so the next launch does not show a crash notice
+  try {
+    const list = tabs?.list() ?? [];
+    const activeIndex = Math.max(0, list.findIndex((t) => t.active));
+    const tiles = tabs?.tileState();
+    const tiling = tiles
+      ? {
+          indexes: tiles.ids.map((id) => list.findIndex((t) => t.id === id)).filter((i) => i >= 0),
+          layout: tiles.layout,
+          ratios: tiles.ratios,
+        }
+      : null;
+    sessionState.save(
+      list.map((t) => ({ url: t.url, title: t.title })),
+      activeIndex,
+      tiling && tiling.indexes.length >= 2 ? tiling : null,
+      true,
+    );
+  } catch {
+    /* best effort: a failure here must never block quitting */
+  }
   if (history.clearOnExit) history.clear();
   else history.flush();
   if (current) stopTask();

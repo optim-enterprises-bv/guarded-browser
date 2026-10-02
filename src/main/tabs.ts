@@ -6,6 +6,7 @@ import type { ActionOutcome, BrowserDriver } from '../core/agent';
 import type { FormField, Snapshot } from '../core/types';
 import { ISOLATED_WORLD, PAGE_TEXT_JS, SNAPSHOT_JS, actionJs } from './page-scripts';
 import { MAX_TILES, computeTiles, contentArea, tooSmall, defaultRatios, dragDivider, innerRect, type DividerGeometry, type Rect, type TileLayout, type TileState } from './tile-layout';
+import { TabGuardBook, type TabGuardState } from './tab-guard';
 
 export const TOP_BAR = 84;
 export const PANEL_WIDTH = 440;
@@ -23,6 +24,10 @@ export interface TabInfo {
   pane: number | null;
   selected: boolean;
   agent: boolean;
+  /** the page is currently playing audio (speaker indicator) */
+  audible: boolean;
+  /** the tab is muted by the user */
+  muted: boolean;
 }
 
 /** What the chrome UI needs to draw pane frames, headers and dividers around the page views. */
@@ -37,11 +42,19 @@ export interface Geometry {
 }
 
 export class Tab {
+  /** 'tab' is a strip tab; 'panel' is a sidebar web panel (ticket 18). A panel is a website: same
+   *  session, same proxy, same allowlist, same gate — but it is never a strip tab and can never be
+   *  the agent's tab, so it cannot become an escape hatch around the task's allowlist. */
+  kind: 'tab' | 'panel' = 'tab';
   guardFlags = 0;
   /** favicon URLs reported by the page (page-controlled; only used for the optional site accent) */
   favicons: string[] = [];
   /** who started the pending main-frame navigation (for the audit log) */
   navSource?: 'user' | 'agent' | 'page';
+  /** true while this tab's current load came from a session restore (see runtime's did-navigate) */
+  restored?: boolean;
+  /** the URL this tab was last told to load (getURL() is '' until a load commits) */
+  intendedUrl?: string;
   constructor(
     readonly id: number,
     readonly view: WebContentsView,
@@ -57,11 +70,23 @@ export class TabManager {
   private seq = 0;
   private tiles: TileState | null = null;
   private agentTabId: number | null = null;
+  /** per-tab security state — see tab-guard.ts for the rules */
+  private readonly guards = new TabGuardBook();
   private selected = new Set<number>();
+  /** web panels (ticket 18): NOT part of `tabs`, so they can never be the strip's active tab */
+  private panels: Tab[] = [];
+  private panelClosed?: (url: string, title: string, index: number) => void;
+  /** where the sidebar column is on screen, reported by the chrome (x, y, w, h) */
+  private panelRect: { x: number; y: number; width: number; height: number } | null = null;
+  /** which panel URL (if any) the column is currently showing */
+  private panelShown: string | null = null;
   private dragging = false;
   private overlay = false;
   private topInset = TOP_BAR;
   private leftInset = 0;
+  private bottomInset = 0;
+  /** tab id -> what to reload when it is woken (ticket 23); never holds gate state */
+  private readonly hibernated = new Map<number, { url: string; title: string; scrollY: number }>();
   /** called with the chrome geometry after every layout */
   onGeometry: (g: Geometry) => void = () => undefined;
 
@@ -87,6 +112,8 @@ export class TabManager {
       pane: this.paneOf(t.id),
       selected: this.selected.has(t.id),
       agent: t.id === this.agentTabId,
+      audible: t.wc.isCurrentlyAudible(),
+      muted: t.wc.isAudioMuted(),
     }));
   }
 
@@ -109,7 +136,13 @@ export class TabManager {
     return { label: `Tab ${i + 1}${pane ? `, pane ${pane} of ${this.tiles!.ids.length}` : ''} (${role})`, title: (t.wc.getTitle() || t.wc.getURL()).slice(0, 80) };
   }
 
+  /**
+   * Pin the tab the agent is driving. A PANEL is refused here rather than only being unreachable by
+   * convention: `panels` is not `tabs`, so a panel id should never arrive, and if one ever does the
+   * answer must be "no" rather than an agent working in a view that is not on the task's allowlist.
+   */
   setAgentTab(id: number | null) {
+    if (id !== null && !this.tabs.some((t) => t.id === id)) return;
     this.agentTabId = id;
     this.layout();
     this.onChange();
@@ -158,10 +191,11 @@ export class TabManager {
     this.onChange();
   }
 
-  /** chrome heights / widths around the pages (bookmarks bar, side panel) */
-  setInsets(top: number, left: number) {
+  /** chrome heights / widths around the pages (bookmarks bar, side panel, status bar) */
+  setInsets(top: number, left: number, bottom = 0) {
     this.topInset = Math.max(TOP_BAR, top);
     this.leftInset = Math.max(0, left);
+    this.bottomInset = Math.max(0, bottom);
     this.layout();
   }
 
@@ -182,11 +216,53 @@ export class TabManager {
     this.layout();
   }
 
+  /** which panel URL the column is showing (null = the built-in panel sections) */
+  setPanelShown(url: string | null) {
+    this.panelShown = url;
+    this.layout();
+  }
+
+  /** the chrome reports the column's rectangle; panels are drawn there and nowhere else */
+  setPanelRect(r: { x: number; y: number; width: number; height: number } | null) {
+    this.panelRect = r && r.width > 0 && r.height > 0 ? r : null;
+    this.layout();
+  }
+
+  /**
+   * Lay the panels into the reported column. A panel is only visible when the column is open AND a
+   * panel is the shown view; otherwise its WebContents stays alive but is not drawn, exactly like a
+   * background tab — the page keeps its session, its gate and its state.
+   */
+  private layoutPanels() {
+    for (const p of this.panels) {
+      const r = this.panelRect;
+      const show = !!r && !!this.panelShown && !this.dragging && !this.overlay;
+      if (r && show) p.view.setBounds({ x: r.x, y: r.y, width: r.width, height: r.height });
+      p.view.setVisible(!!r && show);
+    }
+  }
+
   private area(): Rect {
     const { width, height } = this.win.getContentBounds();
     // never wider than the space left of the agent panel, even in a tiny window
-    const a = contentArea(width - this.leftInset, height, this.topInset, PANEL_WIDTH);
+    const a = contentArea(width - this.leftInset, height - this.bottomInset, this.topInset, PANEL_WIDTH);
     return { ...a, x: a.x + this.leftInset };
+  }
+
+  /**
+   * The on-screen bounds of a tab's page area, for capture (ticket 26). Derived from the same
+   * layout the panes use, so a capture of the "visible area" is exactly what the user sees rather
+   * than a guess. Falls back to the whole area for a tab that is not currently tiled or active.
+   */
+  paneBounds(id: number): { x: number; y: number; width: number; height: number } {
+    const a = this.area();
+    const pane = this.paneOf(id);
+    if (!pane || !this.tiles) return { x: 0, y: 0, width: a.width, height: a.height };
+    const { panes } = computeTiles({ ...a, x: 0, y: 0 }, this.tiles);
+    const r = panes[pane - 1]?.outer;
+    if (!r) return { x: 0, y: 0, width: a.width, height: a.height };
+    // capture rects are relative to the page, so the pane's offset inside the area is removed
+    return { x: r.x - a.x, y: r.y - a.y, width: r.width, height: r.height };
   }
 
   active(): Tab | undefined {
@@ -198,10 +274,198 @@ export class TabManager {
   }
 
   byWebContents(wc: WebContents): Tab | undefined {
-    return this.tabs.find((t) => t.wc === wc);
+    return this.tabs.find((t) => t.wc === wc) ?? this.panels.find((t) => t.wc === wc);
+  }
+
+  /** true when this id belongs to a sidebar panel rather than a strip tab */
+  isPanel(id: number): boolean {
+    return this.panels.some((t) => t.id === id);
+  }
+
+  // ---------- per-tab security state (single source of truth) ----------
+  // The rules live in TabGuardBook (src/main/tab-guard.ts) so they are unit-testable without a
+  // browser; this is the thin adapter to live tabs. runtime.ts reads these instead of keeping its
+  // own sets, so every tab-shaped feature (reopen, restore, hibernation, stacks, vertical tabs)
+  // asks the same question and gets the same answer.
+
+  /** the agent's pane, or undefined when no task owns a tab */
+  agentTabObj(): Tab | undefined {
+    return this.agentTabId === null ? undefined : this.tabs.find((t) => t.id === this.agentTabId);
+  }
+
+  /** full security state for one tab (including whether it is the agent's pane) */
+  guardStateOf(id: number): TabGuardState | null {
+    const t = this.tabs.find((x) => x.id === id);
+    if (!t) return null;
+    return this.guards.state(id, t.id === this.agentTabId, t.navSource);
+  }
+
+  /** true while a tab's current document is under the post-task gate */
+  isGated(id: number): boolean {
+    return this.guards.isGated(id);
+  }
+
+  /** true when any tab is still gated (the worker gate is keyed on this) */
+  anyGated(): boolean {
+    return this.guards.anyGated();
+  }
+
+  /** every origin reached by a currently-gated tab (the worker gate's watch list) */
+  gatedOrigins(): Set<string> {
+    return this.guards.gatedOrigins();
+  }
+
+  setGate(id: number, gate: 'none' | 'post-task') {
+    if (gate === 'none') this.guards.lift(id);
+    else this.guards.gate(id);
+  }
+
+  addGuardOrigin(id: number, origin: string) {
+    this.guards.addOrigin(id, origin);
+  }
+
+  /** drop a closed tab's state */
+  forgetTab(id: number) {
+    this.guards.forget(id);
+  }
+
+  // ---------- zoom, find, audio (view properties of a tab) ----------
+
+  /** Set a tab's zoom factor. A view property only: it never touches what a snapshot reports. */
+  setZoom(id: number, factor: number) {
+    this.byId(id)?.wc.setZoomFactor(factor);
+  }
+
+  zoomOf(id: number): number {
+    return this.byId(id)?.wc.getZoomFactor() ?? 1;
+  }
+
+  /**
+   * Find in a tab's page. The callback receives (matches, activeMatchOrdinal) as Chromium reports
+   * them; the caller must stopFindInPage when the bar closes. `findNext` continues from the last
+   * result. Nothing here reads page text — Chromium reports counts, not content.
+   */
+  findInPage(id: number, query: string, opts: { forward?: boolean; findNext?: boolean; matchCase?: boolean } = {}): number {
+    const t = this.byId(id);
+    if (!t) return 0;
+    const r = t.wc.findInPage(query, {
+      forward: opts.forward !== false,
+      findNext: opts.findNext === true,
+      matchCase: opts.matchCase === true,
+    });
+    return r; // the request id
+  }
+
+  stopFind(id: number, action: 'clearSelection' | 'keepSelection' | 'activateSelection' = 'clearSelection') {
+    this.byId(id)?.wc.stopFindInPage(action);
+  }
+
+  setAudioMuted(id: number, muted: boolean) {
+    this.byId(id)?.wc.setAudioMuted(muted);
+  }
+
+  // ---------- hibernation (ticket 23) ----------
+
+  /**
+   * Discard a tab's contents to free memory, remembering its URL so activating it reloads.
+   *
+   * THE CONSTRAINT, stated here because this is where it could go wrong: this method REFUSES a tab
+   * that is the agent's pane or that is under the post-task gate. Discarding a webContents destroys
+   * the id the gate is keyed on, so allowing it here would silently drop the guarantee that a page
+   * which received an agent POST is cleaned before reuse. The refusal is a hard second check: the
+   * caller already filtered with decideHibernation, and this cannot be bypassed by calling directly.
+   *
+   * What "discard" actually does here — and the honest limit of it: Electron exposes no public
+   * webContents discard, so hibernation is implemented by freeing the VIEW and keeping the tab's
+   * identity, URL and title, then recreating the view on activation. The rendered page's memory is
+   * released with the view; the tab itself stays in the strip and keeps its position.
+   */
+  hibernate(id: number): boolean {
+    const t = this.byId(id);
+    if (!t) return false;
+    if (id === this.agentTabId) return false; // the agent is driving it
+    if (this.isGated(id)) return false; // discarding it would drop the gate
+    if (id === this.activeId) return false; // it is on screen
+    if (this.hibernated.has(id)) return false;
+    const url = t.intendedUrl || t.wc.getURL();
+    const title = t.wc.getTitle();
+    if (!url || url === 'about:blank') return false; // nothing worth keeping
+    t.view.setVisible(false);
+    this.win.contentView.removeChildView(t.view);
+    this.hibernated.set(id, { url, title, scrollY: 0 });
+    // deliberately NOT destroying the webContents: destroying it would change the tab id's meaning
+    // and put the gate's key at risk. Detaching the view frees the rendered surface instead.
+    this.layout();
+    this.onChange();
+    return true;
+  }
+
+  isHibernated(id: number): boolean {
+    return this.hibernated.has(id);
+  }
+
+  hibernatedIds(): number[] {
+    return [...this.hibernated.keys()];
+  }
+
+  /** Bring a hibernated tab back: re-attach its view (and reload if it had gone blank). */
+  wake(id: number): boolean {
+    const t = this.byId(id);
+    const h = this.hibernated.get(id);
+    if (!t || !h) return false;
+    this.hibernated.delete(id);
+    this.win.contentView.addChildView(t.view);
+    if (!t.wc.getURL()) {
+      t.restored = true;
+      void t.wc.loadURL(h.url).catch(() => undefined);
+    }
+    this.layout();
+    this.onChange();
+    return true;
+  }
+
+  /** The current chrome insets, so the renderer can restore them after a reload. */
+  insets(): { top: number; left: number; bottom: number } {
+    return { top: this.topInset, left: this.leftInset, bottom: this.bottomInset };
+  }
+
+  /**
+   * Restore a saved session: one tab per URL, in order, with the given tab active and the tile set
+   * reapplied. Every restored tab is a NEW tab id, so it starts out of the post-task gate — the
+   * whole reason session state deliberately cannot carry gate state.
+   */
+  restore(tabs: Array<{ url: string; title?: string }>, activeIndex: number, tiles: { indexes: number[]; layout: TileLayout; ratios: number[] } | null): void {
+    if (!tabs.length) return;
+    const created: Tab[] = [];
+    tabs.forEach((t, i) => {
+      created.push(this.createAt(t.url, { background: i !== activeIndex }));
+    });
+    for (const t of created) {
+      t.navSource = 'user';
+      t.restored = true;
+    }
+    if (tiles && tiles.indexes.length >= 2) {
+      const ids = tiles.indexes.map((i) => created[i]?.id).filter((x): x is number => x !== undefined);
+      if (ids.length >= 2) {
+        this.tiles = { ids, layout: tiles.layout, ratios: tiles.ratios.length === ids.length ? tiles.ratios : defaultRatios(ids.length, tiles.layout) };
+        this.activeId = created[activeIndex]?.id ?? ids[0];
+        this.layout();
+        this.onChange();
+      }
+    }
   }
 
   create(url?: string, opts: { background?: boolean } = {}): Tab {
+    return this.createAt(url, opts);
+  }
+
+  /**
+   * Create a tab at a specific strip position (used by reopen, so a restored tab lands where it
+   * was instead of at the end). `at` is clamped; a tab created at the end behaves exactly like
+   * `create()`. The new tab is a fresh document: no security state is carried over from whatever
+   * tab used to occupy this position.
+   */
+  createAt(url?: string, opts: { background?: boolean; at?: number } = {}): Tab {
     const view = new WebContentsView({
       webPreferences: {
         session: this.session,
@@ -214,7 +478,8 @@ export class TabManager {
       },
     });
     const tab = new Tab(++this.seq, view);
-    this.tabs.push(tab);
+    const at = opts.at === undefined ? this.tabs.length : Math.max(0, Math.min(Math.round(opts.at), this.tabs.length));
+    this.tabs.splice(at, 0, tab);
     this.win.contentView.addChildView(view);
     const wc = view.webContents;
     for (const ev of ['did-navigate', 'did-navigate-in-page', 'page-title-updated', 'did-start-loading', 'did-stop-loading'] as const) {
@@ -237,13 +502,108 @@ export class TabManager {
       this.layout();
       this.onChange();
     } else this.activate(tab.id);
-    if (url) void wc.loadURL(url).catch(() => undefined);
+    if (url) {
+      tab.intendedUrl = url;
+      void wc.loadURL(url).catch(() => undefined);
+    }
     return tab;
   }
 
-  close(id: number) {
+  /**
+   * Create a web panel (ticket 18): a WebContentsView pinned into the sidebar column. It shares the
+   * profile's session, so the proxy, host allowlist, reputation feed and webRequest rules all apply
+   * exactly as they do to a tab — that is the whole reason a panel is inside the threat model
+   * rather than beside it.
+   *
+   * Two structural guarantees, not UI conventions:
+   *  - a panel is NOT in `this.tabs`, so it never appears in the strip and never becomes `active()`;
+   *  - `agentTabId` is only ever set from the strip and `createPanel` refuses to set it, so a panel
+   *    cannot be the agent's tab even if a caller asks.
+   * The panel IS registered in `panels` so `closePanel` and the guard book can find it.
+   */
+  createPanel(url: string, opts: { onClosed?: (url: string, title: string, index: number) => void } = {}): Tab {
+    const view = new WebContentsView({
+      webPreferences: {
+        session: this.session,
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        preload: join(__dirname, 'tab-preload.js'),
+      },
+    });
+    const tab = new Tab(++this.seq, view);
+    tab.kind = 'panel';
+    tab.navSource = 'user';
+    this.panels.push(tab);
+    this.panelClosed = opts.onClosed;
+    this.win.contentView.addChildView(view);
+    const wc = view.webContents;
+    for (const ev of ['did-navigate', 'did-navigate-in-page', 'page-title-updated', 'did-start-loading', 'did-stop-loading'] as const) {
+      wc.on(ev as 'did-stop-loading', () => this.onChange());
+    }
+    wc.on('did-navigate', () => {
+      tab.guardFlags = 0;
+    });
+    this.setupTab(tab);
+    // a popup from a panel is never allowed to open a window: same rule as the strip
+    tab.intendedUrl = url;
+    void wc.loadURL(url).catch(() => undefined);
+    return tab;
+  }
+
+  /** the open web panels, in creation order */
+  panelList(): Tab[] {
+    return [...this.panels];
+  }
+
+  closePanel(id: number, onClosed?: (url: string, title: string, index: number) => void) {
+    const t = this.panels.find((x) => x.id === id);
+    if (!t) return;
+    const report = onClosed ?? this.panelClosed;
+    if (report) {
+      const url = t.wc.getURL();
+      if (url) report(url, t.wc.getTitle(), this.panels.indexOf(t));
+    }
+    this.guards.forget(id);
+    this.win.contentView.removeChildView(t.view);
+    t.wc.close();
+    this.panels = this.panels.filter((x) => x !== t);
+    this.layout();
+    this.onChange();
+  }
+
+  /** a panel's WebContents belongs to this manager, so `ownsWebContents` must see it */
+  panelByWebContents(wc: WebContents): Tab | undefined {
+    return this.panels.find((t) => t.wc === wc);
+  }
+
+  /** set by the runtime so every close captures what it removed (see close()) */
+  onTabClosed?: (url: string, title: string, index: number) => void;
+  /** the id of a tab whose close must NOT be captured (the agent's own pane, and restart) */
+  silentCloseId: number | null = null;
+
+  /**
+   * Close a tab, reporting what it was so the caller can push it onto the closed-tab stack. The
+   * reporter is called with (url, title, index) while the tab is still alive — after `close()`
+   * the WebContents is gone and its URL with it.
+   *
+   * When `onClosed` is omitted, `onTabClosed` (set by the runtime) is used. That is what makes the
+   * bulk closes — close others, close right, and the "close" of an emptied window — capture every
+   * tab they remove, instead of the tabs vanishing un-reopenable.
+   */
+  close(id: number, onClosed?: (url: string, title: string, index: number) => void) {
     const t = this.tabs.find((x) => x.id === id);
     if (!t) return;
+    const index = this.tabs.indexOf(t);
+    const report = onClosed ?? this.onTabClosed;
+    if (report && t.id !== this.silentCloseId) {
+      const url = t.wc.getURL();
+      const title = t.wc.getTitle();
+      if (url) report(url, title, index);
+    }
+    this.guards.forget(id); // a closed tab's gate goes with it
+    this.hibernated.delete(id); // ...and so does its wake target
     this.win.contentView.removeChildView(t.view);
     t.wc.close();
     this.tabs = this.tabs.filter((x) => x !== t);
@@ -260,10 +620,78 @@ export class TabManager {
 
   /** Activating a tab outside the current tile set leaves split view (like Vivaldi). */
   activate(id: number) {
+    // Only a STRIP tab can be activated. A panel id (or any unknown id) must be a no-op: setting
+    // activeId to something that is not in `tabs` left the strip with no active tab at all.
+    if (!this.tabs.some((t) => t.id === id)) return;
     if (this.tiles && !this.tiles.ids.includes(id)) this.tiles = null;
     this.activeId = id;
+    // a hibernated tab must be re-attached before it is shown, or the pane would be empty
+    if (this.hibernated.has(id)) this.wake(id);
     this.layout();
     this.onChange();
+  }
+
+  /** Move a tab to a new strip position (drag reorder). Returns the resulting order. */
+  move(id: number, to: number): number[] {
+    const from = this.tabs.findIndex((t) => t.id === id);
+    if (from < 0) return this.tabs.map((t) => t.id);
+    const [t] = this.tabs.splice(from, 1);
+    const at = Math.max(0, Math.min(Math.round(to), this.tabs.length));
+    this.tabs.splice(at, 0, t);
+    this.layout();
+    this.onChange();
+    return this.tabs.map((x) => x.id);
+  }
+
+  /**
+   * Duplicate a tab: a new tab at the same URL, immediately to its right.
+   *
+   * The URL comes from the tab's intended target when the current document has not committed yet
+   * (`wc.getURL()` is '' until a load commits, which is the common case right after "new tab" or a
+   * navigation that is still in flight). Falling back to that keeps duplicate from silently doing
+   * nothing, which is what an unconditional `if (!url) return` did.
+   */
+  duplicate(id: number): Tab | undefined {
+    const t = this.byId(id);
+    if (!t) return undefined;
+    const url = t.wc.getURL() || t.intendedUrl || '';
+    if (!url || !/^https?:/i.test(url)) return undefined;
+    const i = this.tabs.indexOf(t);
+    const d = this.createAt(url, { at: i + 1 });
+    d.navSource = 'user';
+    return d;
+  }
+
+  /** Close every tab except this one (and never the agent's pane while a task runs). */
+  closeOthers(id: number, keepAgentPane = true): number[] {
+    const doomed = this.tabs.filter((t) => t.id !== id && !(keepAgentPane && t.id === this.agentTabId)).map((t) => t.id);
+    for (const d of doomed) this.close(d);
+    return doomed;
+  }
+
+  /** Close every tab to the right of this one (skipping the agent's pane while a task runs). */
+  closeRight(id: number, keepAgentPane = true): number[] {
+    const i = this.tabs.findIndex((t) => t.id === id);
+    if (i < 0) return [];
+    const doomed = this.tabs.slice(i + 1).filter((t) => !(keepAgentPane && t.id === this.agentTabId)).map((t) => t.id);
+    for (const d of doomed) this.close(d);
+    return doomed;
+  }
+
+  /** The tab order as ids, newest first by most-recent activation (for Ctrl+Tab cycling). */
+  private mru: number[] = [];
+
+  noteActivated(id: number) {
+    this.mru = [id, ...this.mru.filter((x) => x !== id)];
+  }
+
+  /** The next tab in most-recently-used order (Ctrl+Tab), optionally the previous. */
+  nextInMru(dir: 1 | -1): number | undefined {
+    this.mru = this.mru.filter((x) => this.tabs.some((t) => t.id === x));
+    if (this.mru.length < 2) return undefined;
+    const at = Math.max(0, this.mru.indexOf(this.activeId));
+    const n = (at + (dir === 1 ? 1 : -1) + this.mru.length) % this.mru.length;
+    return this.mru[n];
   }
 
   layout() {
@@ -292,6 +720,7 @@ export class TabManager {
       t.view.setVisible(!!r && r.width >= 1 && r.height >= 1 && !this.dragging && !this.overlay);
       if (r) t.view.setBounds(r);
     }
+    this.layoutPanels();
     this.onGeometry(g);
   }
 }
