@@ -9,6 +9,10 @@ export interface PolicyContext {
   allowedOrigins: Set<string>;
   /** only the origins the task named / the user confirmed at task start (never grown by approvals) */
   taskOrigins?: Set<string>;
+  /** the origin of the tab the task started on: browsable, and its own forms may receive typed task
+   *  values ("fill this form"), but it is NOT a task origin, so agent-built URLs carrying task secrets
+   *  to it are confirmed */
+  startOrigin?: string | null;
   taint: TaintRegistry;
   /** origins whose (untrusted) content the planner has seen so far */
   contextOrigins: string[];
@@ -91,6 +95,22 @@ export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): Polic
         r = escalate(r, `URL was not given by the user and leads to a different origin than the pages it read (${foreign.join(', ')}): possible data exfiltration`);
       }
       r.values = [{ field: 'url', value: url, ...l }];
+      // A GET URL is an exfiltration channel like a form field: the planner's prompt holds the whole
+      // task, so a fooled planner can put a task secret into ?q= (or base64 / hex of it). Same rule as
+      // typing, with the encodings the egress matcher knows; only a URL the user wrote verbatim to an
+      // origin the user named passes. The current tab's origin is NOT a task origin (agent.ts).
+      const sensitive = ctx.taint.sensitiveIn(url);
+      const taskOrigins = ctx.taskOrigins ?? ctx.allowedOrigins;
+      if (sensitive.length && (l.label === 'untrusted' || !taskOrigins.has(origin))) {
+        r = escalate(r, `URL carries ${[...new Set(sensitive.map((v) => v.sensitivity))].join('/')} from your task (possibly encoded) to ${origin}`);
+        for (const v of sensitive) {
+          r.values.push({ field: `${v.sensitivity} from your task, found in the URL`, value: v.value, label: 'trusted', provenance: v.provenance, taintIds: [v.id] });
+        }
+      } else if (l.label === 'untrusted' && ctx.taint.all().some((v) => v.sensitivity)) {
+        // The task holds secrets and the planner built this URL: an encoding the matcher does not
+        // know (base32, reversed, split across params) would pass the check above, so the human sees it.
+        r = escalate(r, 'URL was built by the agent while your task contains sensitive values (emails / numbers / secrets); check it carries none of them');
+      }
       return r;
     }
     case 'click': {
@@ -133,7 +153,9 @@ export function evaluatePolicy(action: PlannerAction, ctx: PolicyContext): Polic
       if (l.label === 'untrusted') r = escalate(r, 'typing a value that did not come from the user (untrusted data into a form)');
       const sensitive = ctx.taint.sensitiveIn(text);
       const dest = originOf(el.formAction || ctx.currentUrl);
-      if (sensitive.length && (!dest || !(ctx.taskOrigins ?? ctx.allowedOrigins).has(dest))) {
+      // a form on the start tab posting back to the start tab's own origin is the "fill this form" case
+      const ownForm = !!dest && dest === ctx.startOrigin && originOf(ctx.currentUrl) === dest;
+      if (sensitive.length && (!dest || !(ctx.taskOrigins ?? ctx.allowedOrigins).has(dest)) && !ownForm) {
         r = escalate(r, `typing ${[...new Set(sensitive.map((v) => v.sensitivity))].join('/')} from your task into a site your task did not name (${dest ?? 'unknown'})`);
       }
       return r;

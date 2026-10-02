@@ -98,6 +98,10 @@ export function variants(value: string, min = MIN_MATCH_LENGTH): { lower: string
     encodeURIComponent(v).replace(/%20/g, '+').toLowerCase(),
     encodeURIComponent(encodeURIComponent(v)).toLowerCase(),
   ]);
+  // hex of the UTF-8 bytes (either digit case: the haystack is lower-cased), of the value as typed and
+  // lower-cased: ?d=6a6f686e40... is as easy for page JS or a planner as base64. The length floor is on
+  // the VALUE (hex doubles it; 'USD' must stay unmatched).
+  if (v.length >= min) for (const s of [v, v.toLowerCase()]) lower.add(Buffer.from(s, 'utf8').toString('hex'));
   const exact = new Set<string>([...b64Aligned(v, min), ...b64Aligned(v.toLowerCase(), min)]);
   return { lower: [...lower].filter((x) => x.length >= min), exact: [...exact] };
 }
@@ -146,10 +150,15 @@ export class TaintRegistry {
     });
   }
 
-  /** Task-registered sensitive values contained in a text (any length; used by the policy engine). */
+  /**
+   * Task-registered sensitive values contained in a text (used by the policy engine): plain at any
+   * length, and URL-encoded / base64 / hex with the same needles the egress matcher uses (from
+   * MIN_SECRET_MATCH_LENGTH), so a planner cannot route a secret past the check by encoding it.
+   */
   sensitiveIn(text: string): RegisteredValue[] {
     const lower = text.toLowerCase();
-    return this.all().filter((e) => e.sensitivity && lower.includes(e.value.toLowerCase()));
+    const encoded = new Set(this.matchRequest(text).map((e) => e.id));
+    return this.all().filter((e) => e.sensitivity && (lower.includes(e.value.toLowerCase()) || encoded.has(e.id)));
   }
 
   /** Values that must never be written to the audit log in clear. */

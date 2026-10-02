@@ -111,12 +111,28 @@ describe('benign tasks', () => {
       { tool: 'click', args: { ref: 'e3' } },
       { tool: 'finish', args: { answer: 'sent' } },
     ));
+    // "this form": the start tab is not a task origin (round 6), but its own same-origin form may
+    // receive the values the user typed into the task
     const r = await new AgentTask('Fill this contact form with name Bob Jones and email bob@example.com and send it', deps).run();
     expect(r.status).toBe('finished');
     expect(confirmations).toHaveLength(1);
     expect(confirmations[0].reasons.join(' ')).toMatch(/submits a form/);
     expect(confirmations[0].values.map((v) => [v.value, v.label])).toEqual([['Bob Jones', 'trusted'], ['bob@example.com', 'trusted']]);
     expect(driver.submissions).toHaveLength(1);
+  });
+
+  it('H2(c): the start tab is allowlisted but not a task origin: an agent-built URL with a task secret to it is confirmed', async () => {
+    const { deps, confirmations } = setup({ answer: 'deny', start: `${SITE}/form.html` });
+    mock.script('planner', sequence(
+      { tool: 'navigate', args: { url: `${SITE}/search?q=${encodeURIComponent('bob@example.com')}` } },
+      { tool: 'finish', args: { answer: 'x' } },
+    ));
+    const t = new AgentTask('Fill this contact form with email bob@example.com', deps);
+    await t.run();
+    expect(t.allowedOrigins.has(SITE)).toBe(true);
+    expect(t.taskOrigins.has(SITE)).toBe(false);
+    expect(confirmations).toHaveLength(1);
+    expect(confirmations[0].reasons.join(' ')).toMatch(/URL carries email from your task/);
   });
 });
 

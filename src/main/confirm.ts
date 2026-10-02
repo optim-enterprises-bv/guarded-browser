@@ -1,6 +1,7 @@
 // Human confirmation broker: shows requests in the agent panel and waits for Approve / Deny / Stop.
 // Default-deny: no answer within the timeout resolves to 'timeout', which callers treat as deny.
 
+import { randomUUID } from 'node:crypto';
 import type { ConfirmOutcome, ConfirmRequest } from '../core/types';
 
 interface Pending {
@@ -17,7 +18,12 @@ export class ConfirmBroker {
     private readonly timeoutMs: () => number,
   ) {}
 
-  request(req: ConfirmRequest): Promise<ConfirmOutcome> {
+  request(caller: ConfirmRequest): Promise<ConfirmOutcome> {
+    // The broker owns the id. Callers built theirs from Date.now(), so two requests in the same ms
+    // collided: the map kept the second resolver while the renderer kept (and answered) the first
+    // card, i.e. an Approve on one dialog resolved a different, never-shown request. Only the
+    // caller's prefix letter survives (it says which subsystem asked; nothing parses it).
+    const req: ConfirmRequest = { ...caller, id: `${/^[a-z]/i.test(caller.id) ? caller.id[0] : 'c'}${randomUUID()}` };
     return new Promise((resolve) => {
       const ms = this.timeoutMs();
       const timer = setTimeout(() => this.answer(req.id, 'timeout'), ms);

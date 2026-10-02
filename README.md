@@ -193,7 +193,9 @@ planner generically.
 * **Task allowlist.** Before a task starts the agent panel shows the seed allowlist for editing:
   origins written with an explicit `http(s)://` in the task plus the current tab's origin. Bare
   names (`report.zip`, `setup.py`, `shop.example.com`) are never added automatically; type them in
-  the editor if you mean them.
+  the editor if you mean them. The current tab's origin is browsable, and its own same-origin forms
+  may receive values typed from the task ("fill this form"), but it is not a task origin: an
+  agent-built URL carrying a task secret to it is confirmed unless the task names it.
 * Text the planner types or navigates to is **trusted only if it appears verbatim in the user's
   task**; otherwise it is untrusted (its provenance points at the reader value it contains, or at
   "planner-generated, context contains untrusted data from <origins>").
@@ -202,7 +204,10 @@ planner generically.
   into a field whose form posts to (or whose page is on) an origin the task did not name → confirm.
   Card numbers and keyword secrets are redacted from the audit log.
 * Navigation: new origin not on the task allowlist → confirm. Untrusted URL while the planner has
-  read content from a *different* origin → confirm. `javascript:`, `file:`, `data:` → block.
+  read content from a *different* origin → confirm. A URL carrying a task secret (plain,
+  URL-encoded, base64 or hex) → confirm with the value shown, unless the user wrote that URL to an
+  origin the task names; any planner-built URL while the task holds secrets → confirm.
+  `javascript:`, `file:`, `data:` → block.
 * Typing/selecting an untrusted value → confirm. Password fields and fields of a form with a
   password → always confirm (the value is masked in the dialog).
 * Submit, submit buttons (detected with the DOM's `.type`, so `<button type="go">` counts), and
@@ -279,10 +284,16 @@ The agent panel shows it as a timeline (manual-browsing proxy chatter is only in
      page changes anything after your approval (submit handler rewrites, a different named
      submitter, a different or hidden form, JSON, a malformed multipart part), the request is held
      again and the dialog says the page changed what is sent and shows the **actual** body — the raw
-     body when it does not parse. GET / HEAD /
+     body when it does not parse. In a dialog for a page-built body nothing is hidden silently: a
+     value is masked only when it *is* one of your task secrets (and the row says so), never because
+     of the field's page-chosen name; cut values and dropped fields are marked, the raw body is added
+     whenever anything was cut or a value carries tracked data, and Approve confirms only the tracked
+     values the dialog actually showed (the rest are asked about again). GET / HEAD /
      OPTIONS are not gated, so ordinary browsing stays unprompted. The tab the agent drove stays
      under this gate after the task ends, until you navigate that tab yourself (address bar, back,
-     forward, reload) or close it, so a page cannot simply wait for the task to finish. While a tab is
+     forward, reload) or close it, so a page cannot simply wait for the task to finish. The gate
+     lifts when your navigation *commits*, not when you start it, and leaves a 30 s tombstone: the
+     gated document's `pagehide` / unload `sendBeacon` or keepalive POST is still held. While a tab is
      gated (during the task or after it) it cannot open popups / new tabs (`window.open`,
      `target=_blank`): the attempt is refused and audited, so a gated page cannot escape into an
      ungated tab. Requests that belong to no tab (service workers, shared workers) are gated the same
@@ -293,8 +304,8 @@ The agent panel shows it as a timeline (manual-browsing proxy chatter is only in
      button whose script then POSTs in the background prompts a second time with the real request.
   3. *Tracked values.* A request containing a taint-registry value (reader output, task secrets,
      values the agent typed — registered *before* they are typed) needs confirmation unless that flow
-     (value id → host) was confirmed. Matching: case, URL-encoding (`%20` / `+`, double), and base64
-     at all three byte alignments (std and url-safe); values shorter than 6 chars are not matched.
+     (value id → host) was confirmed. Matching: case, URL-encoding (`%20` / `+`, double), hex, and
+     base64 at all three byte alignments (std and url-safe); values shorter than 6 chars are not matched.
   Denied / timed-out flows are cancelled and not asked again in that task. Manual browsing: tracked
   values are only logged; state-changing requests are not gated outside a task.
 * **WebRTC.** Every tab uses `setWebRTCIPHandlingPolicy('disable_non_proxied_udp')`: no direct UDP,
@@ -546,7 +557,7 @@ model one that slipped through.)
 * Pages moving the agent to attacker origins by redirect chains or JS navigation: intercepted.
 * Pages exfiltrating by their own JavaScript during a task: requests to hosts off the allowlist are
   blocked by the proxy; requests to allowed hosts are held when they carry a *tracked* value (plain,
-  URL-encoded or base64, including Blob bodies). WebRTC UDP is disabled.
+  URL-encoded, hex or base64, including Blob bodies). WebRTC UDP is disabled.
 * Known-bad hosts (phishing / malware lists) in any mode.
 * The agent overriding the user's decisions: the judge cannot downgrade, the agent cannot proceed
   past a reputation interstitial, confirmations live in browser chrome.
@@ -578,7 +589,7 @@ model one that slipped through.)
 * **HTTPS is only filtered by host** (`CONNECT host:port`); no TLS interception. The content filter
   still sees full HTTPS URLs and bodies inside Chromium via webRequest, but only for this session.
 * **Taint tracking is value matching**, not full information flow: paraphrased, split, hashed,
-  encrypted, compressed or otherwise transformed data (hex, base32, reversed, ...) and anything
+  encrypted, compressed or otherwise transformed data (base32, reversed, ...) and anything
   shorter than 6 chars is not recognised. Snapshot names are not in the registry. Page JS that
   reads a typed value and sends it *after* the task ends (manual mode = log-only) is not blocked.
 * **User-sensitive detection is pattern-based**: emails, phone/card-like numbers, values after a

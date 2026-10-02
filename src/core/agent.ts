@@ -96,6 +96,7 @@ export class AgentTask {
   readonly allowedOrigins = new Set<string>();
   /** origins the task itself names (or the user confirmed at task start); approvals do not add here */
   readonly taskOrigins = new Set<string>();
+  private startOrigin: string | null = null;
   readonly handles = new HandleStore();
   private safeView = new Map<string, SafeElement>();
   private readonly history: string[] = [];
@@ -136,12 +137,17 @@ export class AgentTask {
     const cfg = this.deps.settings();
     const started = Date.now();
     const startOrigin = originOf(driver.currentUrl());
+    this.startOrigin = startOrigin;
     const seeds = this.deps.seedOrigins ?? [...originsInTask(this.task), ...(startOrigin ? [startOrigin] : [])];
+    const named = new Set(originsInTask(this.task));
     for (const o of seeds) {
       const origin = originOf(o);
       if (origin) {
-        this.taskOrigins.add(origin);
         this.allowedOrigins.add(origin);
+        // The tab the task happens to start on is browsable, but it is not a place the user said task
+        // secrets may go (taskOrigins gates typing / navigating them): only when the task names it.
+        // The allowlist editor pre-fills the current origin; a seed equal to it is treated the same.
+        if (origin !== startOrigin || named.has(origin)) this.taskOrigins.add(origin);
       }
     }
     const secrets = this.taint.preRegisterTaskSecrets();
@@ -331,6 +337,7 @@ export class AgentTask {
         currentUrl: driver.currentUrl(),
         allowedOrigins: this.allowedOrigins,
         taskOrigins: this.taskOrigins,
+        startOrigin: this.startOrigin,
         taint: this.taint,
         contextOrigins: [...this.contextOrigins],
         element: el,

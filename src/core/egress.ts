@@ -18,7 +18,7 @@ import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import type { RegisteredValue, TaintRegistry } from './taint';
 import type { ReputationChecker, ReputationHit } from './reputation';
-import type { FormField } from './types';
+import type { FormField, PolicyResult } from './types';
 
 export interface ApprovedRequest {
   method: string;
@@ -68,6 +68,52 @@ export function parseMultipart(body: string): { pairs: Array<[string, string]>; 
     pairs.push([p[1], p[2]]);
   }
   return { pairs, boundary: m[1] };
+}
+
+/**
+ * Rows for the dialog of a request body the PAGE built (not an approved form), and the taint ids the
+ * user can actually see in them. After Approve only `shownIds` become confirmed flows: a value the
+ * dialog cut off or never listed stays tracked and is asked about again by the content filter.
+ * Nothing is hidden silently: field names are page-chosen, so a field called "pwd" is shown like
+ * any other (masking by name let a page hide a task secret behind it); only a value that IS one of
+ * the user's task secrets is masked, and the row says so. Cut values and dropped fields are marked,
+ * and the raw body is added whenever anything was cut or a value carries tracked data.
+ */
+export function bodyValues(body: string, forceRaw: boolean, taint: TaintRegistry | null): { values: PolicyResult['values']; shownIds: string[] } {
+  const MAX_FIELDS = 30;
+  const MAX_VALUE = 300;
+  const MAX_RAW = 2000;
+  const prov = [{ source: 'snapshot' as const, timestamp: new Date().toISOString(), note: 'request body built by the page' }];
+  const ids = (t: string) => (taint ? taint.matchRequest(t).map((v) => v.id) : []);
+  const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, n)}… (+${t.length - n} chars)` : t);
+  const pairs = parseBody(body);
+  const shown: string[] = [];
+  const maskedIds: string[] = [];
+  let cutAny = false;
+  let tainted = false;
+  const values: PolicyResult['values'] = (pairs ?? []).slice(0, MAX_FIELDS).map(([k, v]) => {
+    const secret = taint?.all().find((e) => (e.sensitivity === 'secret' || e.sensitivity === 'card') && e.value === v.trim());
+    const taintIds = ids(`${k}\n${v}`);
+    if (taintIds.length) tainted = true;
+    if (k.length > 60 || v.length > MAX_VALUE) cutAny = true;
+    const field = cut(k, 60);
+    if (secret) {
+      maskedIds.push(secret.id);
+      shown.push(field);
+      return { field, value: `•••• (your task ${secret.sensitivity}, masked)`, masked: true, label: 'untrusted' as const, provenance: prov, taintIds };
+    }
+    const value = cut(v, MAX_VALUE);
+    shown.push(field, value);
+    return { field, value, label: 'untrusted' as const, provenance: prov, taintIds };
+  });
+  const dropped = pairs ? pairs.length - values.length : 0;
+  if (dropped > 0) values.push({ field: `… and ${dropped} more field${dropped === 1 ? '' : 's'} (see the raw body)`, value: '', label: 'untrusted', provenance: prov, taintIds: [] });
+  if (body && (!pairs || forceRaw || dropped > 0 || cutAny || tainted)) {
+    const value = body.length > MAX_RAW ? `${body.slice(0, MAX_RAW)}… (+${body.length - MAX_RAW} chars, ${body.length} bytes in all)` : body;
+    shown.push(value);
+    values.push({ field: !pairs ? 'raw body (not a well-formed form body)' : 'raw body', value, label: 'untrusted', provenance: prov, taintIds: ids(body) });
+  }
+  return { values, shownIds: [...new Set([...ids(shown.join('\n')), ...maskedIds])] };
 }
 
 /** Parse a form body for display / matching. With an enctype, only that encoding is accepted. */

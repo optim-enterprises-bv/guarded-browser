@@ -43,4 +43,25 @@ describe('taint registry', () => {
     expect(w.provenance[0]).toMatchObject({ source: 'reader', url: 'http://site/p' });
     expect(t.all().map((e) => e.value).sort()).toEqual(['19.99', 'Blue Widget', 'alpha-tag']);
   });
+
+  it('H2 (round 6): hex-encoded values are matched (any digit case), short values are not', () => {
+    const t = new TaintRegistry('task');
+    const v = t.register('alice@example.com', 'untrusted', prov);
+    const hex = Buffer.from(v.value).toString('hex');
+    expect(t.matchRequest(`http://x/?d=${hex}`).map((e) => e.id)).toEqual([v.id]);
+    expect(t.matchRequest('http://x/', `d=${hex.toUpperCase()}`)).toHaveLength(1);
+    t.register('USD', 'untrusted', prov);
+    expect(t.matchRequest(`http://x/?c=${Buffer.from('USD').toString('hex')}`)).toHaveLength(0);
+  });
+
+  it('H2 (round 6): sensitiveIn sees task secrets plain, URL-encoded, base64 and hex', () => {
+    const t = new TaintRegistry('my pin: 4821 and token: Zq9-secret-Token');
+    t.preRegisterTaskSecrets();
+    const tok = 'Zq9-secret-Token';
+    for (const s of [tok, encodeURIComponent(tok), Buffer.from(tok).toString('base64'), Buffer.from(`xx${tok}`).toString('base64'), Buffer.from(tok).toString('hex')]) {
+      expect(t.sensitiveIn(`http://x/?q=${s}`).map((e) => e.value), s).toContain(tok);
+    }
+    expect(t.sensitiveIn('http://x/?pin=4821').map((e) => e.value)).toEqual(['4821']);
+    expect(t.sensitiveIn('http://x/?q=nothing')).toHaveLength(0);
+  });
 });

@@ -371,7 +371,7 @@ function showConfirm() {
     const table = el('table', {}, el('tr', {}, el('th', {}, 'field'), el('th', {}, 'exact value'), el('th', {}, 'taint'), el('th', {}, 'provenance')));
     for (const v of c.values) {
       const prov = v.provenance.map((p) => `${p.source}${p.url ? ` @ ${p.url}` : ''}${p.note ? ` (${p.note})` : ''} ${p.timestamp}`).join('; ');
-      table.append(el('tr', {}, el('td', {}, v.field ?? ''), el('td', {}, el('code', {}, v.masked ? v.value.replace(/[^•( )a-z]/g, '•') : v.value)), el('td', { class: v.label }, v.label), el('td', { class: 'small' }, prov)));
+      table.append(el('tr', {}, el('td', {}, v.field ?? ''), el('td', {}, el('code', {}, v.masked ? v.value.replace(/[^•( )a-z]/g, '•') : v.value)), el('td', { class: v.label }, v.label, ...(v.taintIds?.length ? [el('div', { class: 'taint-marker', 'data-testid': 'taint-marker' }, `contains your data (${v.taintIds.join(', ')})`)] : [])), el('td', { class: 'small' }, prov)));
     }
     vals.append(table);
   }

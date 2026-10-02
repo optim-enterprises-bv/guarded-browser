@@ -97,3 +97,52 @@ describe('post-task gate', () => {
     expect(g.state(5, false, 'agent').navSource).toBe('agent');
   });
 });
+
+describe('M2 (round 6): a lifted or closed gate leaves a 30 s tombstone', () => {
+  const T0 = 1_000_000;
+  const req = (o: Partial<{ wcId: number; liveTab: boolean; origin: string | null; referrerOrigin: string | null }>) => ({ wcId: 7, liveTab: true, origin: 'http://sink.test', referrerOrigin: null, ...o });
+
+  it("the unloading document's beacon after the user's navigation committed is held; the new document's is not", () => {
+    const g = new TabGuardBook();
+    g.gate(1);
+    g.addOrigin(1, 'http://site.test');
+    g.lift(1, { wcId: 7, leaving: 'http://site.test', fresh: 'http://news.test', now: T0 });
+    expect(g.isGated(1)).toBe(false);
+    // old document: Referer is its own origin, or suppressed (no-referrer); never another origin's
+    expect(g.heldByTomb(req({ referrerOrigin: 'http://site.test' }), T0 + 100)).toBe(true);
+    expect(g.heldByTomb(req({ referrerOrigin: null }), T0 + 100)).toBe(true);
+    // the user's new document
+    expect(g.heldByTomb(req({ referrerOrigin: 'http://news.test' }), T0 + 100)).toBe(false);
+    // another tab is not affected
+    expect(g.heldByTomb(req({ wcId: 8 }), T0 + 100)).toBe(false);
+    // a worker (no tab) to an origin the gated tab had is; to anything else it is not
+    expect(g.heldByTomb(req({ wcId: undefined, liveTab: false, origin: 'http://site.test' }), T0 + 100)).toBe(true);
+    expect(g.heldByTomb(req({ wcId: undefined, liveTab: false }), T0 + 100)).toBe(false);
+    // and it expires
+    expect(g.heldByTomb(req({ referrerOrigin: null }), T0 + 30_001)).toBe(false);
+  });
+
+  it('a new document on the same origin as the gated one waits out the tombstone (cannot be told apart)', () => {
+    const g = new TabGuardBook();
+    g.gate(1);
+    g.lift(1, { wcId: 7, leaving: 'http://site.test', fresh: 'http://site.test', now: T0 });
+    expect(g.heldByTomb(req({ referrerOrigin: 'http://site.test' }), T0 + 1)).toBe(true);
+  });
+
+  it('closing holds everything from the dead WebContents and from no tab for 30 s', () => {
+    const g = new TabGuardBook();
+    g.gate(1);
+    g.forget(1, { wcId: 7, leaving: 'http://site.test', now: T0 });
+    expect(g.heldByTomb(req({ referrerOrigin: 'http://elsewhere.test' }), T0 + 1)).toBe(true);
+    expect(g.heldByTomb(req({ wcId: undefined, liveTab: false }), T0 + 1)).toBe(true);
+    expect(g.heldByTomb(req({ wcId: 9 }), T0 + 1)).toBe(false);
+  });
+
+  it('an ungated tab leaves no tombstone', () => {
+    const g = new TabGuardBook();
+    g.lift(1, { wcId: 7, now: T0 });
+    g.forget(2, { wcId: 8, now: T0 });
+    expect(g.heldByTomb(req({ wcId: 7 }), T0 + 1)).toBe(false);
+    expect(g.heldByTomb(req({ wcId: undefined, liveTab: false }), T0 + 1)).toBe(false);
+  });
+});

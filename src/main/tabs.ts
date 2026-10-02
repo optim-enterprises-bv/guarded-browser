@@ -8,6 +8,15 @@ import { ISOLATED_WORLD, PAGE_TEXT_JS, SNAPSHOT_JS, actionJs } from './page-scri
 import { MAX_TILES, computeTiles, contentArea, tooSmall, defaultRatios, dragDivider, innerRect, type DividerGeometry, type Rect, type TileLayout, type TileState } from './tile-layout';
 import { TabGuardBook, type TabGuardState } from './tab-guard';
 
+function originOfUrl(u: string): string | null {
+  try {
+    const o = new URL(u).origin;
+    return o === 'null' ? null : o;
+  } catch {
+    return null;
+  }
+}
+
 export const TOP_BAR = 84;
 export const PANEL_WIDTH = 440;
 
@@ -55,6 +64,10 @@ export class Tab {
   restored?: boolean;
   /** the URL this tab was last told to load (getURL() is '' until a load commits) */
   intendedUrl?: string;
+  /** the user started a navigation of this gated tab: the gate lifts when it COMMITS (runtime's
+   *  did-navigate), not before, so the gated document's pagehide still runs gated. `leaving` is
+   *  that document's origin, for the tombstone. */
+  gateLiftPending?: { leaving: string | null };
   constructor(
     readonly id: number,
     readonly view: WebContentsView,
@@ -318,6 +331,17 @@ export class TabManager {
   setGate(id: number, gate: 'none' | 'post-task') {
     if (gate === 'none') this.guards.lift(id);
     else this.guards.gate(id);
+  }
+
+  /** The user's own navigation COMMITTED in this tab: lift the gate, tombstoning the document left. */
+  liftGateOnCommit(id: number, leaving: string | null, fresh: string | null) {
+    const t = this.tabs.find((x) => x.id === id);
+    if (t) this.guards.lift(id, { wcId: t.wc.id, leaving, fresh });
+  }
+
+  /** see TabGuardBook.heldByTomb */
+  heldByTomb(req: { wcId?: number; liveTab: boolean; origin: string | null; referrerOrigin: string | null }): boolean {
+    return this.guards.heldByTomb(req);
   }
 
   addGuardOrigin(id: number, origin: string) {
@@ -602,7 +626,9 @@ export class TabManager {
       const title = t.wc.getTitle();
       if (url) report(url, title, index);
     }
-    this.guards.forget(id); // a closed tab's gate goes with it
+    // a closed tab's gate goes with it, leaving a tombstone: wc.close() below runs the document's
+    // pagehide / unload, whose beacons arrive after the tab is gone
+    this.guards.forget(id, { wcId: t.wc.id, leaving: originOfUrl(t.wc.getURL()) });
     this.hibernated.delete(id); // ...and so does its wake target
     this.win.contentView.removeChildView(t.view);
     t.wc.close();

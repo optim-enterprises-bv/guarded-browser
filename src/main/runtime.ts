@@ -11,11 +11,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
 import { loadSettings, saveSettings, MAX_WEB_PANELS, type Role, type Settings } from '../core/config';
-import { EgressController, hostKey, parseBody, startProxy, type ProxyHandle } from '../core/egress';
+import { bodyValues, EgressController, hostKey, startProxy, type ProxyHandle } from '../core/egress';
 import { LlmClient } from '../core/llm';
 import { originOf, originsInTask } from '../core/policy';
 import { LocalLists, normalizeHost, safeBrowsingLookup, type FeedConfig, type ReputationChecker, type ReputationDb } from '../core/reputation';
-import type { ConfirmOutcome, ConfirmRequest, Guard, PolicyResult } from '../core/types';
+import type { ConfirmOutcome, ConfirmRequest, Guard } from '../core/types';
 import { ConfirmBroker } from './confirm';
 import { ElectronDriver, TabManager, type Tab } from './tabs';
 import type { TileLayout } from './tile-layout';
@@ -25,7 +25,7 @@ import type { Profile } from './profiles';
 import { testEnv } from './test-hooks';
 // ticket 37c: the mail controller is per PROFILE and its handlers live on this runtime's `on()` table,
 // so the chrome resolves them from the sending window exactly like every other chrome channel.
-import { MailController, MAIL_CHANNELS } from './mail/controller';
+import { MailController } from './mail/controller';
 import { HistoryStore, recordable } from '../core/history';
 import { ClosedTabStore } from '../core/closed-tabs';
 import { SessionStore } from '../core/session-state';
@@ -442,25 +442,19 @@ function setupEgress(ses: Session) {
     });
   }
 
-  /** Body for the dialog: strictly parsed fields, or the raw body when it does not parse strictly. */
-  function formValues(body: string, forceRaw = false): PolicyResult['values'] {
-    const now = new Date().toISOString();
-    const prov = [{ source: 'snapshot' as const, timestamp: now, note: 'request body built by the page' }];
-    const pairs = parseBody(body);
-    const out: PolicyResult['values'] = (pairs ?? []).slice(0, 30).map(([k, v]) => ({ field: k.slice(0, 60), value: /pass|pwd/i.test(k) ? '•••• (password)' : v.slice(0, 300), masked: /pass|pwd/i.test(k), label: 'untrusted' as const, provenance: prov, taintIds: egress.idsIn(v) }));
-    if (body && (!pairs || forceRaw)) {
-      out.push({ field: pairs ? 'raw body' : 'raw body (not a well-formed form body)', value: body.length > 2000 ? `${body.slice(0, 2000)}… (${body.length} bytes)` : body, label: 'untrusted', provenance: prov, taintIds: egress.idsIn(body) });
-    }
-    return out;
-  }
-
   /** Layers after reputation. Resolves true = cancel the request. */
   async function egressCheck(d: Electron.OnBeforeRequestListenerDetails): Promise<boolean> {
     const inTask = !!current && egress.mode === 'agent';
     const host = hostKey(d.url) ?? '?';
     const base = { host, method: d.method, url: d.url.slice(0, 500) };
     const workerOfGuardedOrigin = tabs.anyGated() && !isTabRequest(d.webContentsId) && tabs.gatedOrigins().has(originOf(d.url) ?? '');
-    const gated = inTask || (d.webContentsId !== undefined && tabs.isGated(tabIdOf(d.webContentsId))) || workerOfGuardedOrigin;
+    const liveGate = inTask || (d.webContentsId !== undefined && tabs.isGated(tabIdOf(d.webContentsId))) || workerOfGuardedOrigin;
+    // a gate lifted / closed in the last 30 s still holds what its unloading document sends
+    const tombstoned =
+      !liveGate &&
+      !['GET', 'HEAD', 'OPTIONS'].includes(d.method) &&
+      tabs.heldByTomb({ wcId: d.webContentsId, liveTab: isTabRequest(d.webContentsId), origin: originOf(d.url), referrerOrigin: d.referrer ? originOf(d.referrer) : null });
+    const gated = liveGate || tombstoned;
 
     // hosts the proxy refuses anyway are cancelled here first: no pointless prompts, and a prompt
     // can never reveal to the page whether a host is on the allowlist
@@ -495,15 +489,18 @@ function setupEgress(ses: Session) {
         pendingContentType.set(d.id, { enctype: mr.enctype!, boundary: mr.boundary });
         egress.auditWebRequest({ ...base, decision: 'allow', reason: 'matches the submission confirmed at the action layer (method, URL, fields)' });
       } else {
+        const shown = bodyValues(body, m === 'mismatch', egress.taint);
         const ok = await askEgress(`write|${d.method}|${d.url}|${createHash('sha256').update(body).digest('hex')}`, {
         source: sourceOf(d.webContentsId),
           action: `${d.method} ${d.resourceType} request that was not confirmed`,
           target: host,
           destination: d.url,
-          values: formValues(body, m === 'mismatch'),
+          values: shown.values,
           reasons: [
             !inTask
-              ? workerOfGuardedOrigin
+              ? tombstoned
+                ? 'the page the agent was operating is sending data while it unloads (you navigated away from it or closed it)'
+                : workerOfGuardedOrigin
                 ? 'a background worker (no tab) of a site the agent visited is sending data after the task ended'
                 : 'the page the agent was operating is sending data after the task ended (the tab stays guarded until you navigate it yourself)'
               : m === 'mismatch'
@@ -513,7 +510,9 @@ function setupEgress(ses: Session) {
         });
         egress.auditWebRequest({ ...base, decision: ok ? 'allow' : 'block', reason: `unconfirmed ${d.method} ${d.resourceType}${m === 'mismatch' ? ' (body differs from the approved one)' : ''}: ${ok ? 'user approved' : 'blocked'}` });
         if (!ok) return true;
-        egress.confirmFlow(egress.idsIn(`${d.url}\n${body}`), d.url);
+        // only what the dialog showed (the destination URL is shown in full): anything it cut off
+        // stays tracked and the content filter below asks about it with the value itself
+        egress.confirmFlow([...new Set([...egress.idsIn(d.url), ...shown.shownIds])], d.url);
       }
     }
 
@@ -614,6 +613,15 @@ function uniquePath(dir: string, name: string): string {
 }
 
 /**
+ * The user is taking a gated tab back. The gate is NOT lifted here: lifting before loadURL / goBack
+ * left the gated document running ungated until it unloaded, so its pagehide could sendBeacon or
+ * keepalive-POST freely. did-navigate lifts it on commit (see there).
+ */
+function liftGateOnCommit(t: Tab) {
+  if (tabs.isGated(t.id)) t.gateLiftPending = { leaving: originOf(t.wc.getURL()) };
+}
+
+/**
  * Close a tab: ends the task if it is the agent's pane, forgets its security state, and pushes it
  * onto the closed-tab stack so Ctrl+Shift+T can bring it back. Shared with the ✕ button and
  * Ctrl+W so both paths capture identically.
@@ -623,7 +631,8 @@ function closeTab(id: number) {
   if (!t) return;
   const isAgentPane = !!current && current.tab === t;
   if (isAgentPane) stopTask();
-  tabs.forgetTab(t.id);
+  // no forgetTab() here: tabs.close() forgets the gate AND tombstones it before wc.close() runs the
+  // document's pagehide (forgetting first let a pagehide beacon leave ungated)
   // The agent task's own pane is not captured: offering the document the agent drove back as a
   // "reopen" would resurrect the very page the post-task gate exists to contain.
   tabs.silentCloseId = isAgentPane ? id : null;
@@ -716,14 +725,14 @@ function runChord(input: { key: string; control?: boolean; meta?: boolean; shift
       break;
     case 'nav.back':
       if (active && !current) {
-        tabs.setGate(active.id, 'none');
+        liftGateOnCommit(active);
         active.navSource = 'user';
         active.wc.navigationHistory.goBack();
       }
       break;
     case 'nav.forward':
       if (active && !current) {
-        tabs.setGate(active.id, 'none');
+        liftGateOnCommit(active);
         active.navSource = 'user';
         active.wc.navigationHistory.goForward();
       }
@@ -1109,6 +1118,12 @@ function setupTab(tab: Tab) {
     // driver's navigate), otherwise 'user' (address bar, new tab, back / forward / reload)
     const by = tab.navSource ?? 'user';
     tab.navSource = undefined;
+    // The user's navigation of a gated tab has committed: only now is the gated document gone, so
+    // only now does the gate lift (tombstoned for its late pagehide beacons). Anything else that
+    // commits instead (the page moved itself first) cancels the pending lift: the gate stays.
+    const lift = tab.gateLiftPending;
+    tab.gateLiftPending = undefined;
+    if (lift && by === 'user' && !current) tabs.liftGateOnCommit(tab.id, lift.leaving, originOf(url));
     audit.write('navigation', { url, tab: tab.id, by, agentTab: current?.tab === tab });
     // zoom is per origin: apply the remembered factor on arrival, and 100% when arriving at an
     // origin with none. Purely a view property — the snapshot the agent sees is unaffected.
@@ -1228,6 +1243,8 @@ async function startTask(text: string, origins?: string[]) {
     onUpdate: (u) => sendUI('agent:update', u),
   });
   current = { task, tab };
+  // the mail gate refuses new connections from here on; drop the ones opened before the task
+  mailController?.disconnectAll();
   tabs.setAgentTab(tab.id);
   sendUI('agent:update', { taskId: task.id, status: 'started', step: 0 });
   void task
@@ -1431,7 +1448,7 @@ function registerIpc() {
   on('nav:go', (_e, input: string) => {
     const t = tabs.active();
     if (!t) return;
-    if (!current) tabs.setGate(t.id, 'none'); // the user took the tab back
+    if (!current) liftGateOnCommit(t); // the user took the tab back (lifted when the load commits)
     t.navSource = 'user';
     let url = input.trim();
     const nick = bookmarks.byNickname(url);
@@ -1451,7 +1468,7 @@ function registerIpc() {
     } else {
       const t = tabs.active();
       if (!t) return { ok: false };
-      if (!current) tabs.setGate(t.id, 'none');
+      if (!current) liftGateOnCommit(t);
       t.navSource = 'user';
       void t.wc.loadURL(url).catch(() => undefined);
     }
@@ -1620,7 +1637,7 @@ function registerIpc() {
   const userNav = (fn: (wc: WebContents) => void) => {
     const t = tabs.active();
     if (!t) return;
-    if (!current) tabs.setGate(t.id, 'none');
+    if (!current) liftGateOnCommit(t);
     t.navSource = 'user';
     fn(t.wc);
   };

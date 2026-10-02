@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import net from 'node:net';
-import { EgressController, hostKey, startProxy, type EgressAuditEntry, type ProxyHandle } from '../../src/core/egress';
+import { bodyValues, EgressController, hostKey, startProxy, type EgressAuditEntry, type ProxyHandle } from '../../src/core/egress';
 import { TaintRegistry } from '../../src/core/taint';
 import { startFixtureServers, type FixtureServers } from '../helpers/fixture-server';
 
@@ -165,5 +165,56 @@ describe('loopback spellings (review r7)', () => {
     expect(c.decideHost(hostKey('127.0.0.1:40001')!, 'CONNECT')).toBe(true);
     expect(c.decideHost(hostKey('[::ffff:10.0.0.1]:40000')!, 'CONNECT')).toBe(true);
     expect(c.decideHost(hostKey('example.com:40000')!, 'CONNECT')).toBe(true);
+  });
+});
+
+describe('H1 (round 6): dialog rows for a page-built body hide nothing silently', () => {
+  const secret = 'Hunter2-Very-Secret';
+  const reg = () => {
+    const t = new TaintRegistry(`log in, password: ${secret}`);
+    t.preRegisterTaskSecrets();
+    return t;
+  };
+  const body35 = (val33: string, name33 = 'pwd') =>
+    Array.from({ length: 35 }, (_, i) => `${i === 32 ? name33 : `f${i + 1}`}=${encodeURIComponent(i === 32 ? val33 : `v${i + 1}`)}`).join('&');
+
+  it('a secret in field #33 named "pwd" is not confirmed by the field rows, and the raw body shows it', () => {
+    const t = reg();
+    const id = t.sensitiveIn(secret)[0].id;
+    const { values, shownIds } = bodyValues(body35(secret), false, t);
+    expect(values.some((v) => /^… and 5 more fields/.test(v.field ?? ''))).toBe(true);
+    const raw = values.find((v) => v.field === 'raw body')!;
+    expect(raw.value).toContain(`pwd=${secret}`);
+    expect(raw.taintIds).toEqual([id]);
+    // displayed (in the raw body) -> the only reason it may be confirmed
+    expect(shownIds).toEqual([id]);
+    expect(values.every((v) => v.value !== '•••• (password)')).toBe(true);
+  });
+
+  it('a field NAME never masks a value; only a value that is a task secret is masked, and says so', () => {
+    const t = reg();
+    const r = bodyValues(`password=not-a-secret&x=${encodeURIComponent(secret)}`, false, t);
+    expect(r.values[0]).toMatchObject({ field: 'password', value: 'not-a-secret' });
+    expect(r.values[0].masked).toBeFalsy();
+    expect(r.values[1].masked).toBe(true);
+    expect(r.values[1].value).toMatch(/your task secret, masked/);
+    expect(r.values[1].taintIds).toHaveLength(1);
+  });
+
+  it('cut values are marked and taint past the cut is not in shownIds', () => {
+    const t = reg();
+    const long = `${'a'.repeat(2500)}${secret}`;
+    const { values, shownIds } = bodyValues(`note=${long}`, false, t);
+    expect(values[0].value).toMatch(/… \(\+\d+ chars\)$/);
+    expect(values[0].taintIds).toHaveLength(1); // the row still warns
+    const raw = values.find((v) => v.field === 'raw body')!;
+    expect(raw.value).toMatch(/… \(\+\d+ chars, \d+ bytes in all\)$/);
+    expect(shownIds).toEqual([]);
+  });
+
+  it('an untainted, short form body is shown as fields only', () => {
+    const { values, shownIds } = bodyValues('a=1&b=2', false, reg());
+    expect(values.map((v) => v.field)).toEqual(['a', 'b']);
+    expect(shownIds).toEqual([]);
   });
 });
