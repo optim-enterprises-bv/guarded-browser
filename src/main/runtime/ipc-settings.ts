@@ -21,7 +21,8 @@ export function register(on: (channel: string, fn: Handler) => void, rt: Runtime
   on('settings:get', () => ({ ...rt.settings, guard: { ...ctx.sharedGuard() }, reputation: { ...rt.settings.reputation, feeds: ctx.sharedFeeds() } }));
   on('settings:save', (_e, s: Settings) => {
     // appearance has its own validated path; never take it from the generic settings form
-    s = { ...s, appearance: rt.settings.appearance };
+    // ...nor the MCP / phone switches: they have their own channels (src/main/runtime/mcp.ts)
+    s = { ...s, appearance: rt.settings.appearance, mcp: rt.settings.mcp, phone: rt.settings.phone };
     rt.settings = s;
     saveSettings(settingsFile, s);
     rt.egress.setDenylist(s.egress.denylist);

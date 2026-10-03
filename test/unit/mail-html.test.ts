@@ -565,7 +565,9 @@ describe('mail html: the view is invisible to the agent and every page-reading p
     const rt = src('src/main/runtime.ts');
     // the driver is built from a TabManager tab; ownsWebContents / isUi know nothing of the mail view
     expect(rt).toMatch(/driver: new ElectronDriver\(tab\)/);
-    expect(rt).toMatch(/const tab = tabs\.active\(\);/);
+    expect(rt).toMatch(/const tab = opts\.tab \?\? tabs\.active\(\);/);
+    // the only caller passing `opts.tab` (an MCP task, item 3) passes a tab it created with the TabManager
+    expect(src('src/main/runtime/mcp.ts')).toMatch(/const tab = rt\.tabs\.create\('about:blank'/);
     const owns = /ownsWebContents: \(wc: WebContents\) => ([^\n]+)/.exec(rt)![1];
     expect(owns).not.toMatch(/mail/i);
     const isUi = /isUi: \(wc: WebContents\) => ([^\n]+)/.exec(rt)![1];

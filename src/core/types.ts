@@ -75,7 +75,7 @@ export type ConfirmOutcome = 'approve' | 'deny' | 'stop' | 'timeout';
 
 export interface ConfirmRequest {
   id: string;
-  kind: 'action' | 'egress' | 'redirect' | 'download' | 'reputation' | 'profile';
+  kind: 'action' | 'egress' | 'redirect' | 'download' | 'reputation' | 'profile' | 'mcp';
   action: string;
   target: string;
   destination?: string;
@@ -86,6 +86,11 @@ export interface ConfirmRequest {
   source?: { label: string; title?: string };
   /** attacker-influenced text, shown quoted and labelled in the dialog */
   pageDerived?: Array<{ label: string; text: string }>;
+  /**
+   * Set when another AI program asked (an MCP client, item 3): the name IT gave in `initialize`, so
+   * it is client-chosen text, shown quoted. The client never sees or answers the confirmation.
+   */
+  client?: string;
 }
 
 export interface GuardVerdict {

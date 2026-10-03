@@ -330,6 +330,7 @@
   <div id="confirm" class="overlay hidden lock-dialog" data-testid="confirm-modal" role="dialog" aria-modal="true">
     <div class="card">
       <h2>Confirm agent action</h2>
+      <div class="kv hidden" id="c-client-row"><span>Asked by</span><span id="c-client" data-testid="confirm-client"></span></div>
       <div class="kv"><span>From</span><span id="c-source" data-testid="confirm-source"></span></div>
       <div class="kv"><span>Action</span><code id="c-action"></code></div>
       <div class="kv"><span>Target</span><code id="c-target"></code></div>
@@ -449,6 +450,32 @@
           <button id="bundle-preview" data-testid="bundle-preview">Preview</button></div>
         <textarea id="bundle-text" rows="5" spellcheck="false" data-testid="bundle-text" placeholder="paste a bundle here to preview or import"></textarea>
         <span id="bundle-msg" class="muted small" data-testid="bundle-msg"></span>
+      </fieldset>
+      <fieldset data-testid="mcp-settings"><legend>AI agents (MCP) and phone approvals</legend>
+        <p class="muted small"><strong>Off by default.</strong> Lets another AI program on this computer (Claude Code, Hermes) run guarded browsing tasks in this profile.
+          It gets four high-level tools only (browse_task, open_url, task_status, cancel_task): no page text, cookies, history, bookmarks, mail or downloads.
+          Tasks run in an empty throwaway session unless you approve using this profile for one. Confirmations always come to you, never to the other program.</p>
+        <label class="small"><input id="mcp-enabled" type="checkbox" data-testid="mcp-enabled"> Allow other AI agents (MCP)</label>
+        <div class="small" id="mcp-status" data-testid="mcp-status"></div>
+        <label class="small">Connect from Claude Code (run in a terminal):
+          <textarea id="mcp-command" rows="3" readonly spellcheck="false" data-testid="mcp-command"></textarea></label>
+        <div class="row"><button id="mcp-copy" data-testid="mcp-copy">Copy command</button>
+          <button id="mcp-revoke" class="danger" data-testid="mcp-revoke">Revoke token</button>
+          <span id="mcp-msg" class="muted small" data-testid="mcp-msg"></span></div>
+        <label class="small">Hermes (<code>mcp_servers</code> in its config.yaml; shown, never applied):
+          <textarea id="mcp-hermes" rows="6" readonly spellcheck="false" data-testid="mcp-hermes"></textarea></label>
+        <hr>
+        <p class="muted small">Phone approvals: confirmations are also sent to your Telegram with Approve / Deny buttons; the first answer (screen or phone) wins.
+          Use a bot of your own made with @BotFather (not one another program already uses) and your numeric Telegram user id. Talks to api.telegram.org directly.</p>
+        <label class="small"><input id="ph-enabled" type="checkbox" data-testid="phone-enabled"> Send confirmations to my phone</label>
+        <div class="row"><label class="small">for <select id="ph-scope" data-testid="phone-scope">
+          <option value="mcp">MCP tasks only (default)</option><option value="all">all agent tasks</option></select></label></div>
+        <div class="row"><input id="ph-token" type="password" autocomplete="off" placeholder="bot token from @BotFather" data-testid="phone-token">
+          <input id="ph-chat" placeholder="your Telegram user id (digits)" data-testid="phone-chat"></div>
+        <div class="row"><button id="ph-save" class="primary" data-testid="phone-save">Save phone settings</button>
+          <button id="ph-test" data-testid="phone-test">Send test message</button>
+          <button id="ph-forget" data-testid="phone-forget">Forget bot token</button>
+          <span id="ph-msg" class="muted small" data-testid="phone-msg"></span></div>
       </fieldset>
       <fieldset><legend>chrome layout (tickets 17/21/28)</legend>
         <label class="small"><input id="opt-rail" type="checkbox" data-testid="opt-rail"> Show the left icon rail</label>

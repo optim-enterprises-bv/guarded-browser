@@ -425,6 +425,134 @@ Code: `src/core/markdown.ts` (extractor + pure transform), `src/core/chat.ts` (r
 redaction, screening), `src/core/chat-render.ts` (reply parsing), `StreamingLlmClient` in
 `src/core/llm.ts`, `src/main/runtime/ipc-chat.ts`, `src/renderer/chat.ts`.
 
+### Use the browser from Claude Code / Hermes
+Another AI program on the same computer can hand Guarded Browser a browsing job over **MCP** and get
+back only the final answer. The other program never drives the page, never sees page text, cookies,
+history, bookmarks, mail or downloads, and never answers a confirmation: those stay with you.
+
+**Off by default, per profile.** Settings → *AI agents (MCP) and phone approvals* → **Allow other AI
+agents (MCP)**. Only while that is on does the profile serve MCP:
+
+* **Transport:** MCP Streamable HTTP on `127.0.0.1:<random port>/mcp`, JSON responses only. A
+  256-bit random bearer token (new every start). Port + token are written to
+  `<userData>/mcp.json`, mode `0600`, and removed when no profile serves MCP. Every request must come
+  from a loopback peer, carry `Host: 127.0.0.1:<port>` exactly, carry **no** browser `Origin` (other
+  than `null`) and no `Sec-Fetch-*` header (DNS-rebinding / CSRF defence: a web page can never talk
+  to it), and present the token (compared in constant time). Refusals are `403` / `401` and audited.
+* **Revoke token** rotates the token and drops every connected session. Turning the switch off closes
+  the port and stops an MCP task that is running.
+* **stdio launcher** `dist/mcp-stdio.js` (bundled; plain Node, no Electron) reads `mcp.json` and
+  relays newline-delimited JSON-RPC between stdin/stdout and the loopback endpoint. It re-reads the
+  file after a revoke or a browser restart and re-initialises its session by itself.
+* The protocol is a minimal, unit-tested MCP subset implemented in `src/core/mcp.ts`
+  (`initialize`, `ping`, `tools/list`, `tools/call`, notifications; protocol versions 2025-06-18,
+  2025-03-26, 2024-11-05): the official SDK was not installable offline.
+
+**The tools (high level only):**
+
+| tool | what it does |
+|---|---|
+| `browse_task({task, sites?, use_profile?, wait_seconds?})` | runs a normal guarded agent task (planner, reader, judge, policy, egress, confirmations) and returns `{id, status, answer, audit_ref}`; the answer is fenced as `<untrusted-web-content>`; `wait_seconds` (default 240) caps how long the call waits before returning `status: "running"` |
+| `open_url({url})` | opens a new tab through the normal user-navigation path (reputation interstitial applies); the **first** `open_url` of each client session needs your approval |
+| `task_status({id, wait_seconds?})` | status / answer of a task **this session** started |
+| `cancel_task({id})` | stops a task **this session** started |
+
+* **Session isolation.** By default every `browse_task` runs in a **fresh in-memory partition**
+  (`mcp-<uuid>`: no cookies, no storage, no logins) behind this profile's egress proxy, webRequest
+  rules and reputation lists, in a background tab marked **MCP: “client name”**. When the task ends
+  the tab is closed and the partition's storage, cache, auth cache and connections are wiped; nothing
+  of it goes into history or the saved session. `use_profile: true` runs in your logged-in profile
+  instead, and only after an on-screen (or phone) approval that names the client and shows the task
+  text and sites.
+* **One MCP task at a time** per profile; a second call (or any call while you run a task yourself)
+  gets `status: "busy"`. Every gate that applies to an agent task applies identically (the mail gate
+  refuses network, the post-task gate, the confirmation rules): it *is* an agent task.
+* **Confirmations go to you.** Any confirmation raised during an MCP task is shown in the browser
+  (with an **Asked by** line naming the client) and, if you set it up, on your phone. Nothing about
+  it goes back over MCP.
+* **Audit.** Every MCP call is an `mcp` event: client name, tool, task length, sites, result status
+  (never the task text, never the token); the task itself is audited like any other.
+
+**Set up Claude Code** (Settings shows the exact command with your paths; copy it with **Copy
+command**):
+
+```sh
+claude mcp add --transport stdio --env ELECTRON_RUN_AS_NODE=1 guarded-browser -- \
+  /path/to/guarded-browser /path/to/resources/app.asar/dist/mcp-stdio.js \
+  --user-data ~/.config/guarded-browser --profile "Default"
+```
+
+(`ELECTRON_RUN_AS_NODE=1` makes the browser's own Electron run the launcher as plain Node; `node
+dist/mcp-stdio.js ...` works too.)
+
+**Set up Hermes** — add to `mcp_servers` in Hermes's `config.yaml` yourself (Settings shows it with
+your paths; the browser never edits Hermes's configuration). Hermes's default tool timeout is 300 s,
+above `browse_task`'s default 240 s wait:
+
+```yaml
+mcp_servers:
+  guarded-browser:
+    command: "/path/to/guarded-browser"
+    args: ["/path/to/resources/app.asar/dist/mcp-stdio.js", "--user-data", "/path/to/.config/guarded-browser", "--profile", "Default"]
+    env:
+      ELECTRON_RUN_AS_NODE: "1"
+```
+
+**Threat model of MCP.** The MCP client is **untrusted**: it may be confused, compromised or itself
+steered by injected text. Its task text is treated like a task you typed into an untrusted box —
+everything the task does still passes the planner/policy/egress layers and your confirmations, and
+it runs without your cookies unless you approve `use_profile` for that one task. Results are
+**untrusted**: page-derived text summarised by a model that read it, fenced and labelled for the
+calling model. **Confirmations are answered only by the human** (screen or phone). Sessions are
+**ephemeral by default**. There are no tools that read page text, the DOM, screenshots, cookies,
+history, bookmarks, mail, downloads or expose CDP.
+
+#### Phone approvals (Telegram)
+Off by default, per profile: Settings → *Send confirmations to my phone*, for **MCP tasks only**
+(default) or **all agent tasks**. A confirmation is sent as a Telegram message with **Approve /
+Deny** buttons; it shows exactly what the dialog shows (who asks, which MCP client, action, target,
+destination, every exact value with its taint and provenance, reasons, judge verdict, quoted
+page-derived text). A request too long for one message is sent **without buttons** and can only be
+answered on screen. Screen and phone can both answer; the **first answer wins**, the other is
+cleared (the dialog closes; the phone card is edited to *APPROVED / DENIED / EXPIRED* and loses its
+buttons). The phone card expires with the same timeout as the dialog (no answer = deny).
+
+* A button press is accepted **only** from the configured chat id pressed by that same user (a
+  private chat with the bot), **only** for a confirmation this browser posted, on the message it
+  was posted as, while that confirmation is still pending. Anything else is ignored.
+* Uses the browser's **own** bot: create one with @BotFather. Do not reuse a bot another program
+  polls (Telegram allows one `getUpdates` poller per bot token; a second one cuts the first off).
+  The browser long-polls only while one of its cards is pending.
+* The bot token is stored in `profiles/<id>/phone-secret.json` (mode `0600`, plain JSON: say so
+  honestly), never in `settings.json`, never sent to the renderer.
+* **Network exception (documented):** these calls go to `https://api.telegram.org` only, through
+  Node's `https` with normal certificate verification — **not** through the profile's egress proxy,
+  which exists for page traffic. Nothing a page or a model writes decides where they connect.
+
+**Hermes as the phone channel — not implemented, and why.** The Hermes gateway's local control socket
+(`gateway.sock`) only takes lifecycle / management verbs (status, profile serve / unserve, plugin
+reload); its loopback API server serves chat, runs and jobs; neither can send a message with inline
+buttons and hand the button press back to another program. Its Telegram adapter routes button
+callbacks only to Hermes's own flows and to in-process Hermes plugins. For Guarded Browser to use it,
+Hermes would need to expose, on its 0600 socket: a `send_approval` verb (`{chat, text, buttons:
+[{label, id}], expires_at}` → a message id) and a way to receive the presses for those ids (a
+`wait_callback` verb or a subscription), with callbacks for a namespace it does not use itself, and
+an `edit_message` verb to update the card. Until then the browser uses its own bot.
+
+**Setup steps (phone):**
+1. In Telegram, talk to **@BotFather** → `/newbot` → copy the bot token.
+2. Open a chat with your new bot and press **Start** (a bot cannot message you first).
+3. Find your numeric user id (e.g. ask **@userinfobot**); that is the chat id of your private chat
+   with the bot.
+4. Settings → paste the token and the id → tick **Send confirmations to my phone** → **Save phone
+   settings** → **Send test message**.
+
+Code: `src/core/mcp.ts` (admission, JSON-RPC, tools, registry, wrapping), `src/main/mcp-server.ts`
+(HTTP), `src/main/runtime/mcp.ts` (the tools, isolation, approvals, settings IPC),
+`src/main/runtime/mcp-index.ts` (`mcp.json`), `src/mcp-stdio.ts` (launcher), `src/core/approval.ts`
+(`ApprovalChannel`, first-answer-wins hub), `src/core/confirm-text.ts` (the card text),
+`src/main/telegram.ts` (Bot API channel), `src/renderer/mcp.ts` (Settings section).
+
 ### Profiles (Vivaldi / Chromium model)
 One app process; each **profile** is its own Chromium session plus its own app state, and opens in
 its **own window** (the window title and the toolbar's profile button show its name and colour).
@@ -785,6 +913,14 @@ model one that slipped through.)
   inspected. DNS-over-HTTPS from page JS is ordinary HTTPS to an allowed or blocked host.
 * Cloud fallback, when you enable it, sends task, snapshots (planner) and page text (reader) to that
   provider; for the chat role, page text and your chat messages.
+* **MCP clients are untrusted** (item 3). An MCP client can start tasks and open tabs in a profile
+  where you turned MCP on; it cannot read pages, cookies or your data, cannot answer confirmations,
+  and runs in an empty throwaway session unless you approve `use_profile` per task. Anything running
+  as your user can read `mcp.json` (0600) and use the token: the boundary is your OS account, the
+  same as for your profile directory. The answer it gets back is untrusted page-derived text.
+* **Phone approvals** trust Telegram's delivery of the button press from your chat id; anyone holding
+  your Telegram session can answer a card. The calls go to api.telegram.org outside the egress proxy
+  (certificate-verified), the one documented exception to "everything through the proxy".
 * **The AI chat reads page text.** It is quarantined (no tools, no task values, nothing persisted,
   output shown as text only), but a page can still steer what it *says*; the guard drops lines it
   flags, not all injections. Its replies are labelled page-derived and never become a task by
@@ -838,7 +974,8 @@ src/main/       Electron main: profiles (profiles.ts registry, runtime.ts = one 
 src/renderer/   browser chrome + agent panel (plain DOM), split-view pane chrome, themes (appearance.ts)
 test/unit/      vitest: policy, taint, reader/llm/planner/judge, egress proxy, reputation, agent loop, guard
 test/e2e/       Playwright _electron: benign, attacks, regressions (review), reputation, guard
-test/helpers/   mock OpenAI server, fixture + attacker servers, fake browser driver
+test/helpers/   mock OpenAI server, fixture + attacker servers, fake browser driver, fake Telegram Bot API
+src/mcp-stdio.ts  the MCP stdio launcher (bundled to dist/mcp-stdio.js)
 test/fixtures/  attack and benign pages, fixture threat feed
 scripts/        build, e2e runner (xvfb), smoke:local
 ```
@@ -887,6 +1024,9 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/reopen.spec.ts` (reopen stack, session restore, a gated tab reopens UNGATED) | 3 | pass |
 | e2e | `test/e2e/wave1.spec.ts` (zoom, find, print, reopen, ordering, search engine, page menu, downloads) | 12 | pass |
 | e2e | `test/e2e/wave2.spec.ts` (start page, quick commands, panel rail, stacks, workspaces, saved sessions, reader, capture, keybindings, gestures, status bar, translate, web panels) | 24 | pass |
+| unit | `test/unit/mcp.test.ts` (MCP: constant-time token, loopback / Host / Origin admission, JSON-RPC subset, tool schemas, untrusted wrapping, busy, HTTP transport, stdio launcher) | 27 | pass |
+| unit | `test/unit/phone-approval.test.ts` (phone card == dialog, fake Bot API: wrong chat ignored, stale id ignored, edit on resolve, expiry, first answer wins) | 14 | pass |
+| e2e | `test/e2e/mcp.spec.ts` (off by default, 401 / 403, browse_task via the stdio launcher in a throwaway partition, phone approval of an MCP task's confirmation, use_profile approval, busy + cancel, open_url, revoke, off = refused) | 10 | pass |
 | **total** | | **407** (282 unit + 125 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):

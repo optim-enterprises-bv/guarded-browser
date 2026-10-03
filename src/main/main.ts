@@ -14,6 +14,7 @@ import { DEFAULT_FEEDS, HostSet, ReputationDb, type FeedBuilder, type FeedConfig
 import type { Guard } from '../core/types';
 import { PROFILE_COLORS, ProfileRegistry, partitionDir, type Profile } from './profiles';
 import { createRuntime, type Runtime } from './runtime';
+import { writeMcpIndex } from './runtime/mcp-index';
 
 import { GUARD_MODEL, ensureModel } from './model-store';
 import { testEnv } from './test-hooks';
@@ -140,6 +141,15 @@ function refreshRefusedPorts() {
   for (const r of runtimes.values()) r.setRefusedPorts(ports);
 }
 
+/** userData/mcp.json: the MCP endpoint of every open profile that serves one (0600; see runtime/mcp.ts) */
+function refreshMcpIndex() {
+  try {
+    writeMcpIndex(app.getPath('userData'), [...runtimes.values()].map((r) => r.mcpInfo()).filter((x) => !!x));
+  } catch (e) {
+    logProcessError('mcp.json', e);
+  }
+}
+
 function broadcastProfiles() {
   for (const r of runtimes.values()) {
     r.profileChanged();
@@ -192,9 +202,11 @@ async function openProfile(id: string, startUrl?: string): Promise<Runtime> {
         runtimes.set(id, rt);
         refreshRefusedPorts();
       },
+      mcpChanged: () => refreshMcpIndex(),
       onClosed: () => {
         runtimes.delete(id);
         refreshRefusedPorts();
+        refreshMcpIndex();
         if (!quitting) broadcastProfiles();
       },
     });
@@ -481,6 +493,8 @@ app.whenReady().then(async () => {
 
   registerIpc();
   buildMenu();
+  // a previous run that crashed may have left its endpoints behind: nothing is served yet
+  refreshMcpIndex();
   const rt = await openProfile(first.id, urlArg(process.argv) || process.env.GUARDED_START_URL || 'about:blank');
   if (strays.moved.length) {
     process.stderr.write(`[guarded-browser] quarantined stray single-profile files: ${strays.moved.join(', ')} -> ${strays.dir}\n`);
@@ -501,6 +515,11 @@ app.on('before-quit', () => {
 
 // last sweep of deleted profiles' partitions, after the sessions have flushed
 app.on('will-quit', () => {
+  try {
+    writeMcpIndex(app.getPath('userData'), []);
+  } catch {
+    /* best effort: the next start rewrites it */
+  }
   try {
     registry?.sweepRetired();
   } catch {

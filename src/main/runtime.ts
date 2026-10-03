@@ -43,7 +43,9 @@ import type { PaletteItem } from '../core/quick-commands';
 import { ExtensionList, extensionListFile } from './extensions';
 import { createEgressWiring, PROCEED_PREFIX } from './runtime/egress-wiring';
 import { createChords } from './runtime/chords';
-import type { RuntimeDeps } from './runtime/deps';
+import type { CurrentTask, RuntimeDeps, StartOpts } from './runtime/deps';
+import { register as registerMcp } from './runtime/mcp';
+import type { TaskResult } from '../core/agent';
 import { register as registerTabsIpc } from './runtime/ipc-tabs';
 import { register as registerLibraryIpc } from './runtime/ipc-library';
 import { register as registerSettingsIpc } from './runtime/ipc-settings';
@@ -75,6 +77,8 @@ export interface RuntimeContext {
   startUrl?: string;
   onClosed: () => void;
   register: (rt: Runtime) => void;
+  /** this profile's MCP server started, stopped or rotated its token: main rewrites userData/mcp.json */
+  mcpChanged: () => void;
 }
 
 export type Runtime = Awaited<ReturnType<typeof createRuntime>>;
@@ -170,8 +174,10 @@ const tabHosts = new TabHostLog();
 let xray: ReturnType<typeof registerXrayIpc> | null = null;
 /** the AI chat (src/main/runtime/ipc-chat.ts): per-tab conversations, in memory only */
 let chat: ReturnType<typeof registerChatIpc> | null = null;
+/** the MCP server + phone approvals (src/main/runtime/mcp.ts); created with the IPC handlers */
+let mcp: ReturnType<typeof registerMcp> | null = null;
 const reputation: ReputationChecker = { check: (h) => feeds.check(h, localLists) };
-let current: { task: AgentTask; tab: Tab } | null = null;
+let current: CurrentTask | null = null;
 const fallbackActive: Partial<Record<Role, string>> = {};
 /** webRequest-layer flows the user denied during the current task (not asked again) */
 let deniedFlows = new Set<string>();
@@ -306,6 +312,9 @@ const rt: RuntimeDeps = {
   get current() {
     return current;
   },
+  get proxyPort() {
+    return proxy.port;
+  },
   get deniedFlows() {
     return deniedFlows;
   },
@@ -372,6 +381,8 @@ const rt: RuntimeDeps = {
   chordTable: () => chordTable(),
   mail: () => api.mail(),
   mailView: () => api.mailView(),
+  setupEgress: (s) => setupEgress(s),
+  openUserUrl: (url, background) => api.openUrl(url, background),
 };
 const { setupEgress, sourceOf, handleProceed } = createEgressWiring(rt);
 const { installShortcuts, runChord, runAction, chordTable, tabStartUrl } = createChords(rt);
@@ -580,7 +591,8 @@ function scheduleHibernation() {
  */
 function saveSessionSoon() {
   if (disposed) return;
-  const list = tabs?.list() ?? [];
+  // an MCP task's throwaway tab is never restored into the profile's session
+  const list = (tabs?.list() ?? []).filter((t) => !t.ephemeral);
   const activeIndex = list.findIndex((t) => t.active);
   const tiles = tabs?.tileState();
   const tiling = tiles
@@ -749,7 +761,8 @@ function setupTab(tab: Tab) {
     // user asked for no surviving history, so those restore-driven navigations must not be
     // recorded — otherwise the restored URL is written straight back into history at launch and
     // the setting silently fails after a crash.
-    if (recordable(url) && !(tab.restored && history.clearOnExit)) {
+    // an MCP task's throwaway session leaves nothing in the profile, history included
+    if (recordable(url) && !tab.ephemeral && !(tab.restored && history.clearOnExit)) {
       history.record(url, wc.getTitle() === url ? '' : wc.getTitle(), current?.tab === tab && by !== 'user' ? 'agent' : by);
     }
     // the tab is no longer "restored" once anything else navigates it
@@ -828,9 +841,9 @@ function parseOrigins(lines: string[]): string[] {
   return [...out];
 }
 
-async function startTask(text: string, origins?: string[]) {
+async function startTask(text: string, origins?: string[], opts: StartOpts = {}) {
   if (current) throw new Error('a task is already running');
-  const tab = tabs.active();
+  const tab = opts.tab ?? tabs.active();
   if (!tab) throw new Error('no active tab');
   deniedFlows = new Set();
   tabs.setGate(tab.id, 'post-task');
@@ -853,17 +866,24 @@ async function startTask(text: string, origins?: string[]) {
     },
     onUpdate: (u) => sendUI('agent:update', u),
   });
-  current = { task, tab };
+  current = { task, tab, ...(opts.mcp ? { mcp: opts.mcp } : {}) };
   // the mail gate refuses new connections from here on; drop the ones opened before the task
   mailController?.disconnectAll();
   // and a remote-image allowance in the mail HTML view ends: the message reloads blocked
   mailView?.revokeRemote();
   tabs.setAgentTab(tab.id);
   sendUI('agent:update', { taskId: task.id, status: 'started', step: 0 });
+  let result: TaskResult = { taskId: task.id, status: 'failed', answer: 'the task ended without a result', steps: 0, confirmations: [] };
   void task
     .run()
-    .then((r) => sendUI('agent:done', r))
-    .catch((e) => sendUI('agent:done', { taskId: task.id, status: 'failed', answer: String(e) }))
+    .then((r) => {
+      result = r;
+      sendUI('agent:done', r);
+    })
+    .catch((e) => {
+      result = { ...result, answer: String(e) };
+      sendUI('agent:done', { taskId: task.id, status: 'failed', answer: String(e) });
+    })
     .finally(() => {
       broker.denyAll('deny');
       current = null;
@@ -881,6 +901,7 @@ async function startTask(text: string, origins?: string[]) {
           .catch(() => undefined);
       }
       sendUI('state', state());
+      opts.onEnd?.(result);
     });
   return task.id;
 }
@@ -920,6 +941,7 @@ function registerIpc() {
   registerMiscIpc(on, rt);
   xray = registerXrayIpc(on, rt);
   chat = registerChatIpc(on, rt);
+  mcp = registerMcp(on, rt);
 }
 
 
@@ -953,6 +975,9 @@ broker = new ConfirmBroker((channel, payload) => {
   // a pending confirmation is chrome UI a native view must never cover
   mailView?.update();
 }, () => settings.agent.confirmTimeoutMs);
+// a confirmation raised while an MCP client's task runs names that client (dialog and phone)
+// (not a profile deletion: that is the user's own request, made in this window)
+broker.decorate = (r) => (current?.mcp && !r.client && r.kind !== 'profile' ? { ...r, client: current.mcp.client } : r);
 registerIpc();
 
 const size = /^(\d{3,5})x(\d{3,5})$/.exec(process.env.GUARDED_WINDOW_SIZE ?? '');
@@ -965,9 +990,9 @@ win = new BrowserWindow({
 });
 const api = {
   /** a URL handed over by the OS (desktop entry / second instance): a new tab, normal navigation path */
-  openUrl: (url: string) => {
+  openUrl: (url: string, background = false) => {
     if (!/^https?:\/\//i.test(url)) return;
-    const t = tabs.create(url);
+    const t = tabs.create(url, { background });
     t.navSource = 'user';
   },
   proxyPort: proxy.port,
@@ -1104,6 +1129,8 @@ const api = {
   get taskRunning() {
     return !!current;
   },
+  /** this profile's MCP endpoint for userData/mcp.json, or null when MCP is off */
+  mcpInfo: () => mcp?.info() ?? null,
 };
 // registered BEFORE the UI loads: the renderer's first IPC calls must find this profile
 ctx.register(api);
@@ -1149,6 +1176,8 @@ sendUI('panels', {
   tabStrip: settings.general.tabStrip,
   inset: tabs.insets(),
 });
+// the MCP server (only if this profile turned it on) and phone approvals (only if configured)
+await mcp!.start();
 
 function windowTitle() {
   return `Guarded Browser — ${profile().name}`;
@@ -1166,7 +1195,7 @@ async function dispose() {
   }
   // a clean exit marks the session clean, so the next launch does not show a crash notice
   try {
-    const list = tabs?.list() ?? [];
+    const list = (tabs?.list() ?? []).filter((t) => !t.ephemeral);
     const activeIndex = Math.max(0, list.findIndex((t) => t.active));
     const tiles = tabs?.tileState();
     const tiling = tiles
@@ -1189,6 +1218,7 @@ async function dispose() {
   else history.flush();
   if (current) stopTask();
   broker.denyAll('deny');
+  await mcp?.dispose();
   unsubscribeFeeds();
   await proxy.close();
 }

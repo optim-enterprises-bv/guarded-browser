@@ -38,6 +38,10 @@ export interface TabInfo {
   audible: boolean;
   /** the tab is muted by the user */
   muted: boolean;
+  /** set on a tab an MCP client's task runs in (item 3): the client's name, shown as "MCP: <name>" */
+  mcp: string | null;
+  /** the tab runs in a throwaway in-memory session (an MCP task's default), not the profile's */
+  ephemeral: boolean;
 }
 
 /** What the chrome UI needs to draw pane frames, headers and dividers around the page views. */
@@ -69,6 +73,10 @@ export class Tab {
    *  did-navigate), not before, so the gated document's pagehide still runs gated. `leaving` is
    *  that document's origin, for the tombstone. */
   gateLiftPending?: { leaving: string | null };
+  /** the MCP client whose task this tab runs (item 3); browser-set at creation, never page-set */
+  mcpClient?: string;
+  /** true when the tab's session is a per-task in-memory partition (not the profile's) */
+  ephemeral = false;
   constructor(
     readonly id: number,
     readonly view: WebContentsView,
@@ -128,6 +136,8 @@ export class TabManager {
       agent: t.id === this.agentTabId,
       audible: t.wc.isCurrentlyAudible(),
       muted: t.wc.isAudioMuted(),
+      mcp: t.mcpClient ?? null,
+      ephemeral: t.ephemeral,
     }));
   }
 
@@ -487,7 +497,7 @@ export class TabManager {
     }
   }
 
-  create(url?: string, opts: { background?: boolean } = {}): Tab {
+  create(url?: string, opts: { background?: boolean; session?: Session; mcpClient?: string } = {}): Tab {
     return this.createAt(url, opts);
   }
 
@@ -497,10 +507,11 @@ export class TabManager {
    * `create()`. The new tab is a fresh document: no security state is carried over from whatever
    * tab used to occupy this position.
    */
-  createAt(url?: string, opts: { background?: boolean; at?: number } = {}): Tab {
+  createAt(url?: string, opts: { background?: boolean; at?: number; session?: Session; mcpClient?: string } = {}): Tab {
     const view = new WebContentsView({
       webPreferences: {
-        session: this.session,
+        // an MCP task's tab may get its own throwaway session (item 3); every other tab is the profile's
+        session: opts.session ?? this.session,
         contextIsolation: true,
         sandbox: true,
         nodeIntegration: false,
@@ -510,6 +521,8 @@ export class TabManager {
       },
     });
     const tab = new Tab(++this.seq, view);
+    if (opts.mcpClient) tab.mcpClient = opts.mcpClient;
+    if (opts.session && opts.session !== this.session) tab.ephemeral = true;
     const at = opts.at === undefined ? this.tabs.length : Math.max(0, Math.min(Math.round(opts.at), this.tabs.length));
     this.tabs.splice(at, 0, tab);
     this.win.contentView.addChildView(view);

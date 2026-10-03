@@ -12,6 +12,8 @@ import { initStart } from './start';
 import { initWave2 } from './wave2';
 import { initXray } from './xray';
 import { initChat } from './chat';
+import { initMcpSettings } from './mcp';
+import { shownValue } from '../core/confirm-text';
 
 interface Bridge {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
@@ -34,7 +36,7 @@ function el(tag: string, attrs: Record<string, string> = {}, ...children: Array<
 }
 
 // ---------- tabs & navigation ----------
-interface TabInfo { id: number; title: string; url: string; loading: boolean; active: boolean; guardFlags: number; canGoBack: boolean; canGoForward: boolean; pane: number | null; selected: boolean; agent: boolean; audible: boolean; muted: boolean }
+interface TabInfo { id: number; title: string; url: string; loading: boolean; active: boolean; guardFlags: number; canGoBack: boolean; canGoForward: boolean; pane: number | null; selected: boolean; agent: boolean; audible: boolean; muted: boolean; mcp: string | null; ephemeral: boolean }
 let lastTabs: TabInfo[] = [];
 /** how many closed tabs Ctrl+Shift+T could bring back (shown in the tab menu) */
 let closedTabCount = 0;
@@ -54,6 +56,8 @@ function renderTabs(list: TabInfo[]) {
     };
     const tab = el('div', { class: `tab${t.active ? ' active' : ''}${t.selected ? ' selected' : ''}`, 'data-testid': 'tab', 'data-tab-id': String(t.id), title: t.url },
       ...(t.agent ? [el('span', { class: 'lock-agent-chip', title: 'the agent is operating this tab' }, 'AGENT')] : []),
+      // browser-set marker of an MCP client's task tab (the name is the client's own, so it is quoted)
+      ...(t.mcp ? [el('span', { class: 'mcp-chip', 'data-testid': 'tab-mcp', title: t.ephemeral ? 'an MCP client task in an empty throwaway session' : 'an MCP client task in this profile' }, `MCP: \u201c${t.mcp.slice(0, 40)}\u201d`)] : []),
       ...(t.guardFlags ? [el('span', { class: 'lock-flag', title: 'content withheld by the guard' }, '!')] : []),
       ...(t.pane ? [el('span', { class: 'pnum' }, `[${t.pane}]`)] : []),
       ...(t.audible || t.muted ? [el('span', { class: 'audio-chip', title: t.muted ? 'Muted' : 'Playing audio' }, t.muted ? '\u{1F507}' : '\u{1F50A}')] : []),
@@ -134,6 +138,7 @@ function renderPanes(g: Geometry) {
     // style, so a title reading "AGENT ACTIVE" never looks like the real (black / yellow) agent header
     const head = el('div', { class: `phead ${p.agent ? 'lock-agent-head' : 'lock-pane-head'}` },
       ...(p.agent ? [el('span', { class: 'lock-agent-badge', 'data-testid': 'agent-active-badge' }, 'AGENT ACTIVE')] : []),
+      ...(t?.mcp ? [el('span', { class: 'mcp-chip', 'data-testid': 'pane-mcp' }, `MCP: \u201c${t.mcp.slice(0, 40)}\u201d${t.ephemeral ? ' (throwaway session)' : ' (your profile)'}`)] : []),
       ...(p.pane ? [el('span', { class: 'pnum' }, `pane ${p.pane}`)] : []),
       el('span', { class: 'ptitle', 'data-testid': 'pane-title' }, `page title: \u201c${(t?.title ?? '').slice(0, 120)}\u201d`));
     head.onclick = () => void gb.invoke('tabs:activate', p.tabId);
@@ -368,6 +373,9 @@ function showConfirm() {
   // which tab / pane asks: browser-generated label; the tab title is page text, so it is quoted
   const src = $('c-source');
   src.replaceChildren(el('strong', {}, c.source?.label ?? 'unknown'), ...(c.source?.title ? [' ', el('q', { class: 'small' }, c.source.title)] : []));
+  // another AI program (MCP client) asked: its self-chosen name, quoted; it cannot see this dialog
+  $('c-client-row').classList.toggle('hidden', !c.client);
+  $('c-client').replaceChildren(...(c.client ? [el('q', {}, c.client), ' (MCP client: another AI program; it cannot see or answer this)'] : []));
   $('c-action').textContent = c.action;
   $('c-target').textContent = c.target;
   $('c-dest').textContent = c.destination ?? '(stays in this page)';
@@ -377,7 +385,7 @@ function showConfirm() {
     const table = el('table', {}, el('tr', {}, el('th', {}, 'field'), el('th', {}, 'exact value'), el('th', {}, 'taint'), el('th', {}, 'provenance')));
     for (const v of c.values) {
       const prov = v.provenance.map((p) => `${p.source}${p.url ? ` @ ${p.url}` : ''}${p.note ? ` (${p.note})` : ''} ${p.timestamp}`).join('; ');
-      table.append(el('tr', {}, el('td', {}, v.field ?? ''), el('td', {}, el('code', {}, v.masked ? v.value.replace(/[^•( )a-z]/g, '•') : v.value)), el('td', { class: v.label }, v.label, ...(v.taintIds?.length ? [el('div', { class: 'taint-marker', 'data-testid': 'taint-marker' }, `contains your data (${v.taintIds.join(', ')})`)] : [])), el('td', { class: 'small' }, prov)));
+      table.append(el('tr', {}, el('td', {}, v.field ?? ''), el('td', {}, el('code', {}, shownValue(v))), el('td', { class: v.label }, v.label, ...(v.taintIds?.length ? [el('div', { class: 'taint-marker', 'data-testid': 'taint-marker' }, `contains your data (${v.taintIds.join(', ')})`)] : [])), el('td', { class: 'small' }, prov)));
     }
     vals.append(table);
   }
@@ -436,6 +444,9 @@ function summarize(e: any): { text: string; cls: string } {
     case 'egress': if (e.layer === 'reputation') return { text: `REPUTATION ${e.decision} ${e.host}: ${e.reason}`, cls: e.decision === 'block' ? 'block' : '' };
       return { text: `${e.layer} ${e.decision} ${e.method} ${e.host}: ${e.reason}${e.taintIds ? ` [${e.taintIds.join(',')}]` : ''}`, cls: e.decision === 'block' ? 'block' : '' };
     case 'chat': return { text: `reply (${e.replyChars ?? 0} chars) about ${(e.urls ?? []).join(', ') || 'no page'}: ${e.pageChars ?? 0} page chars, ${e.removed ?? 0} removed by the guard${e.screened === false ? ' (not screened)' : ''}${e.usedFallback ? ', via cloud fallback' : ''}`, cls: e.removed ? 'confirm' : '' };
+    // item 3: the client name is the client's own text (quoted); the task text is never in these events
+    case 'mcp': return { text: `${e.client ? `\u201c${e.client}\u201d ` : ''}${e.tool ?? ''} ${e.status ?? ''}${e.http ? ` (HTTP ${e.http}: ${e.reason})` : ''}${typeof e.taskChars === 'number' ? `, task ${e.taskChars} chars` : ''}${e.sites?.length ? `, sites ${e.sites.join(' ')}` : ''}${e.session ? `, ${e.session} session` : ''}${e.approval ? `, ${e.approval} ${e.outcome}` : ''}`, cls: ['refused', 'busy', 'denied', 'failed'].includes(e.status) ? 'deny' : '' };
+    case 'phone': return { text: `${e.what ?? ''}${e.outcome ? ` ${e.outcome}` : ''}${e.accepted === false ? ' (not pending)' : ''}${e.reason ? `: ${e.reason}` : ''}${e.error ? `: ${e.error}` : ''}`, cls: e.error || e.reason ? 'deny' : '' };
     case 'action-result': return { text: `${e.action} ${e.ok ? 'ok' : `failed ${e.detail ?? ''}`}`, cls: e.ok ? '' : 'deny' };
     default: return { text: JSON.stringify(e).slice(0, 200), cls: '' };
   }
@@ -464,6 +475,7 @@ function field(label: string, path: string, value: unknown, type = 'text') {
 }
 
 async function openSettings() {
+  void mcpSettings.refresh();
   current = await gb.invoke('settings:get');
   const s = current!;
   const form = $('settings-form');
@@ -510,6 +522,7 @@ function setPath(obj: any, path: string, value: unknown) {
   o[parts.at(-1)!] = value;
 }
 
+const mcpSettings = initMcpSettings(gb);
 $('open-settings').onclick = () => void openSettings();
 $('s-close').onclick = () => {
   $('settings').classList.add('hidden');

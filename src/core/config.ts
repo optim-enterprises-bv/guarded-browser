@@ -79,6 +79,14 @@ export interface Settings {
   translate: TranslateSettings;
   /** unpacked extensions (ticket 32) — outside the threat model, warned about in the UI */
   extensions: { enabled: boolean };
+  /** "Allow other AI agents (MCP)" (item 3): OFF by default; the server runs only while this is on */
+  mcp: { enabled: boolean };
+  /**
+   * Phone approvals over Telegram (item 3): OFF by default. `scope` 'mcp' (default) sends only
+   * confirmations of MCP tasks; 'all' every agent-task confirmation. The bot token is NOT here: it
+   * lives in phone-secret.json (0600) next to this file and never reaches the renderer.
+   */
+  phone: { enabled: boolean; scope: 'mcp' | 'all'; chatId: string };
 }
 
 const localEndpoint = (): Endpoint => ({
@@ -115,6 +123,8 @@ export function defaultSettings(): Settings {
     hibernation: defaultHibernation(),
     translate: defaultTranslate(),
     extensions: { enabled: true },
+    mcp: { enabled: false },
+    phone: { enabled: false, scope: 'mcp', chatId: '' },
   };
 }
 
@@ -189,6 +199,13 @@ export function loadSettings(file: string, opts: { onLoadError?: (message: strin
     s.translate = tr.success ? tr.data : defaultTranslate();
     s.gestures = { enabled: s.gestures?.enabled !== false };
     s.extensions = { enabled: s.extensions?.enabled !== false };
+    // both are opt-in: only an explicit `true` turns them on
+    s.mcp = { enabled: s.mcp?.enabled === true };
+    s.phone = {
+      enabled: s.phone?.enabled === true,
+      scope: s.phone?.scope === 'all' ? 'all' : 'mcp',
+      chatId: /^\d{1,20}$/.test(String(s.phone?.chatId ?? '')) ? String(s.phone.chatId) : '',
+    };
     return s;
   } catch {
     return defaultSettings();

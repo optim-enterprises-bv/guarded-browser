@@ -3,7 +3,8 @@
 // running task, the tab manager, ...) is a GETTER onto the runtime's own variable, so a module always
 // sees the live value and never a copy taken when it was created.
 
-import type { BrowserWindow } from 'electron';
+import type { BrowserWindow, Session } from 'electron';
+import type { TaskResult } from '../../core/agent';
 import type { AgentTask } from '../../core/agent';
 import type { AuditLog } from '../../core/audit';
 import type { BookmarkStore } from '../../core/bookmarks';
@@ -33,6 +34,21 @@ import type { MailHtmlView } from '../mail/html-view';
 import type { Handler, RuntimeContext } from '../runtime';
 import type { Tab, TabManager } from '../tabs';
 
+export interface CurrentTask {
+  task: AgentTask;
+  tab: Tab;
+  mcp?: { client: string; record: string };
+}
+
+export interface StartOpts {
+  /** run in this tab instead of the active one (an MCP task's own tab) */
+  tab?: Tab;
+  /** the MCP client and its task record, when an MCP client started the task */
+  mcp?: { client: string; record: string };
+  /** called once the task has ended and the runtime has let go of it */
+  onEnd?: (r: TaskResult) => void;
+}
+
 export interface RuntimeDeps {
   // ---- live state (getters onto runtime.ts's variables) ----
   /** settable: settings:save replaces the whole object */
@@ -42,8 +58,10 @@ export interface RuntimeDeps {
   readonly audit: AuditLog;
   readonly egress: EgressController;
   readonly broker: ConfirmBroker;
-  /** the running agent task and the tab it drives, or null */
-  readonly current: { task: AgentTask; tab: Tab } | null;
+  /** the running agent task and the tab it drives, or null; `mcp` when an MCP client started it */
+  readonly current: CurrentTask | null;
+  /** this profile's egress proxy port (an MCP task's throwaway session is pointed at it too) */
+  readonly proxyPort: number;
   /** webRequest-layer flows the user denied during the current task */
   readonly deniedFlows: Set<string>;
   /** gesture trail from the MAIN process's own input events; never page-reported (ticket 16) */
@@ -83,7 +101,11 @@ export interface RuntimeDeps {
   state(): unknown;
   reputationState(): unknown;
   stopTask(): void;
-  startTask(text: string, origins?: string[]): Promise<string>;
+  startTask(text: string, origins?: string[], opts?: StartOpts): Promise<string>;
+  /** the webRequest / download / permission wiring, for a session other than the profile's (MCP) */
+  setupEgress(ses: Session): void;
+  /** open a URL in a new tab through the user-navigation path (reputation interstitial applies) */
+  openUserUrl(url: string, background?: boolean): void;
   previewOrigins(text: string): string[];
   closeTab(id: number): void;
   reopenClosed(): { ok: boolean; url?: string };

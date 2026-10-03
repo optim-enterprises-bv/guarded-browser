@@ -66,6 +66,8 @@ export const RUNTIME_CHANNELS = [
   'xray:toggle', 'xray:scan', 'xray:clear', 'xray:state', 'xray:reveal',
   // AI chat (item 2): request/response from the chrome; replies are pushed on the 'chat' event
   'chat:state', 'chat:send', 'chat:stop', 'chat:clear', 'chat:tabs',
+  // item 3: "Allow other AI agents (MCP)" and phone approvals (the bot token goes in, never out)
+  'mcp:state', 'mcp:set', 'mcp:revoke', 'mcp:copy', 'phone:state', 'phone:set', 'phone:test',
   'nav:go', 'nav:back', 'nav:forward', 'nav:reload', 'agent:preview', 'agent:start', 'agent:stop', 'confirm:answer', 'egress:allow',
   'settings:get', 'settings:save', 'audit:recent', 'reputation:refresh', 'appearance:get', 'appearance:save', 'theme:import', 'theme:import-file', 'theme:export-file',
   'history:list', 'history:delete', 'history:delete-range', 'history:clear-on-exit', 'history:open', 'bookmarks:tree', 'bookmarks:add', 'bookmarks:add-current', 'bookmarks:add-folder', 'bookmarks:update', 'bookmarks:remove', 'bookmarks:move', 'bookmarks:search', 'bookmarks:set-bar', 'bookmarks:is-bookmarked', 'bookmarks:open', 'bookmarks:import', 'bookmarks:import-file', 'bookmarks:export', 'bookmarks:export-file', 'suggest', 'favicon:get', 'chrome:insets', 'chrome:overlay',
@@ -77,5 +79,5 @@ export const INVOKE_CHANNELS: readonly string[] = [...RUNTIME_CHANNELS, ...PROFI
 
 /** Everything main may push to the chrome renderer (`gb.on`). Mail is request/response: no mail text is ever pushed. */
 export const EVENT_CHANNELS = [
-  'state', 'tabs', 'agent:update', 'agent:done', 'confirm:request', 'confirm:clear', 'audit', 'egress', 'fallback', 'reputation', 'geometry', 'appearance', 'site-accent', 'profiles', 'profiles:show-manager', 'bookmarks', 'closed-tabs', 'downloads', 'zoom', 'find:result', 'session:crashed', 'shortcut', 'panels', 'panels:list', 'page:contextmenu', 'stacks', 'workspaces', 'sessions', 'keybindings', 'translate', 'extensions', 'tabstrip', 'gesture', 'history', 'mail', 'xray', 'chat',
+  'state', 'tabs', 'agent:update', 'agent:done', 'confirm:request', 'confirm:clear', 'audit', 'egress', 'fallback', 'reputation', 'geometry', 'appearance', 'site-accent', 'profiles', 'profiles:show-manager', 'bookmarks', 'closed-tabs', 'downloads', 'zoom', 'find:result', 'session:crashed', 'shortcut', 'panels', 'panels:list', 'page:contextmenu', 'stacks', 'workspaces', 'sessions', 'keybindings', 'translate', 'extensions', 'tabstrip', 'gesture', 'history', 'mail', 'xray', 'chat', 'mcp',
 ] as const;

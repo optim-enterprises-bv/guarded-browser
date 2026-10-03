@@ -10,7 +10,9 @@ export type AuditType =
   // wave 2: new surfaces that change what the user (or the agent) can see
   | 'page-actions' | 'panel' | 'hibernate' | 'translate' | 'capture' | 'bundle' | 'extensions' | 'session' | 'workspace' | 'stack'
   // AI capabilities item 2: one event per chat reply (sizes, screening and endpoint; never the text)
-  | 'chat';
+  | 'chat'
+  // item 3: one event per MCP call / refused MCP request, and the phone channel's card lifecycle
+  | 'mcp' | 'phone';
 
 export interface AuditEvent {
   ts: string;

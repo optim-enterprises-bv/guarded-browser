@@ -32,6 +32,8 @@ export interface LaunchOpts {
   mailTestCa?: string;
   /** test only: the file mail's "Attach…" returns instead of opening the system file dialog */
   attachFile?: string;
+  /** test only: the Telegram Bot API base (a loopback fake) for phone approvals */
+  telegramApi?: string;
 }
 
 export interface App {
@@ -82,6 +84,7 @@ export async function launch(o: LaunchOpts): Promise<App> {
   if (o.mailRemoteLoopback) env.GUARDED_TEST_MAIL_LOOPBACK = '1';
   if (o.mailTestCa) env.GUARDED_TEST_MAIL_CA = o.mailTestCa;
   if (o.attachFile) env.GUARDED_TEST_ATTACH_FILE = o.attachFile;
+  if (o.telegramApi) env.GUARDED_TEST_TELEGRAM_API = o.telegramApi;
   env.GUARDED_MODEL_DIR = join(ROOT, '.cache-test', 'models');
   env.GUARDED_DOWNLOAD_DIR = join(userData, 'downloads');
   mkdirSync(env.GUARDED_DOWNLOAD_DIR, { recursive: true });
