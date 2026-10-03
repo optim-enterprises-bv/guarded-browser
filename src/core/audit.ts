@@ -14,7 +14,10 @@ export type AuditType =
   // item 3: one event per MCP call / refused MCP request, and the phone channel's card lifecycle
   | 'mcp' | 'phone'
   // item 4: one event per triage run / bulk action / reply draft (counts and categories; never mail text)
-  | 'triage';
+  | 'triage'
+  // item 5: recipe saves / imports / replay steps, and one event per watcher run (typed values or a
+  // hash; never page text)
+  | 'recipe' | 'replay' | 'watcher';
 
 export interface AuditEvent {
   ts: string;

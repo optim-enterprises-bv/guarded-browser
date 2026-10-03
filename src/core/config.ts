@@ -91,6 +91,12 @@ export interface Settings {
    * lives in phone-secret.json (0600) next to this file and never reaches the renderer.
    */
   phone: { enabled: boolean; scope: 'mcp' | 'all'; chatId: string };
+  /**
+   * Watchers (item 5): which runner opens the watched pages. 'electron' (default) is a hidden
+   * offscreen window in a throwaway session; 'external' drives a SEPARATELY INSTALLED headless
+   * browser (e.g. Lightpanda) over CDP — never bundled — at `externalPath`, started per run.
+   */
+  watchers: { runner: 'electron' | 'external'; externalPath: string; flavor: 'lightpanda' | 'chromium'; timeoutSec: number };
 }
 
 const localEndpoint = (): Endpoint => ({
@@ -129,6 +135,7 @@ export function defaultSettings(): Settings {
     extensions: { enabled: true },
     mcp: { enabled: false },
     phone: { enabled: false, scope: 'mcp', chatId: '' },
+    watchers: { runner: 'electron', externalPath: '', flavor: 'lightpanda', timeoutSec: 60 },
   };
 }
 
@@ -213,6 +220,7 @@ export function loadSettings(file: string, opts: { onLoadError?: (message: strin
       scope: s.phone?.scope === 'all' ? 'all' : 'mcp',
       chatId: /^\d{1,20}$/.test(String(s.phone?.chatId ?? '')) ? String(s.phone.chatId) : '',
     };
+    s.watchers = normalizeWatcherSettings(s.watchers);
     return s;
   } catch {
     return defaultSettings();
@@ -233,6 +241,19 @@ export function chatRole(rawChat: unknown, merged: RoleConfig, reader: RoleConfi
   if (rawChat && typeof rawChat === 'object' && isEndpoint(merged?.primary) && isEndpoint(fb) && typeof fb.enabled === 'boolean') return merged;
   const copy = JSON.parse(JSON.stringify(reader)) as RoleConfig;
   return { primary: copy.primary, fallback: { ...copy.fallback, enabled: false } };
+}
+
+/** The watcher runner settings, validated: the external runner only with an absolute path. */
+export function normalizeWatcherSettings(w: unknown): Settings['watchers'] {
+  const r = (w ?? {}) as Record<string, unknown>;
+  const path = typeof r.externalPath === 'string' && r.externalPath.startsWith('/') ? r.externalPath.replace(/[\u0000-\u001f]/g, '').slice(0, 1024) : '';
+  const t = Number(r.timeoutSec);
+  return {
+    runner: r.runner === 'external' && path ? 'external' : 'electron',
+    externalPath: path,
+    flavor: r.flavor === 'chromium' ? 'chromium' : 'lightpanda',
+    timeoutSec: Number.isInteger(t) && t >= 10 && t <= 600 ? t : 60,
+  };
 }
 
 export function saveSettings(file: string, s: Settings): void {

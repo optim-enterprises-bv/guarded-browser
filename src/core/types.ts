@@ -44,11 +44,17 @@ export interface SnapshotElement {
   formHasPassword?: boolean;
   isSubmit?: boolean;
   value?: string;
+  /** names and types of the element's form's controls (no values): a recipe's recorded form shape */
+  formShape?: Array<{ name: string; type: string }>;
+  /** locator fields for recipes (src/core/locator.ts); never rendered for the planner */
+  loc?: { landmark?: string; path?: string; cls?: string; id?: string; fieldName?: string; label?: string; href?: string };
 }
 
 export interface Snapshot {
   url: string;
   title: string;
+  /** the page's first h1 (else h2), for recipe landmarks; never rendered for the planner */
+  heading?: string;
   elements: SnapshotElement[];
 }
 

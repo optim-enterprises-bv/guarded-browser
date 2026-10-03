@@ -315,6 +315,11 @@ export class EgressController {
     this.refusedPorts = new Set(ports);
   }
 
+  /** the refused loopback ports (a watcher run's own proxy copies them) */
+  refusedPortList(): number[] {
+    return [...this.refusedPorts];
+  }
+
   private refusedLoopback(key: string): boolean {
     const i = key.lastIndexOf(':');
     const port = Number(key.slice(i + 1));

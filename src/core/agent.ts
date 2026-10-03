@@ -66,6 +66,47 @@ export interface AgentDeps {
   policyDisabled?: boolean;
   onGuardFlag?: (url: string, count: number) => void;
   onUpdate?: (u: { taskId: string; status: string; step: number; answer?: string }) => void;
+  /**
+   * Every action that ran and succeeded, with the page it acted on (recipes, item 5). Awaited; a
+   * failure in it is swallowed. Never called for a denied, blocked or failed action.
+   */
+  onExecuted?: (ev: ExecutedAction) => Promise<void> | void;
+}
+
+/** One executed action for the recipe recorder (see AgentDeps.onExecuted). */
+export interface ExecutedAction {
+  /** with handles resolved: what actually ran */
+  action: PlannerAction;
+  before: Snapshot | null;
+  after: Snapshot | null;
+  element?: SnapshotElement;
+  /** type / select: where the typed value came from, and its task sensitivity */
+  value?: { text: string; source: 'task' | 'reader' | 'agent'; sensitivity?: string };
+  /** extract: the screened reader output (strings may be withheld) */
+  extracted?: Record<string, unknown>;
+}
+
+/**
+ * What an approved action unlocks, shared by the agent and recipe replay: an approved new origin
+ * joins the allowlist; an approved form submission lets through ONE request with this method, URL
+ * and exactly these fields; the values shown in the dialog may flow to that destination.
+ */
+export function applyApprovalEffects(
+  policy: PolicyResult,
+  action: PlannerAction,
+  el: SnapshotElement | undefined,
+  fields: FormField[] | undefined,
+  t: { approveOrigin(origin: string): void; egress?: EgressController },
+) {
+  if (policy.newOrigin) t.approveOrigin(policy.newOrigin);
+  if (el && fields && policy.destination && (action.name === 'submit' || (action.name === 'click' && el.isSubmit))) {
+    t.egress?.approveRequest({ method: el.formMethod === 'post' ? 'POST' : 'GET', url: policy.destination, fields, enctype: el.formEnctype });
+  }
+  if (policy.destination && t.egress) {
+    const text = [policy.destination, ...policy.values.map((v) => v.value)].join('\n');
+    const ids = [...new Set([...policy.values.flatMap((v) => v.taintIds), ...t.egress.idsIn(text)])];
+    t.egress.confirmFlow(ids, policy.destination);
+  }
 }
 
 export type TaskStatus = 'finished' | 'stopped' | 'failed' | 'step-limit' | 'timeout';
@@ -104,6 +145,8 @@ export class AgentTask {
   private readonly contextOrigins = new Set<string>();
   private readonly confirmations: TaskResult['confirmations'] = [];
   private lastSnapshot: Snapshot | null = null;
+  /** the screened data of the last successful extract (for the recipe recorder only) */
+  private lastExtract: Record<string, unknown> | null = null;
   private stopped = false;
   private snapshotMsgIdx: number[] = [];
 
@@ -383,25 +426,33 @@ export class AgentTask {
       }
       this.recordApproval(policy, resolved, el, formFields);
     }
+    const before = this.lastSnapshot;
+    let out: { text: string; summary: string; observation?: string };
     try {
-      return await this.execute(resolved);
+      out = await this.execute(resolved);
     } finally {
       // one-shot request approvals live exactly as long as the action that earned them
       this.deps.egress?.clearApprovals();
     }
+    if (this.deps.onExecuted && (out.summary === 'ok' || out.summary.startsWith('extracted '))) {
+      let value: ExecutedAction['value'];
+      if (resolved.name === 'type' || resolved.name === 'select') {
+        const text = String(resolved.name === 'type' ? resolved.args.text ?? '' : resolved.args.value ?? '');
+        const l = this.taint.labelPlannerText(text, [...this.contextOrigins]);
+        value = { text, source: used.length ? 'reader' : l.label === 'trusted' ? 'task' : 'agent', sensitivity: this.taint.sensitiveIn(text)[0]?.sensitivity };
+      }
+      const extracted = resolved.name === 'extract' ? this.lastExtract ?? undefined : undefined;
+      try {
+        await this.deps.onExecuted({ action: resolved, before, after: this.lastSnapshot, element: el, value, extracted });
+      } catch {
+        /* recording never affects the task */
+      }
+    }
+    return out;
   }
 
   private recordApproval(policy: PolicyResult, action: PlannerAction, el: SnapshotElement | undefined, fields: FormField[] | undefined) {
-    if (policy.newOrigin) this.approveOrigin(policy.newOrigin);
-    // an approved form submission lets through ONE request with this method, URL and exactly these fields
-    if (el && fields && policy.destination && (action.name === 'submit' || (action.name === 'click' && el.isSubmit))) {
-      this.deps.egress?.approveRequest({ method: el.formMethod === 'post' ? 'POST' : 'GET', url: policy.destination, fields, enctype: el.formEnctype });
-    }
-    if (policy.destination && this.deps.egress) {
-      const text = [policy.destination, ...policy.values.map((v) => v.value)].join('\n');
-      const ids = [...new Set([...policy.values.flatMap((v) => v.taintIds), ...this.deps.egress.idsIn(text)])];
-      this.deps.egress.confirmFlow(ids, policy.destination);
-    }
+    applyApprovalEffects(policy, action, el, fields, { approveOrigin: (o) => this.approveOrigin(o), egress: this.deps.egress });
   }
 
   private async execute(action: PlannerAction): Promise<{ text: string; summary: string; observation?: string }> {
@@ -474,6 +525,7 @@ export class AgentTask {
       return { text: 'extract failed: reader output did not match the schema', summary: 'failed' };
     }
     const data = await this.screenValues(r.data, url);
+    this.lastExtract = data;
     const tainted = this.taint.wrapReaderOutput(data, url);
     // Strings stay in code; the planner (and, via history, the judge) only gets handles.
     const { id, view } = this.handles.add(data);
