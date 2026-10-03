@@ -5,7 +5,8 @@
 
 import type { BrowserWindow, Session } from 'electron';
 import type { TaskResult } from '../../core/agent';
-import type { AgentTask } from '../../core/agent';
+import type { TaintRegistry } from '../../core/taint';
+import type { Recipe } from '../../core/recipe';
 import type { AuditLog } from '../../core/audit';
 import type { BookmarkStore } from '../../core/bookmarks';
 import type { SortMode, TrashStore } from '../../core/bookmarks-panel';
@@ -34,8 +35,29 @@ import type { MailHtmlView } from '../mail/html-view';
 import type { Handler, RuntimeContext } from '../runtime';
 import type { Tab, TabManager } from '../tabs';
 
+/**
+ * What the runtime needs of a running task: an agent task (core/agent.ts) or a recipe replay
+ * (core/recipe-replay.ts). Both run under the same lifecycle: post-task gate, egress task mode,
+ * mail refused, confirmations named after the task's pane.
+ */
+export interface TaskLike {
+  readonly id: string;
+  /** the text shown as the task (the user's task, or "Replay recipe …") */
+  readonly task: string;
+  readonly taint: TaintRegistry;
+  readonly allowedOrigins: Set<string>;
+  approveOrigin(origin: string): void;
+  stop(): void;
+  /**
+   * Set on a replay: the browser layer refused something the recipe did not do (a popup, a
+   * download, a page-initiated navigation to another origin) and the replay stops on it, instead
+   * of the user being asked as during an agent task.
+   */
+  pageEvent?(kind: 'popup' | 'download' | 'new-origin', detail: string): void;
+}
+
 export interface CurrentTask {
-  task: AgentTask;
+  task: TaskLike;
   tab: Tab;
   mcp?: { client: string; record: string };
 }
@@ -102,6 +124,12 @@ export interface RuntimeDeps {
   reputationState(): unknown;
   stopTask(): void;
   startTask(text: string, origins?: string[], opts?: StartOpts): Promise<string>;
+  /** replay a recipe in the active tab (item 5): no model, the agent task's lifecycle and gates */
+  startReplay(recipe: Recipe, params: Record<string, string>): Promise<string>;
+  /** this profile's own session (watchers read cookies from it for "use my login", nothing else) */
+  profileSession(): Session;
+  /** send a plain text to the phone channel if it is configured (watchers); false when it is not */
+  phoneNotify(text: string): Promise<boolean>;
   /** the webRequest / download / permission wiring, for a session other than the profile's (MCP) */
   setupEgress(ses: Session): void;
   /** open a URL in a new tab through the user-navigation path (reputation interstitial applies) */

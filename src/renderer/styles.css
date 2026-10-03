@@ -474,3 +474,28 @@ button.link-inline { border: none; background: none; padding: 0; color: var(--ac
 /* item 3: an MCP client's task tab. Browser chrome; the quoted name is the client's own. */
 .mcp-chip { background: #0b3d91 !important; color: #ffffff !important; font-size: 10px !important; font-weight: 700 !important; padding: 1px 4px !important; border-radius: 3px !important; margin-right: 4px; white-space: nowrap; }
 #mcp-command, #mcp-hermes { width: 100%; font-family: ui-monospace, monospace; font-size: 11px; }
+
+/* ---------- recipes and watchers (item 5) ---------- */
+.side.side-chat, .side.side-auto { width: 400px; }
+.auto-panel { display: flex; flex-direction: column; gap: 6px; overflow: auto; }
+.auto-panel p { margin: 0; }
+.auto-panel label { display: block; margin: 2px 0; }
+.auto-box { border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; background: var(--card); display: flex; flex-direction: column; gap: 4px; }
+.auto-box > summary { cursor: pointer; font-weight: 600; }
+.auto-list { display: flex; flex-direction: column; gap: 6px; }
+.auto-item { border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; background: var(--card); font-size: 12px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.auto-item .auto-title { font-weight: 700; font-size: 13px; }
+.auto-item .row { flex-wrap: wrap; gap: 4px; }
+.auto-item button { font-size: 11px; padding: 2px 8px; }
+.auto-steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
+.auto-why { color: var(--muted); font-size: 11px; display: block; }
+.auto-badge { font-size: 10px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); white-space: nowrap; }
+.auto-badge.on { background: var(--ok); color: #fff; border-color: var(--ok); }
+.auto-badge.paused { background: var(--warn); color: #fff; border-color: var(--warn); }
+.auto-badge.err { background: var(--danger); color: #fff; border-color: var(--danger); }
+.auto-hist { border-collapse: collapse; width: 100%; font-size: 11px; }
+.auto-hist td, .auto-hist th { border-top: 1px solid var(--line); padding: 2px 4px; text-align: left; vertical-align: top; }
+.mono { font-family: ui-monospace, monospace; font-size: 11px; width: 100%; }
+.recipe-save { margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }
+.recipe-save ol { margin: 0; padding-left: 18px; }
+.auto-panel .warn, .recipe-save .warn { color: var(--warn); }

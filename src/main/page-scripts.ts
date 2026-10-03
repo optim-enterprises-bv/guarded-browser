@@ -1,83 +1,37 @@
 // Scripts executed inside pages in an ISOLATED world (not the page's main world), so page JS
 // cannot read or tamper with our ref map or override the functions we call.
 
+import { ELEMENT_HELPERS_JS } from '../core/locator';
+
 export const ISOLATED_WORLD = 1717;
 
 const PRELUDE = `
 if (!window.__gb) window.__gb = { refs: new Map() };
 `;
 
-/** Accessibility-style snapshot of visible interactive elements. Names are raw page data. */
+/** Accessibility-style snapshot of visible interactive elements. Names are raw page data. Each
+ *  element also carries its locator fields (`loc`, src/core/locator.ts) so a finished task can be
+ *  saved as a recipe; the planner never sees them (agent.ts renders only the sanitised view). */
 export const SNAPSHOT_JS = `(() => {
 ${PRELUDE}
+${ELEMENT_HELPERS_JS}
 const gb = window.__gb;
 gb.refs = new Map();
-const SEL = 'a[href],button,input,textarea,select,summary,[role=button],[role=link],[role=checkbox],[role=tab],[role=menuitem],[role=option],[contenteditable=true]';
-const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim().slice(0, 160);
-const visible = (el) => {
-  const r = el.getBoundingClientRect();
-  if (r.width <= 0 || r.height <= 0) return false;
-  const cs = getComputedStyle(el);
-  return cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) > 0.05;
-};
-const labelOf = (el) => {
-  const aria = el.getAttribute('aria-label');
-  if (aria) return aria;
-  const lb = el.getAttribute('aria-labelledby');
-  if (lb) { const t = lb.split(/\\s+/).map((id) => document.getElementById(id)?.innerText || '').join(' '); if (t.trim()) return t; }
-  if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) return l.innerText; }
-  const wrap = el.closest('label'); if (wrap) return wrap.innerText;
-  if (el.tagName === 'INPUT' && ['submit','button','reset'].includes(el.type)) return el.value;
-  if (el.tagName === 'INPUT' && el.type === 'image') return el.alt || el.name || '';
-  const txt = el.innerText; if (txt && txt.trim()) return txt;
-  const img = el.querySelector && el.querySelector('img[alt]'); if (img) return img.alt;
-  return el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('name') || '';
-};
-const ROLES = new Set(${JSON.stringify(['link','button','textbox','searchbox','checkbox','radio','combobox','listbox','option','tab','menuitem','menuitemcheckbox','menuitemradio','switch','slider','spinbutton','treeitem'])});
-const roleOf = (el) => {
-  // the role attribute is page text: only real ARIA roles pass (core re-validates too)
-  const r = (el.getAttribute('role') || '').trim().toLowerCase(); if (r) return ROLES.has(r) ? r : 'generic';
-  const t = el.tagName.toLowerCase();
-  if (t === 'a') return 'link';
-  if (t === 'button' || t === 'summary') return 'button';
-  if (t === 'select') return 'combobox';
-  if (t === 'textarea') return 'textbox';
-  if (t === 'input') {
-    const ty = (el.type || 'text').toLowerCase();
-    if (['submit','button','reset','image'].includes(ty)) return 'button';
-    if (ty === 'checkbox' || ty === 'radio') return ty;
-    return 'textbox';
-  }
-  return 'generic';
-};
 const out = [];
 let n = 0;
-for (const el of document.querySelectorAll(SEL)) {
+for (const el of document.querySelectorAll(GB_SEL)) {
   if (el.tagName === 'INPUT' && el.type === 'hidden') continue;
-  if (!visible(el) || el.disabled) continue;
+  if (!gbVisible(el) || el.disabled) continue;
   const ref = 'e' + (++n);
   gb.refs.set(ref, el);
-  const tag = el.tagName.toLowerCase();
-  const form = el.form || el.closest('form');
-  const inputType = tag === 'input' ? (el.type || 'text').toLowerCase() : undefined;
-  // use the IDL .type: <button type="go"> (invalid) is a submit button in the DOM
-  const isSubmit = !!form && ((tag === 'button' && el.type === 'submit') || (tag === 'input' && ['submit','image'].includes(inputType)));
-  const e = { ref, role: roleOf(el), name: clean(labelOf(el)), tag };
-  if (inputType) e.inputType = inputType;
-  if (tag === 'a' && el.href) e.href = el.href;
-  if (form) {
-    e.inForm = true;
-    // el.formAction falls back to the document URL when the attribute is absent, so check the attribute
-    e.formAction = (isSubmit && el.hasAttribute('formaction') ? el.formAction : form.action) || location.href;
-    e.formMethod = (isSubmit && el.hasAttribute('formmethod') ? el.formMethod : form.method || 'get').toLowerCase();
-    e.formEnctype = (isSubmit && el.hasAttribute('formenctype') ? el.formEnctype : form.enctype || 'application/x-www-form-urlencoded').toLowerCase();
-    e.formHasPassword = !!form.querySelector('input[type=password]');
-  }
-  if (isSubmit) e.isSubmit = true;
+  const e = Object.assign({ ref }, gbFacts(el));
+  const d = gbDescribe(el);
+  if (e.href) d.href = gbHrefKey(e.href);
+  e.loc = d;
   out.push(e);
   if (n >= 300) break;
 }
-return { url: location.href, title: document.title || '', elements: out };
+return { url: location.href, title: document.title || '', heading: gbHeading(), elements: out };
 })()`;
 
 export const PAGE_TEXT_JS = `(() => (document.body ? document.body.innerText : '').slice(0, 60000))()`;

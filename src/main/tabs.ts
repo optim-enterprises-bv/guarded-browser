@@ -6,6 +6,8 @@ import type { ActionOutcome, BrowserDriver } from '../core/agent';
 import type { FormField, Snapshot } from '../core/types';
 import { ISOLATED_WORLD, PAGE_TEXT_JS, SNAPSHOT_JS, actionJs } from './page-scripts';
 import { MARKDOWN_JS, normalizeMdPage, pageMarkdown } from '../core/markdown';
+import { PAGE_INFO_JS, candidatesJs, locateTextJs, toCandidate, toPageInfo, type Candidate, type PageInfo } from '../core/locator';
+import type { ReplayDriver } from '../core/recipe-replay';
 import { MAX_TILES, computeTiles, contentArea, tooSmall, defaultRatios, dragDivider, innerRect, type DividerGeometry, type Rect, type TileLayout, type TileState } from './tile-layout';
 import { TabGuardBook, type TabGuardState } from './tab-guard';
 
@@ -786,7 +788,7 @@ function waitForLoad(wc: WebContents, timeoutMs = 20_000): Promise<void> {
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** BrowserDriver over one tab. All page access goes through the isolated world. */
-export class ElectronDriver implements BrowserDriver {
+export class ElectronDriver implements BrowserDriver, ReplayDriver {
   constructor(private readonly tab: Tab) {}
 
   private get wc() {
@@ -865,5 +867,29 @@ export class ElectronDriver implements BrowserDriver {
   async formFields(ref: string): Promise<FormField[]> {
     const r = await this.run<{ ok: boolean; fields?: FormField[] }>(actionJs('formFields', ref)).catch(() => ({ ok: false, fields: [] }));
     return r.fields ?? [];
+  }
+
+  // ---- recipes (item 5): locators instead of planner refs ----
+
+  async pageInfo(): Promise<PageInfo> {
+    await waitForLoad(this.wc);
+    try {
+      return toPageInfo(await this.run<unknown>(PAGE_INFO_JS), this.wc.getURL());
+    } catch {
+      return { url: this.wc.getURL(), title: this.wc.getTitle(), heading: '' };
+    }
+  }
+
+  async candidates(q: { tag: string; interactive: boolean }): Promise<{ info: PageInfo; candidates: Candidate[] }> {
+    await waitForLoad(this.wc);
+    const r = await this.run<{ candidates?: unknown[] }>(candidatesJs({ ...q, layout: true })).catch(() => null);
+    const list = Array.isArray(r?.candidates) ? r!.candidates : [];
+    return { info: toPageInfo(r, this.wc.getURL()), candidates: list.slice(0, 500).map(toCandidate).filter((c): c is Candidate => !!c && /^x\d+$/.test(c.ref)) };
+  }
+
+  /** the smallest visible element whose text contains `value` (recording an extract), or null */
+  async locateText(value: string): Promise<Candidate | null> {
+    const r = await this.run<unknown>(locateTextJs(value)).catch(() => null);
+    return r ? toCandidate({ ...(r as object), ref: '' }) : null;
   }
 }

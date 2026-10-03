@@ -318,6 +318,46 @@
     </div>
     <p class="muted small chat-about" data-testid="chat-doit-help"><strong>Do it</strong> copies <strong>your</strong> message, not the AI's reply, into the agent's task box for you to edit and run. To use the AI's suggestion as the task, copy it into the task box yourself.</p>
   </section>
+  <section id="recipes-view" class="hidden auto-panel" data-testid="recipes-panel" aria-label="Recipes">
+    <p class="muted small">A recipe replays the steps of a task you ran, with <strong>no AI</strong>: no planner, no page reader, no judge. Each step checks the page is the one it was recorded on and stops with a report if anything differs. Every submit, login and new site is confirmed like an agent action.</p>
+    <div id="recipe-run-form" class="auto-box hidden" data-testid="recipe-run-form"></div>
+    <span id="recipes-msg" class="small" data-testid="recipes-msg"></span>
+    <div id="recipes-list" class="auto-list" data-testid="recipes-list"></div>
+    <textarea id="recipe-json" class="hidden mono" readonly rows="8" data-testid="recipe-json"></textarea>
+    <details class="auto-box" data-testid="recipe-import-box"><summary data-testid="recipe-import-open">Import a recipe (JSON)</summary>
+      <textarea id="recipe-import-text" class="mono" rows="4" data-testid="recipe-import-text" spellcheck="false" placeholder="Paste a recipe exported from Guarded Browser"></textarea>
+      <div class="row"><button id="recipe-import" data-testid="recipe-import">Import</button></div>
+    </details>
+  </section>
+  <section id="watchers-view" class="hidden auto-panel" data-testid="watchers-panel" aria-label="Watchers">
+    <p class="muted small">A watcher opens a page on a schedule, reads one value and tells you when it meets your condition. It is <strong>read-only</strong>: it can only open pages and read. No AI is used. Each run uses a throwaway session (no cookies unless you choose “use my login”) behind the egress proxy, limited to the watcher's sites.</p>
+    <div class="row"><button id="watch-pick" class="primary" data-testid="watcher-pick">Watch a value on this page…</button></div>
+    <div id="watch-form" class="auto-box hidden" data-testid="watcher-form">
+      <div id="watch-target" class="small" data-testid="watcher-target"></div>
+      <label class="small">Name <input id="watch-name" data-testid="watcher-name" maxlength="80"></label>
+      <label class="small">Read <select id="watch-kind" data-testid="watcher-kind"><option value="number">a number</option><option value="text-hash">whether the text changes</option><option value="element-text">the text</option></select></label>
+      <label class="small">Notify when it is <select id="watch-cond" data-testid="watcher-condition"><option value="below">below</option><option value="above">above</option><option value="changes">changed</option><option value="contains">containing</option></select>
+        <input id="watch-cond-value" data-testid="watcher-condition-value" size="10"></label>
+      <label class="small">Every <input id="watch-every" type="number" min="5" max="10080" value="60" data-testid="watcher-every"> minutes (at least 5)</label>
+      <label class="small"><input type="checkbox" id="watch-desktop" checked data-testid="watcher-desktop"> desktop notification</label>
+      <label class="small"><input type="checkbox" id="watch-telegram" data-testid="watcher-telegram"> Telegram (the phone-approvals chat, if set up)</label>
+      <label class="small"><input type="checkbox" id="watch-login" data-testid="watcher-login"> use my login on these sites</label>
+      <p id="watch-login-warn" class="small warn hidden" data-testid="watcher-login-warning">“Use my login” copies this profile's cookies for the watcher's sites into its throwaway session at every run, so the sites see you as logged in. The run stays read-only and only reaches these sites; the external runner never gets cookies.</p>
+      <div class="row"><button id="watch-create" class="primary" data-testid="watcher-create">Create watcher</button><button id="watch-cancel" data-testid="watcher-cancel">Cancel</button></div>
+    </div>
+    <span id="watch-msg" class="small" data-testid="watcher-msg"></span>
+    <p id="watch-waiting" class="small warn hidden" data-testid="watcher-waiting"></p>
+    <div id="watch-list" class="auto-list" data-testid="watcher-list"></div>
+    <details id="watch-runner-box" class="auto-box" data-testid="watcher-runner"><summary>Runner</summary>
+      <label class="small"><input type="radio" name="watch-runner" value="electron" id="watch-runner-electron" data-testid="watcher-runner-electron"> Built-in: a hidden window in a throwaway session (default)</label>
+      <label class="small" id="watch-runner-external-label"><input type="radio" name="watch-runner" value="external" id="watch-runner-external" data-testid="watcher-runner-external"> External headless browser over CDP (e.g. Lightpanda)</label>
+      <input id="watch-runner-path" class="mono" data-testid="watcher-runner-path" placeholder="/absolute/path/to/lightpanda" spellcheck="false">
+      <select id="watch-runner-flavor" data-testid="watcher-runner-flavor"><option value="lightpanda">Lightpanda: serve --host --port --http_proxy</option><option value="chromium">Chromium-compatible: --headless --proxy-server</option></select>
+      <div class="row"><button id="watch-runner-save" data-testid="watcher-runner-save">Save</button></div>
+      <p id="watch-runner-why" class="small muted" data-testid="watcher-runner-why"></p>
+      <p class="small muted">Never bundled or downloaded by this browser: install it yourself (Lightpanda is AGPL-3.0). It is started for each run with its HTTP proxy set to the run's egress proxy, listening on 127.0.0.1 on a random port, with an empty temporary home, and killed afterwards. It never gets your cookies; only the value it reads comes back.</p>
+    </details>
+  </section>
 </aside>
 <div id="tile-notice" class="tile-notice hidden" data-testid="tile-notice" role="status"></div>
 <div id="tab-menu" class="menu hidden" data-testid="tab-menu" role="menu"></div>
@@ -372,6 +412,16 @@
     </div>
   </div>
   <div id="answer" class="answer hidden" data-testid="task-answer"></div>
+  <div id="recipe-save" class="recipe-save hidden" data-testid="recipe-save-box">
+    <button id="recipe-save-open" data-testid="recipe-save-open">Save as recipe…</button>
+    <div id="recipe-save-form" class="hidden">
+      <p class="muted small">These steps will replay with no AI. Values marked “asked at every run” are never stored.</p>
+      <ol id="recipe-save-steps" class="small" data-testid="recipe-save-steps"></ol>
+      <p id="recipe-save-skipped" class="small warn hidden" data-testid="recipe-save-skipped"></p>
+      <input id="recipe-save-name" data-testid="recipe-name" maxlength="80" placeholder="Recipe name">
+      <div class="row"><button id="recipe-save-go" class="primary" data-testid="recipe-save">Save recipe</button><button id="recipe-save-cancel" data-testid="recipe-save-cancel">Cancel</button><span id="recipe-save-msg" class="small" data-testid="recipe-save-msg"></span></div>
+    </div>
+  </div>
   <div id="blocked" class="hidden lock-notice" data-testid="blocked-hosts"></div>
   <section id="xray" class="xray hidden" data-testid="xray-panel" aria-label="Injection X-ray">
     <div class="xray-head">

@@ -341,6 +341,22 @@ export function register(on: (channel: string, fn: Handler) => void, rt: Runtime
       applyPhone();
       await applyMcp();
     },
+    /** a watcher's notification (item 5): plain text to the configured chat; false when not configured */
+    async notify(text: string): Promise<boolean> {
+      const token = readToken();
+      if (!rt.settings.phone.enabled || !token || !rt.settings.phone.chatId) return false;
+      const ch = channelFor(token, rt.settings.phone.chatId);
+      try {
+        await ch.call('sendMessage', { chat_id: rt.settings.phone.chatId, text: text.slice(0, 1000), link_preview_options: { is_disabled: true } });
+        rt.audit.write('phone', { what: 'watcher notification', ok: true });
+        return true;
+      } catch (e) {
+        rt.audit.write('phone', { what: 'watcher notification', ok: false, error: (e as Error).message });
+        return false;
+      } finally {
+        ch.close();
+      }
+    },
     info(): McpIndexEntry | null {
       if (!server.running) return null;
       return { profileId: rt.ctx.profile().id, profile: rt.ctx.profile().name, url: `http://127.0.0.1:${server.port}${MCP_PATH}`, token: server.token };

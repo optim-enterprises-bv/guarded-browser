@@ -5,7 +5,7 @@
 type Bridge = { invoke(channel: string, ...args: unknown[]): Promise<any>; on(channel: string, fn: (p: any) => void): void };
 
 /** the sections the shared panel column can show */
-export type SectionId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail' | 'chat';
+export type SectionId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail' | 'chat' | 'recipes' | 'watchers';
 
 interface BNode { type: 'bookmark' | 'folder'; id: string; title: string; url?: string; nickname?: string; children?: BNode[] }
 interface HEntry { url: string; title: string; lastVisit: number; visits: number; sources: string[] }
@@ -49,7 +49,7 @@ export function initLibrary(gb: Bridge) {
     const top = TOP + (showBar ? BAR : 0);
     document.documentElement.style.setProperty('--top', `${top}px`);
     // the rail is always a left inset while it is visible; the column adds to it when open
-    void gb.invoke('chrome:insets', top, RAIL + (side ? (side === 'mail' ? mailWidth() : side === 'chat' ? CHAT : SIDE) : 0), STATUS);
+    void gb.invoke('chrome:insets', top, RAIL + (side ? (side === 'mail' ? mailWidth() : side === 'chat' || side === 'recipes' || side === 'watchers' ? CHAT : SIDE) : 0), STATUS);
     // a web panel is a WebContentsView positioned by main, so main needs the column's real box.
     // The rect is measured from the DOM (not assumed) because the column width is a CSS token.
     const col = document.getElementById(side ? `${side}-view` : '');
@@ -90,6 +90,8 @@ export function initLibrary(gb: Bridge) {
     webpanels: 'Web panels',
     mail: 'Mail',
     chat: 'AI chat',
+    recipes: 'Recipes',
+    watchers: 'Watchers',
   };
   function openSide(which: SectionId) {
     side = which;
@@ -97,6 +99,7 @@ export function initLibrary(gb: Bridge) {
     // mail spans the window; the other sections are a narrow column
     $('side').classList.toggle('side-wide', which === 'mail');
     $('side').classList.toggle('side-chat', which === 'chat');
+    $('side').classList.toggle('side-auto', which === 'recipes' || which === 'watchers');
     $('side-title').textContent = SECTION_TITLE[which];
     for (const id of Object.keys(SECTION_TITLE) as SectionId[]) {
       const sec = $(`${id}-view`);
@@ -111,7 +114,7 @@ export function initLibrary(gb: Bridge) {
   function closeSide() {
     side = null;
     $('side').classList.add('hidden');
-    $('side').classList.remove('side-wide', 'side-chat');
+    $('side').classList.remove('side-wide', 'side-chat', 'side-auto');
     insets();
     void gb.invoke('panels:show', null);
   }

@@ -12,6 +12,8 @@ import { initStart } from './start';
 import { initWave2 } from './wave2';
 import { initXray } from './xray';
 import { initChat } from './chat';
+import { initRecipes } from './recipes';
+import { initWatchers } from './watchers';
 import { initMcpSettings } from './mcp';
 import { shownValue } from '../core/confirm-text';
 
@@ -336,6 +338,15 @@ $('pf-start').onclick = async () => {
 $('stop').onclick = () => void gb.invoke('agent:stop');
 
 gb.on('agent:update', (u) => {
+  if (u.status === 'started') {
+    // also a task started from elsewhere (a recipe replay from the Recipes panel): reset like Start does
+    if ($('status').hasAttribute('data-status')) {
+      $('status').removeAttribute('data-status');
+      $('answer').classList.add('hidden');
+      $('timeline').replaceChildren();
+    }
+    setRunning(true);
+  }
   $('status').textContent = `running: ${u.status}${u.step ? ` (step ${u.step})` : ''}`;
 });
 gb.on('agent:done', (r) => {
@@ -343,7 +354,11 @@ gb.on('agent:done', (r) => {
   $('status').textContent = `task ${r.status}`;
   $('status').setAttribute('data-status', r.status);
   const a = $('answer');
-  a.textContent = r.answer ? `Answer (from the agent; based on untrusted page data):\n${r.answer}` : `Task ended: ${r.status}`;
+  a.textContent = r.answer
+    ? r.replay
+      ? `Replay report (no AI was used; values were read from the page):\n${r.answer}`
+      : `Answer (from the agent; based on untrusted page data):\n${r.answer}`
+    : `Task ended: ${r.status}`;
   a.classList.remove('hidden');
 });
 
@@ -448,6 +463,12 @@ function summarize(e: any): { text: string; cls: string } {
     case 'mcp': return { text: `${e.client ? `\u201c${e.client}\u201d ` : ''}${e.tool ?? ''} ${e.status ?? ''}${e.http ? ` (HTTP ${e.http}: ${e.reason})` : ''}${typeof e.taskChars === 'number' ? `, task ${e.taskChars} chars` : ''}${e.sites?.length ? `, sites ${e.sites.join(' ')}` : ''}${e.session ? `, ${e.session} session` : ''}${e.approval ? `, ${e.approval} ${e.outcome}` : ''}`, cls: ['refused', 'busy', 'denied', 'failed'].includes(e.status) ? 'deny' : '' };
     case 'phone': return { text: `${e.what ?? ''}${e.outcome ? ` ${e.outcome}` : ''}${e.accepted === false ? ' (not pending)' : ''}${e.reason ? `: ${e.reason}` : ''}${e.error ? `: ${e.error}` : ''}`, cls: e.error || e.reason ? 'deny' : '' };
     case 'action-result': return { text: `${e.action} ${e.ok ? 'ok' : `failed ${e.detail ?? ''}`}`, cls: e.ok ? '' : 'deny' };
+    // item 5: recipes, replay steps and watcher runs (typed values or hashes only)
+    case 'recipe': return { text: `${e.what ?? ''}${e.steps ? `: ${e.steps} steps` : ''}${e.origins?.length ? ` on ${e.origins.join(' ')}` : ''}${e.step ? ` (step ${e.step})` : ''}`, cls: '' };
+    case 'replay': return { text: e.divergence ? `step ${e.step} stopped: ${e.divergence} — ${e.detail ?? ''}` : `step ${e.step} ${e.kind ?? ''} ok`, cls: e.divergence ? 'deny' : '' };
+    case 'watcher': return e.ok === undefined
+      ? { text: `${e.what ?? ''}${e.origins?.length ? ` ${e.origins.join(' ')}` : ''}${e.count !== undefined ? ` (${e.count})` : ''}`, cls: '' }
+      : { text: `run (${e.why}, ${e.runner}): ${e.ok ? `value ${e.value}${e.met ? ', condition met' : ''}${e.notified ? ', notified' : ''}` : `failed: ${e.error}`}`, cls: e.ok ? (e.met ? 'confirm' : '') : 'deny' };
     default: return { text: JSON.stringify(e).slice(0, 200), cls: '' };
   }
 }
@@ -640,6 +661,18 @@ const panelsUi: { active(): string | null; toggle(id: any): void; close(): void;
     void mailPanel.refresh();
   },
   onChatShown: () => chatUi.shown(),
+  onShown: (id) => {
+    if (id === 'recipes') void recipesUi.shown();
+    if (id === 'watchers') void watchersUi.shown();
+  },
+});
+// recipes and watchers (item 5); "Watch…" on a read-only recipe opens the watcher form for it
+const watchersUi = initWatchers(gb);
+const recipesUi = initRecipes(gb, {
+  onWatch: (r) => {
+    if (panelsUi.active() !== 'watchers') panelsUi.toggle('watchers');
+    watchersUi.fromRecipe(r);
+  },
 });
 const paletteUi = initPalette(gb, (item) => wave2Ui.runAction(item));
 

@@ -16,6 +16,8 @@ export interface Hit {
   url: string;
   body: string;
   at: number;
+  /** the Cookie header (site server only) */
+  cookie?: string;
 }
 
 export interface FixtureServers {
@@ -23,6 +25,10 @@ export interface FixtureServers {
   attacker: string;
   siteHits: Hit[];
   attackerHits: Hit[];
+  /** `{{KEY}}` in a fixture is replaced by vars.KEY (tests change a page between two loads) */
+  vars: Record<string, string>;
+  /** path ("/form.html") -> HTML served instead of the fixture file (a changed page) */
+  overrides: Map<string, string>;
   close(): Promise<void>;
 }
 
@@ -47,6 +53,8 @@ export async function startFixtureServers(): Promise<FixtureServers> {
   const attackerHits: Hit[] = [];
   let site = '';
   let attacker = '';
+  const vars: Record<string, string> = { PRICE: '19.99' };
+  const overrides = new Map<string, string>();
 
   const attackerServer = http.createServer(async (req, res) => {
     attackerHits.push({ method: req.method ?? '', url: req.url ?? '', body: await readBody(req), at: Date.now() });
@@ -57,7 +65,7 @@ export async function startFixtureServers(): Promise<FixtureServers> {
   const siteServer = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const url = new URL(req.url ?? '/', site);
-    siteHits.push({ method: req.method ?? '', url: req.url ?? '', body, at: Date.now() });
+    siteHits.push({ method: req.method ?? '', url: req.url ?? '', body, at: Date.now(), cookie: String(req.headers.cookie ?? '') });
     const html = (s: string, code = 200) => {
       res.writeHead(code, { 'content-type': 'text/html; charset=utf-8' });
       res.end(s);
@@ -83,13 +91,19 @@ export async function startFixtureServers(): Promise<FixtureServers> {
       res.writeHead(200, { 'content-type': 'text/plain' }).end(readFileSync(join(FIXTURE_DIR, 'feeds', feed[1]), 'utf8'));
       return;
     }
+    const sub = (t: string) => Object.entries(vars).reduce((acc, [k, v]) => acc.replaceAll(`{{${k}}}`, v), t.replaceAll('{{ATTACKER}}', attacker).replaceAll('{{SITE}}', site));
+    const over = overrides.get(url.pathname);
+    if (over !== undefined) {
+      html(sub(over));
+      return;
+    }
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     const file = join(FIXTURE_DIR, name);
     if (!/^[\w.-]+\.html$/.test(name) || !existsSync(file)) {
       html('<!doctype html><title>Not found</title><h1>404</h1>', 404);
       return;
     }
-    html(readFileSync(file, 'utf8').replaceAll('{{ATTACKER}}', attacker).replaceAll('{{SITE}}', site));
+    html(sub(readFileSync(file, 'utf8')));
   });
 
   const p1 = await listen(siteServer, '127.0.0.1');
@@ -101,6 +115,8 @@ export async function startFixtureServers(): Promise<FixtureServers> {
     attacker,
     siteHits,
     attackerHits,
+    vars,
+    overrides,
     close: async () => {
       siteServer.closeAllConnections();
       attackerServer.closeAllConnections();

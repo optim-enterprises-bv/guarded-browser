@@ -54,6 +54,10 @@ import { register as registerMailIpc } from './runtime/ipc-mail';
 import { register as registerMiscIpc } from './runtime/ipc-misc';
 import { register as registerXrayIpc } from './runtime/ipc-xray';
 import { register as registerChatIpc } from './runtime/ipc-chat';
+import { register as registerRecipes } from './runtime/recipes';
+import { register as registerWatchers } from './runtime/watchers';
+import { ReplayTask } from '../core/recipe-replay';
+import type { Recipe } from '../core/recipe';
 import { TabHostLog } from '../core/xray';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -176,6 +180,10 @@ let xray: ReturnType<typeof registerXrayIpc> | null = null;
 let chat: ReturnType<typeof registerChatIpc> | null = null;
 /** the MCP server + phone approvals (src/main/runtime/mcp.ts); created with the IPC handlers */
 let mcp: ReturnType<typeof registerMcp> | null = null;
+/** recipes (item 5): recording, Save as recipe, the Recipes panel */
+let recipes: ReturnType<typeof registerRecipes> | null = null;
+/** watchers (item 5): schedule, runs, notifications, the picker */
+let watchers: ReturnType<typeof registerWatchers> | null = null;
 const reputation: ReputationChecker = { check: (h) => feeds.check(h, localLists) };
 let current: CurrentTask | null = null;
 const fallbackActive: Partial<Record<Role, string>> = {};
@@ -359,6 +367,9 @@ const rt: RuntimeDeps = {
   reputationState,
   stopTask,
   startTask,
+  startReplay,
+  profileSession: () => ses,
+  phoneNotify: (text) => mcp?.notify(text) ?? Promise.resolve(false),
   previewOrigins,
   closeTab,
   reopenClosed,
@@ -678,6 +689,8 @@ function setupTab(tab: Tab) {
   wc.setWindowOpenHandler(({ url }) => {
     if (current?.tab === tab) {
       audit.write('navigation', { url, by: 'page', blocked: true, reason: 'popup during agent task' });
+      // a recipe replay did not record this window: it stops there
+      current.task.pageEvent?.('popup', `the page tried to open ${originOf(url) ?? 'a window'}`);
     } else if (tabs.isGated(tab.id)) {
       // a new tab would escape the post-task gate: refuse until the user navigates this tab themselves
       audit.write('navigation', { url, by: 'page', blocked: true, reason: 'popup from a tab under the post-task gate (navigate the tab yourself to lift it)' });
@@ -699,6 +712,12 @@ function setupTab(tab: Tab) {
     if (!origin) return;
     if (t.task.allowedOrigins.has(origin)) return;
     e.preventDefault();
+    if (t.task.pageEvent) {
+      // a recipe replay is never steered to an origin it did not record: refused, and the replay stops
+      audit.write('policy', { taskId: t.task.id, action: `page-initiated ${kind}`, decision: 'block', destination: e.url, reasons: [`recipe replay: the page tried to leave for ${origin}, which the recipe does not name`] });
+      t.task.pageEvent('new-origin', `the page tried to go to ${origin} (${kind})`);
+      return;
+    }
     audit.write('policy', { taskId: t.task.id, action: `page-initiated ${kind}`, decision: 'confirm', destination: e.url, reasons: [`page tried to leave for a new origin ${origin}`] });
     const url = e.url;
     void broker
@@ -845,14 +864,18 @@ async function startTask(text: string, origins?: string[], opts: StartOpts = {})
   if (current) throw new Error('a task is already running');
   const tab = opts.tab ?? tabs.active();
   if (!tab) throw new Error('no active tab');
-  deniedFlows = new Set();
-  tabs.setGate(tab.id, 'post-task');
-  const task = new AgentTask(text, {
+  const driver = new ElectronDriver(tab);
+  // recipes (item 5): what the task does is recorded for "Save as recipe" — not an MCP client's task
+  // eslint-disable-next-line prefer-const
+  let task: AgentTask;
+  const recording = opts.mcp ? null : recipes?.beginRecording(driver, () => task.taint, text) ?? null;
+  if (!recording) recipes?.forgetPending();
+  task = new AgentTask(text, {
     planner: llm('planner'),
     reader: llm('reader'),
     judge: llm('judge'),
     guard,
-    driver: new ElectronDriver(tab),
+    driver,
     audit,
     // every agent-action confirmation names the agent's own pane
     confirm: (req) => broker.request({ ...req, source: tabs.describe(tab.id) ?? undefined }),
@@ -865,8 +888,39 @@ async function startTask(text: string, origins?: string[], opts: StartOpts = {})
       sendUI('tabs', tabs.list());
     },
     onUpdate: (u) => sendUI('agent:update', u),
+    ...(recording ? { onExecuted: recording.onExecuted } : {}),
   });
+  return launch(task, tab, opts, (r) => ({ ...r, recipe: recording?.done(r as TaskResult) ?? null }));
+}
+
+/**
+ * Replay a recipe (item 5) in the active tab: no planner, reader or judge — the same lifecycle,
+ * gates, egress task mode and confirmations as an agent task (see core/recipe-replay.ts).
+ */
+async function startReplay(recipe: Recipe, params: Record<string, string>) {
+  if (current) throw new Error('a task is already running');
+  const tab = tabs.active();
+  if (!tab) throw new Error('no active tab');
+  recipes?.forgetPending();
+  const task = new ReplayTask(recipe, {
+    driver: new ElectronDriver(tab),
+    audit,
+    confirm: (req) => broker.request({ ...req, source: tabs.describe(tab.id) ?? undefined }),
+    egress,
+    params,
+    timeoutMs: settings.agent.taskTimeoutMs,
+    onUpdate: (u) => sendUI('agent:update', u),
+  });
+  return launch(task, tab, {}, (r) => ({ ...r, replay: true }));
+}
+
+/** The lifecycle every task shares: one at a time, the post-task gate, mail refused, cleanup. */
+function launch(task: CurrentTask['task'] & { run(): Promise<{ taskId: string; status: string; answer?: string; steps: number; confirmations: TaskResult['confirmations'] }> }, tab: Tab, opts: StartOpts, decorate: (r: object) => object = (r) => r) {
+  deniedFlows = new Set();
+  tabs.setGate(tab.id, 'post-task');
   current = { task, tab, ...(opts.mcp ? { mcp: opts.mcp } : {}) };
+  // a watcher run stops when a task starts (they never overlap)
+  watchers?.onTaskStart();
   // the mail gate refuses new connections from here on; drop the ones opened before the task
   mailController?.disconnectAll();
   // and a remote-image allowance in the mail HTML view ends: the message reloads blocked
@@ -877,8 +931,8 @@ async function startTask(text: string, origins?: string[], opts: StartOpts = {})
   void task
     .run()
     .then((r) => {
-      result = r;
-      sendUI('agent:done', r);
+      result = r as TaskResult;
+      sendUI('agent:done', decorate(r));
     })
     .catch((e) => {
       result = { ...result, answer: String(e) };
@@ -902,6 +956,8 @@ async function startTask(text: string, origins?: string[], opts: StartOpts = {})
       }
       sendUI('state', state());
       opts.onEnd?.(result);
+      // a watcher that waited for this task may run now
+      watchers?.poke();
     });
   return task.id;
 }
@@ -942,6 +998,8 @@ function registerIpc() {
   xray = registerXrayIpc(on, rt);
   chat = registerChatIpc(on, rt);
   mcp = registerMcp(on, rt);
+  recipes = registerRecipes(on, rt);
+  watchers = registerWatchers(on, rt, recipes.store);
 }
 
 
@@ -1236,6 +1294,7 @@ async function dispose() {
   else history.flush();
   if (current) stopTask();
   broker.denyAll('deny');
+  watchers?.dispose();
   await mcp?.dispose();
   unsubscribeFeeds();
   await proxy.close();

@@ -18,7 +18,7 @@ interface Bridge {
   on(channel: string, fn: (payload: any) => void): void;
 }
 
-export type PanelId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail' | 'chat';
+export type PanelId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail' | 'chat' | 'recipes' | 'watchers';
 
 export interface PanelDef {
   id: PanelId;
@@ -39,6 +39,9 @@ export const PANELS: PanelDef[] = [
   { id: 'mail', label: 'Mail (Ctrl+Shift+M)', section: 'mail-view' },
   // AI CHAT (item 2): the quarantined chat role about the current tab
   { id: 'chat', label: 'AI chat (Ctrl+Shift+K)', section: 'chat-view' },
+  // RECIPES and WATCHERS (item 5): replay a finished task with no AI; read-only scheduled checks
+  { id: 'recipes', label: 'Recipes', section: 'recipes-view' },
+  { id: 'watchers', label: 'Watchers', section: 'watchers-view' },
 ];
 
 /** Geometry, MEASURED from the target screenshots (physical px at COSMIC scale 187%).
@@ -68,6 +71,8 @@ export function initPanels(
     onMailShown?: () => void;
     /** so does the AI chat (item 2) */
     onChatShown?: () => void;
+    /** and the recipes / watchers panels (item 5) */
+    onShown?: (id: PanelId) => void;
   },
 ): PanelsUi {
   const rail = document.getElementById('rail') as HTMLElement;
@@ -120,6 +125,7 @@ export function initPanels(
     paint();
     if (activeId === 'mail') opts.onMailShown?.();
     if (activeId === 'chat') opts.onChatShown?.();
+    if (activeId) opts.onShown?.(activeId);
   }
 
   async function load(id: PanelId) {
@@ -319,4 +325,6 @@ const RAIL_GLYPH: Record<PanelId, string> = {
   webpanels: '\u{1F310}',
   mail: '\u2709',
   chat: '\u{1F4AC}',
+  recipes: '\u{1F4DC}',
+  watchers: '\u{1F441}',
 };

@@ -553,6 +553,119 @@ Code: `src/core/mcp.ts` (admission, JSON-RPC, tools, registry, wrapping), `src/m
 (`ApprovalChannel`, first-answer-wins hub), `src/core/confirm-text.ts` (the card text),
 `src/main/telegram.ts` (Bot API channel), `src/renderer/mcp.ts` (Settings section).
 
+### Recipes (replay a task without AI)
+After a task **finishes**, the agent panel offers **Save as recipe…**: it lists what the task did,
+in plain words, and saves it under a name. The **Recipes** rail panel (scroll icon) lists them:
+**Run**, **Steps** (with each step's *auto* switch and the parameters), **Rename**, **Export**
+(JSON) and **Delete**; **Import a recipe** takes exported JSON back.
+
+* **What is recorded** is what the agent actually *did* — navigate, click, type, select, submit and
+  extract — never what it was told. Each step stores the origin, a stable element locator (role +
+  accessible name + tag + input type / field name, the nearest landmark and label — a `<label>`, else
+  the heading the element sits under — hand-written ids and classes, and a structural `tag.class`
+  path from that landmark that only breaks ties, never an `nth-child`), the page's title and main
+  heading, and for a submit the form's shape: method, where it sends (origin + path), encoding, and
+  field names and types — never values. Scrolling is not recorded; failed, denied or blocked
+  actions are not either. MCP clients' tasks are not recorded.
+* **No secret is ever stored.** A value typed into a password field, into any field of a login form,
+  or that the task's secret detector flags (emails, phone / card numbers, keyword values,
+  machine-looking tokens) becomes a *sensitive parameter* (`{{password}}`) asked at every run and
+  never written to disk; the schema refuses a stored value for one. A value that came from page data
+  (a reader handle) becomes a parameter asked at every run. Other typed values become parameters
+  with a stored default you can edit. A task secret inside a navigated URL becomes a placeholder; if
+  it is there in an encoding the recorder cannot rewrite, that step is not recorded at all. Reader
+  extractions are recorded as deterministic reads of the element that showed the value (number,
+  text or date); a value that cannot be found on the page is listed as not recorded.
+* **Replay uses no model at all.** No planner, no reader, no judge (the replay module imports no
+  model client; the e2e test asserts the mock LLM receives zero requests). Each step finds its
+  element again with its locator and checks the page first; any difference **stops the run with a
+  report** instead of improvising: the title / main heading is not the recorded one
+  (`landmark-missing`), the locator matches no element or more than one (`locator-none` /
+  `locator-many`), the form's method, action, encoding or field names / types changed
+  (`form-shape`), the tab is on — or was redirected or navigated by the page to — an origin the
+  recipe does not name (`new-origin`), the page started a download or opened a window
+  (`download` / `popup`; both are refused), the policy blocked a step, you denied it, or a read
+  value is not of the recorded type.
+* **State-changing steps are confirmed exactly like agent actions**: the same policy engine (form
+  submissions, password and login fields, irreversible-looking buttons, new origins) and the same
+  confirmation dialog with the exact values and destination, on screen and — with phone approvals
+  set to *all* — on the phone. You can mark a step **auto** to skip its confirmation, but the code
+  refuses *auto* for payments (names like pay / checkout / order / card / amount, payment-looking
+  form actions), credentials (password fields, login forms, sensitive parameters, login-like names)
+  and anything that reaches another origin — when you tick it, when a recipe is loaded or imported,
+  and again against the live page at replay (a form that grew a password field is confirmed anyway).
+* **A replay is a task**: the egress proxy runs in task mode with the recipe's origins as the
+  allowlist, an approved submit lets through exactly that request, the tab is under the post-task
+  gate afterwards, mail stays disconnected, and watchers wait.
+* **Import** is size-capped (256 KB) and validated by a strict schema: http(s) origins only, every
+  step on one of the recipe's origins, every parameter defined, no stored sensitive value, no *auto*
+  where it is refused. An imported recipe gets a new id.
+
+**Why replaying is safer than re-running the agent.** Re-running a task means a planner reading
+today's version of the page: if the page now carries an injection, the planner may be steered, and
+the defences have to catch it. A replay has nothing to steer: it does only the recorded steps on the
+recorded elements, a page that changed stops it rather than redirects it, and nothing it reads goes
+to a model. Every confirmation the agent would have needed is still asked.
+
+Code: `src/core/locator.ts`, `src/core/recipe.ts`, `src/core/recipe-replay.ts`,
+`src/main/runtime/recipes.ts`, `src/renderer/recipes.ts`.
+
+### Watchers (read-only scheduled checks)
+The **Watchers** rail panel (eye icon) runs standing checks such as "tell me when this price drops
+below 15" or "tell me when this text changes".
+
+* **Create** one from the current page — **Watch a value on this page…** puts a picker on the page
+  (drawn by the isolated world in a closed shadow root; the page can neither see nor restyle it):
+  click the value, then choose what to read (a number, whether the text changes — a hash — or the
+  text), the condition (*below*, *above*, *changed*, *containing*), how often (at least every 5
+  minutes) and where to be told (desktop notification; Telegram through the phone-approvals bot if
+  it is set up). Or press **Watch…** on a read-only recipe: its pages are opened in order and its
+  first read value is watched. Each watcher shows **Run now**, **Pause / Resume**, its **History**
+  (the last 20 runs: time, value, condition met, error) and **Delete**.
+* **Read-only by construction.** A watcher is a list of URLs plus one read: its schema has no field
+  that could hold a click, a typed value or a submit (a file that tries is refused), and a recipe that
+  clicks, types or submits — or needs parameters — cannot become a watcher. Each run's network rules
+  allow only GET / HEAD / OPTIONS, only to the watcher's own origins; a navigation or redirect
+  anywhere else, a popup or a download ends the run. No model is involved.
+* **Each run is isolated.** It gets a fresh in-memory partition (the same throwaway-session rule as
+  an MCP task: no cookies, no storage, destroyed afterwards) behind its own instance of the egress
+  proxy with this profile's denylist, reputation lists and refused proxy ports, in task mode with
+  the watcher's origins as the allowlist. **Use my login** copies this profile's cookies *for the
+  watcher's sites only* into that throwaway session at each run (the form warns about it); the
+  profile's session itself is never used and nothing flows back into it.
+* **Never during a task.** A run starts only when no agent task or recipe replay is running and no
+  confirmation is pending; a task that starts cancels a running check, and a waiting one runs when
+  the task ends. A failing watcher backs off (the interval doubles per consecutive failure, up to a
+  day).
+* **Nothing page-written is sent anywhere.** Notifications say "is now 12.5 (below 15)" or "changed",
+  never page text; the audit log gets one `watcher` event per run with the number, or a hash of the
+  text, plus whether the condition was met.
+
+**Runner.** The default runner is a hidden offscreen window (JavaScript on, images off, audio muted,
+no permissions) that is destroyed after each run. Under **Runner** you can instead give the absolute
+path of a **separately installed** headless browser that speaks the Chrome DevTools Protocol —
+for example Lightpanda. It is never bundled, vendored or
+downloaded by this browser (Lightpanda is AGPL-3.0; this project is Apache-2.0): you install it, and
+the option stays greyed out, with the reason, until the path is an executable file. Each run starts it
+on 127.0.0.1 with a random port, an explicit HTTP proxy argument pointing at the run's egress proxy, an
+empty temporary home directory (also its working directory), and kills it afterwards. For Lightpanda
+that is
+
+```
+lightpanda serve --host 127.0.0.1 --port <random> --http_proxy http://127.0.0.1:<run proxy>
+```
+
+— the `serve` flags from Lightpanda's README at the time of writing; no Lightpanda binary was
+available while this was built, so **confirm them with `lightpanda serve --help` for your version**.
+A Chromium-compatible binary gets `--headless=new --remote-debugging-address=127.0.0.1
+--remote-debugging-port=<random> --proxy-server=<run proxy> --proxy-bypass-list=<-loopback>
+--user-data-dir=<temp dir>`. The external runner never gets cookies (a watcher with *use my login*
+always uses the built-in runner), the element is matched inside that browser, and only the matched
+element's capped text comes back, reduced at once to the typed value.
+
+Code: `src/core/watcher.ts`, `src/core/watch-runner.ts` (runner interface + external CDP runner),
+`src/main/offscreen-runner.ts`, `src/main/runtime/watchers.ts`, `src/renderer/watchers.ts`.
+
 ### Profiles (Vivaldi / Chromium model)
 One app process; each **profile** is its own Chromium session plus its own app state, and opens in
 its **own window** (the window title and the toolbar's profile button show its name and colour).
@@ -987,6 +1100,14 @@ model one that slipped through.)
   hostile message can still mislabel itself (and the guard does not catch every injection); it
   cannot label another message, act, or reach the planner, and every action needs your approval of
   the exact list. With the triage role's cloud fallback on, those fields go to that provider.
+* **Recipes trust their own recording** (item 5): a recipe does exactly what the recorded task did,
+  so a task that was itself steered by a page records the steered steps; review the steps before
+  saving. Replay notices a changed page only through what it checks (title, main heading, the
+  locator's fields, form shape, origin): a page that keeps all of those but changes what a control
+  does is not detected — the confirmations are what still protect state-changing steps.
+* **Watchers read pages unattended.** A watched page decides what text the element shows, so a
+  number or a change can be faked by that site; a watcher can only tell you, never act. "Use my
+  login" lets the watched site see your session cookies at each run.
 * **The AI chat reads page text.** It is quarantined (no tools, no task values, nothing persisted,
   output shown as text only), but a page can still steer what it *says*; the guard drops lines it
   flags, not all injections. Its replies are labelled page-derived and never become a task by
@@ -1095,7 +1216,12 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/mcp.spec.ts` (off by default, 401 / 403, browse_task via the stdio launcher in a throwaway partition, phone approval of an MCP task's confirmation, use_profile approval, busy + cancel, open_url, revoke, off = refused) | 10 | pass |
 | unit | `test/unit/mail-triage.test.ts` (triage: only the allowed fields, no HTML / attachment bytes, 4 KB cap, guard drops, no tools; strict output; cache + invalidation; v6 migration; gate; audit; draft; the injection case) | 30 | pass |
 | e2e | `test/e2e/mail-triage.spec.ts` (triage table, bills-due-this-week, bulk archive approve / deny against fake IMAP, draft reply sends nothing, refused / stopped around an agent task, one message per request) | 4 | pass |
-| **total** | | **407** (282 unit + 125 e2e) | **all pass** |
+| unit | `test/unit/recipes.test.ts` (recording: no secret stored, value sources, URL placeholders; locators 0 / 1 / many; every divergence; "auto" refused for payment / credential / new origin, also on the live page; import validation; no model imported by replay) | 27 | pass |
+| unit | `test/unit/watchers.test.ts` (read-only by construction, validation, conditions, notifications without page text, backoff and the scheduler on fake timers, runner settings) | 12 | pass |
+| unit | `test/unit/watch-runner.test.ts` (external CDP runner against a fake CDP browser process: proxy argument, loopback, temp home, kill, divergences, no cookies, start timeout, cancel; binary check) | 11 | pass |
+| e2e | `test/e2e/recipes.spec.ts` (save as recipe, replay with zero model requests, confirmed submit, deny, changed page = form-shape / landmark / locator divergence, auto, export / import) | 6 | pass |
+| e2e | `test/e2e/watchers.spec.ts` (external runner greyed out, in-page picker, price drop notification, ephemeral partition vs "use my login", waits for a running task, recipe → watcher and read-only refusal, Telegram) | 6 | pass |
+| **total** | | **407** (282 unit + 125 e2e) on 2026-09-30; **1,122** (943 unit + 179 e2e; guard test and packaged test skipped) on 2026-10-03 | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):
 

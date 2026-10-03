@@ -295,6 +295,14 @@ function setupEgress(ses: Session) {
       rt.audit.write('egress', { layer: 'download', decision: 'log', host: hostKey(item.getURL()), method: 'GET', url: item.getURL(), reason: 'manual download (save dialog)' });
       return;
     }
+    if (rt.current.task.pageEvent) {
+      // a recipe replay never downloads: the transfer is cancelled and the replay stops on it
+      item.cancel();
+      downloads.failed(dlId, 'cancelled: recipe replay');
+      rt.audit.write('egress', { layer: 'download', decision: 'block', host: hostKey(item.getURL()), method: 'GET', url: item.getURL(), reason: 'download during a recipe replay (not part of the recipe)' });
+      rt.current.task.pageEvent('download', `the page started a download of ${item.getFilename().slice(0, 80)}`);
+      return;
+    }
     // agent task: bytes go to a private staging dir; the file only reaches the downloads folder
     // (under a unique name, never overwriting) after the user approves AND the transfer completed
     const staging = join(profileDir, 'downloads-pending');

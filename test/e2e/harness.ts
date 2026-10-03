@@ -34,6 +34,8 @@ export interface LaunchOpts {
   attachFile?: string;
   /** test only: the Telegram Bot API base (a loopback fake) for phone approvals */
   telegramApi?: string;
+  /** test only: desktop notifications are also appended to <userData>/notifications.jsonl */
+  notifyFile?: boolean;
 }
 
 export interface App {
@@ -85,6 +87,7 @@ export async function launch(o: LaunchOpts): Promise<App> {
   if (o.mailTestCa) env.GUARDED_TEST_MAIL_CA = o.mailTestCa;
   if (o.attachFile) env.GUARDED_TEST_ATTACH_FILE = o.attachFile;
   if (o.telegramApi) env.GUARDED_TEST_TELEGRAM_API = o.telegramApi;
+  if (o.notifyFile) env.GUARDED_TEST_NOTIFY_FILE = join(userData, 'notifications.jsonl');
   env.GUARDED_MODEL_DIR = join(ROOT, '.cache-test', 'models');
   env.GUARDED_DOWNLOAD_DIR = join(userData, 'downloads');
   mkdirSync(env.GUARDED_DOWNLOAD_DIR, { recursive: true });
