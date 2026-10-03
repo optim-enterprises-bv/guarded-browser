@@ -50,6 +50,15 @@ export const MAIL_CHANNELS = [
   'mail:attachment-open',
   'mail:attach-pick',
   'mail:attach-remove',
+  // AI capabilities item 4: triage. Start / stop a run and read its typed results (request/response:
+  // polled, never pushed); plan a bulk action (returns the exact list + a one-time token) and answer it;
+  // ask the quarantined role for ONE reply draft (saved as a local draft, never sent).
+  'mail:triage-run',
+  'mail:triage-stop',
+  'mail:triage-state',
+  'mail:triage-plan',
+  'mail:triage-apply',
+  'mail:triage-draft',
 ] as const;
 
 /** Profile management: handled in main.ts itself (it spans profiles), still sender-checked. */

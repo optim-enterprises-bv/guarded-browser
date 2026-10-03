@@ -480,9 +480,10 @@ async function openSettings() {
   const s = current!;
   const form = $('settings-form');
   form.replaceChildren();
-  for (const role of ['planner', 'reader', 'judge', 'chat'] as const) {
+  for (const role of ['planner', 'reader', 'judge', 'chat', 'triage'] as const) {
     const r = s.models[role];
-    form.append(el('fieldset', { 'data-testid': `settings-role-${role}` }, el('legend', {}, role === 'chat' ? 'chat (AI chat panel; quarantined, no tools)' : role),
+    const legend = role === 'chat' ? 'chat (AI chat panel; quarantined, no tools)' : role === 'triage' ? 'triage (mail triage; quarantined, no tools; sees one message at a time)' : role;
+    form.append(el('fieldset', { 'data-testid': `settings-role-${role}` }, el('legend', {}, legend),
       field('baseURL', `models.${role}.primary.baseURL`, r.primary.baseURL),
       field('model', `models.${role}.primary.model`, r.primary.model),
       field('apiKeyEnv', `models.${role}.primary.apiKeyEnv`, r.primary.apiKeyEnv ?? ''),
@@ -493,7 +494,9 @@ async function openSettings() {
       field('fallback key env', `models.${role}.fallback.apiKeyEnv`, r.fallback.apiKeyEnv ?? ''),
       el('p', { class: 'muted small' }, role === 'chat'
         ? 'Cloud fallback, if you enable it, sends the page text and your chat messages to that provider.'
-        : 'Cloud fallback, if you enable it, sends your task and page text to that provider.'),
+        : role === 'triage'
+          ? 'Cloud fallback, if you enable it, sends each triaged message (sender name and domain, subject, date, the first 4 KB of its text, attachment names) to that provider.'
+          : 'Cloud fallback, if you enable it, sends your task and page text to that provider.'),
     ));
   }
   form.append(el('fieldset', {}, el('legend', {}, 'agent'),

@@ -12,7 +12,9 @@ export type AuditType =
   // AI capabilities item 2: one event per chat reply (sizes, screening and endpoint; never the text)
   | 'chat'
   // item 3: one event per MCP call / refused MCP request, and the phone channel's card lifecycle
-  | 'mcp' | 'phone';
+  | 'mcp' | 'phone'
+  // item 4: one event per triage run / bulk action / reply draft (counts and categories; never mail text)
+  | 'triage';
 
 export interface AuditEvent {
   ts: string;

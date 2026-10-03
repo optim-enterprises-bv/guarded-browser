@@ -60,4 +60,16 @@ export function register(on: (channel: string, fn: Handler) => void, rt: Runtime
   on('mail:attachment-open', (_e, id: unknown, part: unknown) => mailCtrl().openAttachment(id, part));
   on('mail:attach-pick', (_e, draft: unknown) => mailCtrl().attachPick(draft));
   on('mail:attach-remove', (_e, draftId: unknown, attId: unknown) => mailCtrl().attachRemove(draftId, attId));
+  // ---------- AI capabilities item 4: triage. Same table, same sender check. A run, a plan's approval
+  // and a draft all pass the controller's gate (refused while a task runs / a confirmation is pending).
+  // Nothing here sends, forwards, or opens a link or an attachment; the agent has no path to any of it.
+  on('mail:triage-run', (_e, opts: unknown) => mailCtrl().triage().start(opts));
+  on('mail:triage-stop', () => {
+    mailCtrl().triage().stop();
+    return { ok: true };
+  });
+  on('mail:triage-state', (_e, filter: unknown) => mailCtrl().triage().state(filter));
+  on('mail:triage-plan', (_e, spec: unknown) => mailCtrl().triage().planAction(spec));
+  on('mail:triage-apply', (_e, token: unknown, approve: unknown) => mailCtrl().triage().apply(token, approve));
+  on('mail:triage-draft', (_e, id: unknown, instruction: unknown) => mailCtrl().triage().draft(id, instruction));
 }

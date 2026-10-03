@@ -74,6 +74,8 @@ import { nextBackoff } from './sync';
 import { parseHimalayaConfig, buildImportPlan, HIMALAYA_CONFIG, type ImportPlan } from './import';
 import { DEFAULT_VIEW, buildFolderTree, groupThreads, listRowFrom, readingHeader, externalContentNotice, parseMailSearch, REMOTE_IMAGES_NOTICE, type ViewFilter } from '../../core/mail/ui';
 import { sanitizeMailHtml } from '../../core/mail/html';
+import { MailTriage, type TriageLlm } from './triage';
+import type { Guard } from '../../core/types';
 
 export interface MailControllerDeps {
   /** this profile's app-state directory (the store and the secrets live here) */
@@ -112,6 +114,16 @@ export interface MailControllerDeps {
   openPath?: (path: string) => Promise<string>;
   /** the system file picker, run by MAIN; resolves the chosen paths ([] = cancelled). The renderer never supplies a path. */
   pickFiles?: () => Promise<string[]>;
+  /**
+   * Item 4, safe inbox triage: the quarantined `triage` role (no tools), the shared guard that screens
+   * what it is given, and the identity of its model for the cache. Absent = triage unavailable.
+   */
+  triage?: {
+    client: () => TriageLlm;
+    guard: () => Guard;
+    modelId: () => string;
+    fallbackNotice: () => string | null;
+  };
 }
 
 /** where a draft's attached files are kept: `<profile>/mail-outbox/<draft id>/<attachment id>` */
@@ -225,7 +237,49 @@ export class MailController {
   /** inline cid: images per message (data: URLs), so redisplaying a message does not refetch them */
   private readonly inlineCache = new Map<number, Map<string, string>>();
 
+  /** item 4: the triage runner, created on first use */
+  private triager: MailTriage | null = null;
+
   constructor(private readonly deps: MailControllerDeps) {}
+
+  // ------------------------------------------------------------ triage (AI capabilities item 4)
+
+  /** The triage runner. Its every network or model step passes this controller's gate. */
+  triage(): MailTriage {
+    const t = this.deps.triage;
+    if (!t) throw new Error('triage is not available here');
+    this.triager ??= new MailTriage({
+      store: () => this.db(),
+      canConnect: this.deps.canConnect,
+      audit: this.deps.audit,
+      guard: t.guard,
+      client: t.client,
+      modelId: t.modelId,
+      fallbackNotice: t.fallbackNotice,
+      fetchBody: (row) => this.fetchForTriage(row),
+      accountIds: () => this.db().listAccounts().map((a) => a.id),
+      folders: (id) => this.db().listFolders(id),
+      archiveFolder: (id) => (this.accounts.get(id) ?? this.accountFor(id))?.archiveFolder || 'Archive',
+      move: (ids, to) => this.move(ids, to),
+      setFlags: (ids, patch) => this.setFlags(ids, patch),
+      composeInit: (id) => this.composeInit('reply', id) as Record<string, unknown> & { ok: boolean; error?: string },
+      draftSave: (fields) => this.draftSave(fields),
+    });
+    return this.triager;
+  }
+
+  /**
+   * A never-fetched body, for triage: through the gated syncer with BODY.PEEK, and the message stays
+   * as unread as it was (`fetchBody` records a sighting; a triage pass is not one).
+   */
+  private async fetchForTriage(row: MessageRow): Promise<boolean> {
+    if (!this.deps.canConnect().ok) return false;
+    const s = this.syncerFor(row.accountId);
+    if (!s) return false;
+    const r = await s.fetchBody(row.folder, row.uid, { markRead: false });
+    this.db().setFlags([row.id], { seen: row.seen });
+    return r.ok;
+  }
 
   // ------------------------------------------------------------ lazy handles
 
@@ -1299,11 +1353,14 @@ export class MailController {
   disconnectAll() {
     for (const s of this.syncers.values()) s.disconnect();
     this.stopAutomaticSends('an agent task started');
+    // the triage extractor never runs alongside a task: its in-flight request is aborted
+    this.triager?.stop('an agent task started');
   }
 
   /** Close every connection and the sqlite handle (called when the window closes). */
   dispose() {
     this.disposed = true;
+    this.triager?.stop('mail was closed');
     for (const t of this.retryTimers.values()) clearTimeout(t);
     this.retryTimers.clear();
     for (const f of this.inFlight.values()) f.aborted = true;

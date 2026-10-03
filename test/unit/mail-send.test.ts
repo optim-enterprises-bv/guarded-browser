@@ -374,9 +374,9 @@ describe('send (38) — the store: v4 migration, drafts and outbox survive a res
     raw.exec('PRAGMA user_version = 3');
     raw.close();
     const again = new MailStore(f);
-    // ticket 41 moved the schema to v5; a v3 store migrates through v4 to it
-    expect(SCHEMA_VERSION).toBe(5);
-    expect(again.schemaVersion()).toBe(5);
+    // ticket 41 moved the schema to v5 and triage (item 4) to v6; a v3 store migrates through v4 to it
+    expect(SCHEMA_VERSION).toBe(6);
+    expect(again.schemaVersion()).toBe(6);
     expect(again.listAccounts()[0]).toMatchObject({ id: 'old', smtpHost: 'mail.example.com', smtpPort: 465, smtpTls: 'implicit' });
     expect(again.byUid('old', 'INBOX', 1)?.subject).toBe('kept');
     expect(again.saveDraft({ accountId: 'old', subject: 'd' }).ok).toBe(true);

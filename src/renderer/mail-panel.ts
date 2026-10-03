@@ -15,6 +15,8 @@
 // is a native view drawn OVER this page, the rect is reported as null whenever chrome UI would be
 // covered by it: a modal, a menu, the address suggestions, a confirmation, or the panel closing.
 
+import { initTriage } from './mail-triage';
+
 interface MailBridge {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
 }
@@ -996,6 +998,22 @@ export const mailPanel: MailPanelUi = {
 export function initMailPanel(gbIn: MailBridge) {
   bridge = gbIn;
   wire();
+  // item 4: the triage view. It gets the panel's selection, the compose form (for a draft reply, which
+  // the user edits and sends — or not) and a refresh after an approved bulk action; nothing more.
+  initTriage(gbIn, {
+    selection: () => ({
+      accountId: selectedAccount,
+      folder: folderPathFor(selectedFolder),
+      accounts: (state.accounts ?? []).map((a: AnyRec) => ({ id: String(a.id), label: String(a.address || a.name || a.id) })),
+    }),
+    openCompose: (f) => openCompose(f),
+    refresh: async () => {
+      await refreshState();
+      await refreshTree();
+      await refreshList();
+    },
+    status: (m) => setStatus(m),
+  });
   watchViewRect();
   void main();
 }

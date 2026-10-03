@@ -519,7 +519,7 @@ describe('mail html: the store keeps html apart (schema v2)', () => {
     raw.close();
     const again = new MailStore(f);
     expect(again.schemaVersion()).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(5); // ticket 41
+    expect(SCHEMA_VERSION).toBe(6); // ticket 41 = v5, triage (item 4) = v6
     // v3: the text stays, and the message is marked unfetched so the next open stores its HTML
     expect(again.body(r.id)).toMatchObject({ bodyText: 'old text', hasHtml: false, bodyFetched: false });
     again.setBody('a1', 'INBOX', 1, { text: 'old text', html: '<p>new</p>' });

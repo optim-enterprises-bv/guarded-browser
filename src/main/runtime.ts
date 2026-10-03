@@ -1076,6 +1076,24 @@ const api = {
         });
         return r.response === 1 && (!executable || r.checkboxChecked === true);
       },
+      // item 4, safe inbox triage: the quarantined `triage` role (streamBody: no tools), screened by the
+      // shared guard; refused with the rest of mail while a task runs (canConnect above)
+      triage: {
+        client: () => new StreamingLlmClient('triage', () => settings.models.triage, onRoleFallback),
+        guard: () => guard,
+        modelId: () => `${settings.models.triage.primary.model}@${settings.models.triage.primary.baseURL}`,
+        fallbackNotice: () => {
+          const fb = settings.models.triage.fallback;
+          if (!fb.enabled) return null;
+          let host = fb.baseURL;
+          try {
+            host = new URL(fb.baseURL).host;
+          } catch {
+            /* shown as typed */
+          }
+          return `Cloud fallback is ON for triage: when the local model is unreachable, each message's sender name and domain, subject, date, text (first 4 KB) and attachment names are sent to ${host}.`;
+        },
+      },
       openPath: (p) => shell.openPath(p),
       // "Attach…": the system file dialog, in MAIN. TEST ONLY (GUARDED_TEST=1, unpackaged): a fixed
       // file instead of the dialog, so the e2e can attach without driving a native window.

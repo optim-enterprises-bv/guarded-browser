@@ -1,4 +1,4 @@
-// Mock OpenAI-compatible server for tests. Each role (planner / reader / judge / chat, detected from
+// Mock OpenAI-compatible server for tests. Each role (planner / reader / judge / chat / triage / draft, detected from
 // the system prompt) is driven by a script, so tests can make a model "compromised" on purpose and
 // check that the code-level defences still hold. A request with `stream: true` gets a text reply as
 // server-sent events (`chat.completion.chunk` deltas, then `data: [DONE]`), like a real server.
@@ -6,7 +6,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-export type MockRole = 'planner' | 'reader' | 'judge' | 'chat' | 'unknown';
+export type MockRole = 'planner' | 'reader' | 'judge' | 'chat' | 'triage' | 'draft' | 'unknown';
 
 export interface MockCall {
   role: MockRole;
@@ -60,6 +60,8 @@ function roleOf(messages: MockCall['messages']): MockRole {
   if (sys.includes('You are the READER')) return 'reader';
   if (sys.includes('You are the JUDGE')) return 'judge';
   if (sys.includes('You are the CHAT assistant')) return 'chat';
+  if (sys.includes('You are the TRIAGE extractor')) return 'triage';
+  if (sys.includes('You are the REPLY DRAFTER')) return 'draft';
   return 'unknown';
 }
 
@@ -68,6 +70,8 @@ const defaults: Record<MockRole, Responder> = {
   reader: () => ({ json: {} }),
   judge: () => ({ json: { verdict: 'allow', reason: 'mock judge: serves the task' } }),
   chat: () => ({ content: 'mock chat reply' }),
+  triage: () => ({ json: { category: 'other', needsReply: false, dueDate: null, amount: null, label: 'mock triage', confidence: 0.5 } }),
+  draft: () => ({ content: 'mock reply draft' }),
   unknown: () => ({ content: 'mock' }),
 };
 

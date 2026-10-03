@@ -755,11 +755,72 @@ Security:
 * **Every send is audited**: account, recipient *count* and *domains*, byte size, result (and the
   Sent copy's outcome) — never the body, the subject or a full address.
 * **Attachments never reach a model**: their names and bytes are not in any planner / reader / judge
-  input, the agent has no tool that lists downloads or files, and a structural test asserts that
+  input (the one exception is *Mail triage* below, which sees attachment names and types, never bytes), the agent has no tool that lists downloads or files, and a structural test asserts that
   nothing on the agent's side imports the attachment code or the downloads list. The four attachment
   channels (`mail:attachment-download`, `mail:attachment-open`, `mail:attach-pick`,
   `mail:attach-remove`) are chrome-only like every mail channel (a tab gets `unknown sender`,
   tested).
+
+### Mail triage
+**Triage** in the mail panel's toolbar sorts messages into bills, receipts, newsletters, personal, work,
+security alerts, shipping, calendar, suspected spam and other — with due dates, amounts and a short
+label — for one account or all of them, over **unread**, the **last N days** or the **current folder**.
+
+**This is the one place a model sees mail, and exactly this much of it.** Everywhere else the rule
+is unchanged: mail never reaches a model. Triage relaxes it in one typed, narrow way, because sorting
+a full inbox by hand is the work people want help with, and the alternative (handing the agent a
+mail tool) is the lethal trifecta in one call. For **each message, in its own request**, the
+quarantined `triage` role receives:
+
+| sent to the model | never sent |
+|---|---|
+| the sender's **display name** and **domain** (`power.example`, not the address) | the full sender address, To / Cc / Reply-To, Message-ID, raw headers |
+| the **subject** and the **date** | the HTML body (not even converted), remote content, inline images |
+| the stored **text body, first 4 KB** (UTF-8 bytes) | attachment **bytes**; inline images are not even listed |
+| attachment **names and types** | flags, folders, labels, account names and addresses |
+| | any other message — one message per request, no history |
+
+Every field is **screened by the guard** first: a flagged body line is dropped, a flagged subject, name
+or attachment name is replaced by a marker, and the count is shown in the view and told to the model.
+The role has **no tools** (the request has no `tools` field; it is removed even if `extraBody` adds
+one), and the system prompt tells it the email is untrusted data. Its answer must be **strict JSON**
+with exactly six keys — `category` (from the fixed set), `needsReply`, `dueDate` (`YYYY-MM-DD` or
+null), `amount` (`{value, currency}` with an ISO 4217 code, or null), `label` (≤ 60 characters, links
+and email addresses stripped, then guard-screened) and `confidence` (0..1). Anything else — not JSON,
+an extra key, an out-of-range value, an over-long label or reply — counts as **category "other" and
+nothing else from it is used**. So a hostile email can at most get *itself* a wrong category.
+
+* **The planner still cannot see mail.** There is no mail tool, the agent modules import nothing from
+  `mail/`, and triage results are shown only in the mail panel (tested). Triage is **refused while an
+  agent task runs** or a confirmation is pending, and a task starting **stops a run** and aborts its
+  in-flight request: the extractor never runs alongside a task. Requests go one at a time; a run is
+  capped (50 by default, 200 at most) and has a **Stop** button. A body that was never downloaded is
+  fetched with `BODY.PEEK` through the same gate, and the message stays unread.
+* **Results are cached** in the mail store per message and model (schema v6, `triage` table), keyed
+  by a hash of exactly what the model was given; a changed body drops the entry, and what comes out
+  of the cache is validated again like a fresh answer.
+* **The view**: category chips, due date, amount, needs-reply and label for each message (all set as
+  text), totals per category, sorted by due date, with filters *Bills due this week* (due today to six
+  days on), *Needs reply*, *Newsletters* and per category.
+* **Actions are yours, and confirmed.** Pick *Archive*, *Move to folder…*, *Flag* or *Label…* for the
+  ticked rows or a whole category; *Review…* shows **the exact list (subject and sender of every
+  message)** before anything touches the server. *Approve* runs it once, through the same gated mail
+  actions as the reading pane; *Deny* changes nothing. The list is computed from your choice, never
+  from a model's answer, and the approval is bound to that list by a one-time token.
+* **Draft reply** sends ONE message's screened fields plus your one-line instruction to the same role;
+  its text opens in the compose form as a local draft (recipients and subject come from the stored
+  message, not the model). Nothing is sent unless you press Send. Nothing in triage can send,
+  forward, open a link or open an attachment.
+* **Audit**: one `triage` event per run with the accounts, message count, model, the category
+  histogram, cache hits, invalid answers and guard drops — never a subject, sender or body; one per
+  approved / denied action (operation and count) and per draft (size).
+* **Model**: Settings → *triage*, the same shape as the other roles; a settings file from before it
+  gets a copy of its reader role with the **cloud fallback off**. If you turn the fallback on, the
+  triage view says that the fields above are sent to that provider.
+
+Code: `src/core/mail/triage.ts` (what the model sees, strict output, filters), `src/main/mail/triage.ts`
+(runs, cache, plan / approve, draft), `src/renderer/mail-triage.ts`; tests in
+`test/unit/mail-triage.test.ts` and `test/e2e/mail-triage.spec.ts`.
 
 ### Split view (tab tiling)
 Tile 2-4 tabs **side by side**, **stacked** or as a **grid** (3 tabs: two on top, one below; 4: 2x2).
@@ -921,6 +982,11 @@ model one that slipped through.)
 * **Phone approvals** trust Telegram's delivery of the button press from your chat id; anyone holding
   your Telegram session can answer a card. The calls go to api.telegram.org outside the egress proxy
   (certificate-verified), the one documented exception to "everything through the proxy".
+* **Mail triage shows mail text to a model** (item 4): one message at a time, only the fields listed
+  under *Mail triage*, guard-screened, to a tool-less role whose answer is a fixed-shape record. A
+  hostile message can still mislabel itself (and the guard does not catch every injection); it
+  cannot label another message, act, or reach the planner, and every action needs your approval of
+  the exact list. With the triage role's cloud fallback on, those fields go to that provider.
 * **The AI chat reads page text.** It is quarantined (no tools, no task values, nothing persisted,
   output shown as text only), but a page can still steer what it *says*; the guard drops lines it
   flags, not all injections. Its replies are labelled page-derived and never become a task by
@@ -940,7 +1006,7 @@ Electron's per-app directory (`~/.config/guarded-browser` on Linux; override wit
       "primary":  { "baseURL": "http://127.0.0.1:1234/v1", "model": "default", "extraBody": { "enable_thinking": false } },
       "fallback": { "enabled": false, "baseURL": "https://api.openai.com/v1", "model": "gpt-4o-mini", "apiKeyEnv": "OPENAI_API_KEY" }
     },
-    "reader": { "...": "same shape" }, "judge": { "...": "same shape" }, "chat": { "...": "same shape" }
+    "reader": { "...": "same shape" }, "judge": { "...": "same shape" }, "chat": { "...": "same shape" }, "triage": { "...": "same shape" }
   },
   "agent": { "maxSteps": 20, "taskTimeoutMs": 600000, "confirmTimeoutMs": 120000 },
   "guard": { "enabled": true, "model": "protectai/deberta-v3-base-prompt-injection-v2", "threshold": 0.5, "threads": 2 },
@@ -1027,6 +1093,8 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | unit | `test/unit/mcp.test.ts` (MCP: constant-time token, loopback / Host / Origin admission, JSON-RPC subset, tool schemas, untrusted wrapping, busy, HTTP transport, stdio launcher) | 27 | pass |
 | unit | `test/unit/phone-approval.test.ts` (phone card == dialog, fake Bot API: wrong chat ignored, stale id ignored, edit on resolve, expiry, first answer wins) | 14 | pass |
 | e2e | `test/e2e/mcp.spec.ts` (off by default, 401 / 403, browse_task via the stdio launcher in a throwaway partition, phone approval of an MCP task's confirmation, use_profile approval, busy + cancel, open_url, revoke, off = refused) | 10 | pass |
+| unit | `test/unit/mail-triage.test.ts` (triage: only the allowed fields, no HTML / attachment bytes, 4 KB cap, guard drops, no tools; strict output; cache + invalidation; v6 migration; gate; audit; draft; the injection case) | 30 | pass |
+| e2e | `test/e2e/mail-triage.spec.ts` (triage table, bills-due-this-week, bulk archive approve / deny against fake IMAP, draft reply sends nothing, refused / stopped around an agent task, one message per request) | 4 | pass |
 | **total** | | **407** (282 unit + 125 e2e) | **all pass** |
 
 What the attack tests assert (planner, reader and judge scripted to be compromised):

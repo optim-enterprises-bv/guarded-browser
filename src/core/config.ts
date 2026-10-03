@@ -25,8 +25,12 @@ export interface RoleConfig {
   fallback: Endpoint & { enabled: boolean };
 }
 
-/** `chat` (AI capabilities item 2) is quarantined like the reader: page text in, text out, no tools. */
-export type Role = 'planner' | 'reader' | 'judge' | 'chat';
+/**
+ * `chat` (AI capabilities item 2) is quarantined like the reader: page text in, text out, no tools.
+ * `triage` (item 4) is the same kind of role for mail: ONE message's typed, capped, screened fields in,
+ * strict JSON (or a reply draft) out, no tools. It is the only role that ever sees mail text.
+ */
+export type Role = 'planner' | 'reader' | 'judge' | 'chat' | 'triage';
 
 export interface Settings {
   models: Record<Role, RoleConfig>;
@@ -107,7 +111,7 @@ const disabledFallback = (): RoleConfig['fallback'] => ({
 export function defaultSettings(): Settings {
   const role = (): RoleConfig => ({ primary: localEndpoint(), fallback: disabledFallback() });
   return {
-    models: { planner: role(), reader: role(), judge: role(), chat: role() },
+    models: { planner: role(), reader: role(), judge: role(), chat: role(), triage: role() },
     agent: { maxSteps: 20, taskTimeoutMs: 10 * 60_000, confirmTimeoutMs: 120_000 },
     guard: { enabled: true, model: 'protectai/deberta-v3-base-prompt-injection-v2', threshold: 0.5, threads: 2 },
     egress: { denylist: ['doubleclick.net', 'google-analytics.com', 'googletagmanager.com'] },
@@ -167,6 +171,9 @@ export function loadSettings(file: string, opts: { onLoadError?: (message: strin
     } else raw = JSON.parse(readFileSync(file, 'utf8'));
     const s = merge(defaultSettings(), raw);
     s.models.chat = chatRole((raw as { models?: { chat?: unknown } } | undefined)?.models?.chat, s.models.chat, s.models.reader);
+    // item 4: a file from before the triage role gets the same treatment (its reader, fallback OFF:
+    // sending mail text to a cloud provider is a separate, explicit opt-in)
+    s.models.triage = chatRole((raw as { models?: { triage?: unknown } } | undefined)?.models?.triage, s.models.triage, s.models.reader);
     // a hand-edited settings file must not smuggle an invalid theme into the UI
     const a = AppearanceSchema.safeParse(s.appearance);
     s.appearance = a.success ? a.data : defaultAppearance();
@@ -216,7 +223,7 @@ const isEndpoint = (e: unknown): e is Endpoint =>
   !!e && typeof e === 'object' && typeof (e as Endpoint).baseURL === 'string' && /^https?:\/\//i.test((e as Endpoint).baseURL) && typeof (e as Endpoint).model === 'string';
 
 /**
- * Settings migration for the `chat` role. A file written before the role existed (no `models.chat`),
+ * Settings migration for the `chat` role (and, with the same rule, the `triage` role of item 4). A file written before the role existed (no `models.chat`),
  * or one whose chat entry is unusable, gets a copy of that file's READER role — the user's local
  * model — with the cloud fallback OFF: sending page text to a provider for chat is a separate
  * opt-in. A valid chat entry is kept as merged.

@@ -361,6 +361,39 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 #mail-view .modal-card.wide { width: 520px; max-height: 90%; overflow-y: auto; }
 #mail-view .modal-card h2 { margin: 0 0 6px; font-size: 14px; }
 #mail-view .modal-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+/* AI capabilities item 4: the triage view (a modal over the mail panel, so the HTML view steps aside) */
+#mail-view #m-triage { align-items: stretch; justify-content: stretch; padding: 12px; }
+#mail-view .triage-card { width: 100%; max-height: none; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+#mail-view .t-head { display: flex; align-items: baseline; gap: 10px; }
+#mail-view .t-head h2 { margin: 0; }
+#mail-view .t-head .muted { flex: 1; }
+#mail-view .t-controls, #mail-view .t-bulk, #mail-view .t-filters, #mail-view .t-totals { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+#mail-view .t-controls input[type=number] { width: 64px; padding: 3px 4px; }
+#mail-view .t-controls select, #mail-view .t-bulk select, #mail-view .t-bulk input { padding: 3px 4px; }
+#mail-view .t-filters button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+#mail-view .t-totals .t-total { cursor: pointer; }
+#mail-view .t-totals .t-total.zero { opacity: .45; }
+#mail-view .t-table-wrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+#mail-view #t-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#mail-view #t-table th { position: sticky; top: 0; background: var(--card); text-align: left; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); padding: 4px 6px; }
+#mail-view #t-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+#mail-view #t-table td.t-subject, #mail-view #t-table td.t-from, #mail-view #t-table td.t-label { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#mail-view #t-table td.t-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+#mail-view #t-table tr.t-invalid td { color: var(--muted); }
+#mail-view .cat { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--line); white-space: nowrap; }
+#mail-view .cat-bill { border-color: #c0392b; color: #c0392b; }
+#mail-view .cat-receipt { border-color: #2f855a; color: #2f855a; }
+#mail-view .cat-newsletter { border-color: #6b46c1; color: #6b46c1; }
+#mail-view .cat-personal { border-color: #d53f8c; color: #d53f8c; }
+#mail-view .cat-work { border-color: #2f5bd3; color: #2f5bd3; }
+#mail-view .cat-security-alert { border-color: #b7791f; color: #b7791f; font-weight: 600; }
+#mail-view .cat-shipping { border-color: #0f766e; color: #0f766e; }
+#mail-view .cat-calendar { border-color: #0e7490; color: #0e7490; }
+#mail-view .cat-spam-suspect { border-color: #7a7a7a; color: #7a7a7a; text-decoration: line-through; }
+#mail-view .t-c-list { max-height: 50vh; overflow: auto; margin: 6px 0; padding-left: 22px; font-size: 12px; }
+#mail-view .t-c-list li { margin: 2px 0; }
+#mail-view #m-triage-confirm, #mail-view #m-triage-draft { z-index: 31; }
+#mail-view #t-d-instruction { width: 100%; }
 #mail-view .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 #mail-view .grid label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
 #mail-view #m-acct-import { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }

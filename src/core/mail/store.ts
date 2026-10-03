@@ -32,7 +32,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const DB_FILE = 'mail.sqlite';
 
 /** hard ceiling on stored messages; a store beyond this refuses writes instead of growing forever */
@@ -540,6 +540,25 @@ CREATE TABLE IF NOT EXISTS draft_attachment (
 );
 `;
 
+/**
+ * v6 (AI capabilities item 4): the triage cache. One row per message and model: the hash of exactly
+ * what the model was given, and the VALIDATED facts it returned (JSON, re-validated on every read). A
+ * body change deletes the message's rows (`setBody`), and a different input hash is a miss, so a cached
+ * answer never outlives the text it describes. Deleted with its message.
+ */
+const SCHEMA_V6 = `
+CREATE TABLE IF NOT EXISTS triage (
+  messageId INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+  model     TEXT NOT NULL,
+  inputHash TEXT NOT NULL DEFAULT '',
+  facts     TEXT NOT NULL DEFAULT '{}',
+  valid     INTEGER NOT NULL DEFAULT 0,
+  dropped   INTEGER NOT NULL DEFAULT 0,
+  createdAt INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (messageId, model)
+);
+`;
+
 /** v2: the HTML body, apart from the text, for the HTML reading view only (never indexed). */
 const SCHEMA_V2 = `
 CREATE TABLE message_html (
@@ -615,6 +634,7 @@ export class MailStore {
         if (!has('draft', 'forwardAttachments')) this.db.exec('ALTER TABLE draft ADD COLUMN forwardAttachments INTEGER NOT NULL DEFAULT 1');
         this.db.exec(SCHEMA_V5);
       }
+      if (v < 6) this.db.exec(SCHEMA_V6);
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       this.db.exec('COMMIT');
     } catch (e) {
@@ -900,6 +920,7 @@ export class MailStore {
   setBody(accountId: string, folder: string, uid: number, body: { text?: string; html?: string; rawHeader?: string; attachments?: Attachment[] }): Result<{ id: number }> {
     const row = this.byUid(accountId, folder, uid);
     if (!row) return { ok: false, error: 'unknown message' };
+    const before = (this.db.prepare('SELECT bodyText FROM message WHERE id = ?').get(row.id) as { bodyText: string } | undefined)?.bodyText ?? '';
     let text = cleanBody(body.text ?? '', MAX_BODY_TEXT);
     let remote = false;
     if (!text && typeof body.html === 'string' && body.html) {
@@ -915,6 +936,8 @@ export class MailStore {
     else this.db.prepare('DELETE FROM message_html WHERE messageId = ?').run(row.id);
     if (body.attachments) this.setAttachments(row.id, body.attachments);
     this.indexMessage(row.id);
+    // a triage answer describes the text it was given: a different body invalidates it
+    if (text !== before) this.triageForget(row.id);
     return { ok: true, id: row.id };
   }
 
@@ -1054,6 +1077,10 @@ export class MailStore {
       junk?: boolean;
       drafts?: boolean;
       hasAttachments?: boolean;
+      /** readFlag = 0: not yet read (unseen OR seen-but-unread) — the triage "unread" range */
+      notRead?: boolean;
+      /** receivedAt at or after this time (ms) */
+      since?: number;
       sinceUid?: number;
       sort?: 'date' | 'sender' | 'subject';
       limit?: number;
@@ -1073,6 +1100,8 @@ export class MailStore {
     if (opts.flagged) w.push('flagged = 1');
     if (opts.drafts) w.push('draft = 1');
     if (opts.hasAttachments) w.push('hasAttachments = 1');
+    if (opts.notRead) w.push('readFlag = 0');
+    if (opts.since !== undefined) add('receivedAt >= ?', Number(opts.since) || 0);
     if (opts.junk === true) w.push('junk = 1');
     if (opts.junk === false) w.push('junk = 0');
     if (opts.sinceUid !== undefined) add('uid > ?', Number(opts.sinceUid) || 0);
@@ -1357,6 +1386,28 @@ export class MailStore {
         .map((x) => Number(x))
         .filter((x) => Number.isInteger(x) && x > 0),
     }));
+  }
+
+  // ------------------------------------------------------------ triage cache (item 4)
+
+  /** The cached triage answer of one message for one model, or null. The caller re-validates `facts`. */
+  triageGet(messageId: number, model: string): { inputHash: string; facts: string; valid: boolean; dropped: number } | null {
+    const r = this.db.prepare('SELECT inputHash, facts, valid, dropped FROM triage WHERE messageId = ? AND model = ?').get(Number(messageId), clean(model, 300)) as
+      | { inputHash: string; facts: string; valid: number; dropped: number }
+      | undefined;
+    return r ? { inputHash: String(r.inputHash), facts: String(r.facts), valid: Number(r.valid) === 1, dropped: Number(r.dropped) } : null;
+  }
+
+  triagePut(messageId: number, model: string, entry: { inputHash: string; facts: unknown; valid: boolean; dropped: number }): void {
+    if (!this.byId(messageId)) return;
+    this.db
+      .prepare('INSERT OR REPLACE INTO triage (messageId, model, inputHash, facts, valid, dropped, createdAt) VALUES (?,?,?,?,?,?,?)')
+      .run(Number(messageId), clean(model, 300), clean(entry.inputHash, 64), JSON.stringify(entry.facts ?? {}).slice(0, 4_000), entry.valid ? 1 : 0, Math.max(0, Math.floor(Number(entry.dropped) || 0)), nowMs());
+  }
+
+  /** Drop every cached triage answer of one message (all models). */
+  triageForget(messageId: number): number {
+    return Number(this.db.prepare('DELETE FROM triage WHERE messageId = ?').run(Number(messageId)).changes);
   }
 
   // ------------------------------------------------------------ labels / filters

@@ -125,6 +125,7 @@
         <button id="m-compose-btn" data-testid="mail-compose" title="Compose a new message (Ctrl+N)">&#x270E; Compose</button>
         <button id="m-import" data-testid="mail-import" title="Import accounts from your himalaya config">&#x21e5; Import</button>
         <button id="m-flag" data-testid="mail-flag-filter" title="Flagged only">&#x2691;</button>
+        <button id="m-triage-btn" data-testid="mail-triage" title="Sort messages into bills, receipts, newsletters&#x2026; with a local model that cannot act">&#x2637; Triage</button>
         <input id="m-search" data-testid="mail-search" type="search" placeholder="Mail Search" autocomplete="off" spellcheck="false" />
         <span id="m-search-state" class="muted small" data-testid="mail-search-state"></span>
         <div class="spacer"></div>
@@ -222,6 +223,72 @@
             <button id="m-acct-cancel" class="link" data-testid="mail-acct-cancel">Cancel</button>
           </div>
           <p id="m-acct-msg" class="small" data-testid="acct-msg"></p>
+        </div>
+      </div>
+      <!-- AI capabilities item 4: the triage view. Every value in it is set with textContent by
+           src/renderer/mail-triage.ts; the model's output is typed facts, and nothing here acts on it
+           without the confirmation below listing the exact messages. -->
+      <div id="m-triage" class="modal hidden" data-testid="triage-view">
+        <div class="modal-card triage-card">
+          <div class="t-head">
+            <h2>Triage</h2>
+            <span class="muted small">A model sorts each message from its sender's name and domain, subject, date, the first 4 KB of its text and its attachment names, one message at a time. It has no tools and cannot act: every change below is yours, after you confirm the exact list.</span>
+            <button id="t-close" class="link" data-testid="triage-close">Close</button>
+          </div>
+          <div class="t-controls">
+            <label class="small">Account <select id="t-account" data-testid="triage-account"></select></label>
+            <label class="small">Range <select id="t-range" data-testid="triage-range"><option value="unread">Unread</option><option value="days">Last N days</option><option value="folder">Current folder</option></select></label>
+            <label id="t-days-label" class="small hidden">days <input id="t-days" data-testid="triage-days" type="number" min="1" max="365" value="7" /></label>
+            <label class="small">at most <input id="t-max" data-testid="triage-max" type="number" min="1" max="200" value="50" /></label>
+            <button id="t-run" class="primary" data-testid="triage-run">Run triage</button>
+            <button id="t-stop" data-testid="triage-stop" disabled>Stop</button>
+            <span id="t-progress" class="muted small" data-testid="triage-progress"></span>
+          </div>
+          <p id="t-notice" class="small warn hidden" data-testid="triage-notice"></p>
+          <div class="t-filters" id="t-filters" data-testid="triage-filters">
+            <button data-filter="all" data-testid="triage-filter-all">All</button>
+            <button data-filter="bills-due-week" data-testid="triage-filter-bills">Bills due this week</button>
+            <button data-filter="needs-reply" data-testid="triage-filter-reply">Needs reply</button>
+            <button data-filter="newsletters" data-testid="triage-filter-newsletters">Newsletters</button>
+          </div>
+          <div id="t-totals" class="t-totals" data-testid="triage-totals"></div>
+          <div class="t-bulk">
+            <select id="t-action" data-testid="triage-action"><option value="archive">Archive</option><option value="move">Move to folder&#x2026;</option><option value="flag">Flag</option><option value="label">Label&#x2026;</option></select>
+            <input id="t-target" data-testid="triage-target" class="hidden" placeholder="folder" autocomplete="off" spellcheck="false" />
+            <select id="t-scope" data-testid="triage-scope"></select>
+            <button id="t-plan" data-testid="triage-plan">Review&#x2026;</button>
+            <span id="t-msg" class="small" data-testid="triage-msg"></span>
+          </div>
+          <div class="t-table-wrap">
+            <table id="t-table" data-testid="triage-table">
+              <thead><tr><th><input type="checkbox" id="t-all" data-testid="triage-select-all" title="Select every row shown" /></th><th>Category</th><th>Due</th><th>Amount</th><th>Reply?</th><th>Label</th><th>From</th><th>Subject</th><th></th></tr></thead>
+              <tbody id="t-rows" data-testid="triage-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div id="m-triage-confirm" class="modal hidden" data-testid="triage-confirm">
+        <div class="modal-card wide">
+          <h2 id="t-c-title" data-testid="triage-confirm-title"></h2>
+          <p class="muted small">Nothing has been changed yet. These are exactly the messages that will be changed on the server when you approve:</p>
+          <ol id="t-c-list" class="t-c-list" data-testid="triage-confirm-list"></ol>
+          <div class="modal-actions">
+            <button id="t-c-approve" class="primary" data-testid="triage-approve">Approve</button>
+            <button id="t-c-deny" data-testid="triage-deny">Deny</button>
+          </div>
+        </div>
+      </div>
+      <div id="m-triage-draft" class="modal hidden" data-testid="triage-draft-modal">
+        <div class="modal-card wide">
+          <h2>Draft a reply</h2>
+          <p id="t-d-about" class="muted small" data-testid="triage-draft-about"></p>
+          <input id="t-d-instruction" data-testid="triage-draft-instruction" maxlength="300" placeholder="One line: what should the reply say?" autocomplete="off" />
+          <p class="muted small">The model writes a draft from this message's text and your line. It opens in compose for you to edit; nothing is sent unless you press Send.</p>
+          <div class="modal-actions">
+            <button id="t-d-go" class="primary" data-testid="triage-draft-go">Write draft</button>
+            <button id="t-d-cancel" data-testid="triage-draft-cancel">Cancel</button>
+            <span id="t-d-msg" class="small" data-testid="triage-draft-msg"></span>
+          </div>
         </div>
       </div>
       <div id="m-status" data-testid="mail-status"></div>
