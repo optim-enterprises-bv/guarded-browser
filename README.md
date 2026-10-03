@@ -34,7 +34,8 @@ v1. Local models by default (any OpenAI-compatible server), optional cloud fallb
    hosts are blocked until you allow them). With split view, the task's host allowlist applies to
    every pane while the task runs, not just the agent's pane.
 8. **Reputation feeds lag new domains**, and attackers can show scanners a clean page.
-9. **Cloud fallback, if you enable it, sends your task and page text to that provider.**
+9. **Cloud fallback, if you enable it, sends your task and page text to that provider** (for the AI
+   chat: the page text and your chat messages).
 
 ## Quick start
 
@@ -171,7 +172,8 @@ untrusted). A short injection that the guard misses can still reach the planner 
 the policy / egress layers are what stop the consequences.
 
 ### 2. Quarantined reader
-No tools. Gets guarded page text (≤12k chars) wrapped in `<page_content>` plus the planner's query
+No tools. Gets guarded page text (≤12k chars; the semantic markdown snapshot described under
+[AI chat](#ai-chat), so hidden text is left out) wrapped in `<page_content>` plus the planner's query
 and a flat schema (`{"price":"number","currency":"string"}`, types `string | number | boolean |
 string[] | number[]`, `?` for nullable). Output is validated with a strict zod schema (unknown keys
 rejected, one retry), strings capped at 200 chars and arrays at 20, re-screened by the guard, then
@@ -377,6 +379,51 @@ panel, as text (never HTML). The X-ray is read-only: it makes no request, sends 
 and does not change what the agent sees (the agent's snapshot and page text ignore the host, which
 sits outside `<body>`). Limitation: a page watching DOM mutations can see that one empty element was
 added to `<html>` while the X-ray is on, but not its contents.
+
+### AI chat
+The **AI chat** rail button (speech balloon), **Ctrl+Shift+K** or **View → AI Chat** opens a chat about
+the current tab: summarise it, explain something, ask a question, compare it with another tab.
+
+* **Quarantined role.** The chat model is a fourth model role, `chat` (OpenAI-compatible, local by
+  default, optional cloud fallback, same shape as planner / reader / judge; Settings → *chat*). Like
+  the reader it may read page text, and like the reader it has **no tools**: the streaming request
+  has no `tools` field (removed even if a hand-edited `extraBody` adds one). It gets the page and your
+  messages, nothing else: no task values (the running task's secrets, emails and card / phone
+  numbers are replaced with `[redacted]` even if the page shows them), no mail, history, bookmarks,
+  cookies or other tabs — unless you add a tab with **Include tab…**, which adds that tab's text too.
+  The system prompt tells it page content is untrusted data and that only your messages are
+  instructions.
+* **Context = a semantic markdown snapshot** of the page (`src/core/markdown.ts`): headings,
+  paragraphs, lists, tables, links as `[text](url)`, images as their alt text, and form summaries
+  (labels and types, never values). It is extracted in the isolated world and leaves out everything
+  the Injection X-ray calls hidden (display:none, visibility, opacity, tiny font, clipped, off-screen,
+  low contrast, aria-hidden, comments, alt text of tracking pixels), plus scripts, styles, noscript,
+  templates, iframes and select options; it is size-capped (16k characters for the current tab, 8k
+  for an included one). The reader role gets the same markdown instead of flat `innerText`.
+* **Guard screening.** Each line of that markdown is scored by the guard; flagged lines are dropped
+  before the model sees them and the reply says *N suspicious fragments were removed from what the AI
+  saw*, with a link to the X-ray. With the guard not loaded the reply says the page was **not
+  screened** (and the model is told so too).
+* **Replies are text.** A reply is parsed by a minimal markdown reader that builds DOM nodes (no
+  HTML is interpreted). Links show their URL and never open on their own; clicking an http(s) link
+  opens it in a new tab through the ordinary navigation path. Every reply written with page text in
+  context is labelled **page-derived**. Replies stream (server-sent events); **Stop** aborts the
+  request; a silent or failing endpoint ends with the error shown plainly.
+* **"Do it" never runs anything.** It copies *your* message — not the model's reply — into the
+  agent's task box, for you to edit and press **Run task**, which then goes through the normal
+  planner, policy and confirmations. The model read untrusted page text, so its words never become
+  planner input silently; if you want its suggestion as the task, copy it there yourself.
+* **Nothing is saved.** The conversation is per tab, in memory; **Clear** forgets it and closing the
+  tab forgets it. The audit log gets one `chat` event per reply with sizes, screening and endpoint,
+  never the text.
+* **Cloud fallback** for chat is the same switch as for the other roles and is off by default
+  (an older settings file gets a copy of its reader role with the fallback off). When it is on, the
+  chat panel says that page text and your messages go to that provider; when it is used, the reply
+  is labelled *via cloud fallback* and the agent panel shows the **CLOUD FALLBACK ACTIVE** banner.
+
+Code: `src/core/markdown.ts` (extractor + pure transform), `src/core/chat.ts` (request builder,
+redaction, screening), `src/core/chat-render.ts` (reply parsing), `StreamingLlmClient` in
+`src/core/llm.ts`, `src/main/runtime/ipc-chat.ts`, `src/renderer/chat.ts`.
 
 ### Profiles (Vivaldi / Chromium model)
 One app process; each **profile** is its own Chromium session plus its own app state, and opens in
@@ -737,7 +784,11 @@ model one that slipped through.)
   specially. WebRTC over TCP/TURN goes through the proxy (host-checked) but its payload is not
   inspected. DNS-over-HTTPS from page JS is ordinary HTTPS to an allowed or blocked host.
 * Cloud fallback, when you enable it, sends task, snapshots (planner) and page text (reader) to that
-  provider.
+  provider; for the chat role, page text and your chat messages.
+* **The AI chat reads page text.** It is quarantined (no tools, no task values, nothing persisted,
+  output shown as text only), but a page can still steer what it *says*; the guard drops lines it
+  flags, not all injections. Its replies are labelled page-derived and never become a task by
+  themselves.
 
 ## Models and configuration
 
@@ -753,7 +804,7 @@ Electron's per-app directory (`~/.config/guarded-browser` on Linux; override wit
       "primary":  { "baseURL": "http://127.0.0.1:1234/v1", "model": "default", "extraBody": { "enable_thinking": false } },
       "fallback": { "enabled": false, "baseURL": "https://api.openai.com/v1", "model": "gpt-4o-mini", "apiKeyEnv": "OPENAI_API_KEY" }
     },
-    "reader": { "...": "same shape" }, "judge": { "...": "same shape" }
+    "reader": { "...": "same shape" }, "judge": { "...": "same shape" }, "chat": { "...": "same shape" }
   },
   "agent": { "maxSteps": 20, "taskTimeoutMs": 600000, "confirmTimeoutMs": 120000 },
   "guard": { "enabled": true, "model": "protectai/deberta-v3-base-prompt-injection-v2", "threshold": 0.5, "threads": 2 },

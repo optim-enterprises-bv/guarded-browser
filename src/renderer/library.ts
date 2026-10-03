@@ -5,7 +5,7 @@
 type Bridge = { invoke(channel: string, ...args: unknown[]): Promise<any>; on(channel: string, fn: (p: any) => void): void };
 
 /** the sections the shared panel column can show */
-export type SectionId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail';
+export type SectionId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail' | 'chat';
 
 interface BNode { type: 'bookmark' | 'folder'; id: string; title: string; url?: string; nickname?: string; children?: BNode[] }
 interface HEntry { url: string; title: string; lastVisit: number; visits: number; sources: string[] }
@@ -18,6 +18,8 @@ const SIDE = 220;
  *  Vivaldi's Mail is a full-page pane — the reference screenshot is 2053 logical px wide — so a
  *  220 px column would put three columns of mail in a rail. Every other section keeps SIDE. */
 const MAIL_MIN = 720;
+/** the AI chat (item 2) is a conversation, not a list: a wider column than SIDE */
+const CHAT = 400;
 /** the rail's own width, added to the left inset while a panel is open under it (ticket 17);
  *  the rail itself reports the real value, so this starts at 0 */
 let RAIL = 0;
@@ -47,7 +49,7 @@ export function initLibrary(gb: Bridge) {
     const top = TOP + (showBar ? BAR : 0);
     document.documentElement.style.setProperty('--top', `${top}px`);
     // the rail is always a left inset while it is visible; the column adds to it when open
-    void gb.invoke('chrome:insets', top, RAIL + (side ? (side === 'mail' ? mailWidth() : SIDE) : 0), STATUS);
+    void gb.invoke('chrome:insets', top, RAIL + (side ? (side === 'mail' ? mailWidth() : side === 'chat' ? CHAT : SIDE) : 0), STATUS);
     // a web panel is a WebContentsView positioned by main, so main needs the column's real box.
     // The rect is measured from the DOM (not assumed) because the column width is a CSS token.
     const col = document.getElementById(side ? `${side}-view` : '');
@@ -87,12 +89,14 @@ export function initLibrary(gb: Bridge) {
     workspaces: 'Workspaces',
     webpanels: 'Web panels',
     mail: 'Mail',
+    chat: 'AI chat',
   };
   function openSide(which: SectionId) {
     side = which;
     $('side').classList.remove('hidden');
     // mail spans the window; the other sections are a narrow column
     $('side').classList.toggle('side-wide', which === 'mail');
+    $('side').classList.toggle('side-chat', which === 'chat');
     $('side-title').textContent = SECTION_TITLE[which];
     for (const id of Object.keys(SECTION_TITLE) as SectionId[]) {
       const sec = $(`${id}-view`);
@@ -107,7 +111,7 @@ export function initLibrary(gb: Bridge) {
   function closeSide() {
     side = null;
     $('side').classList.add('hidden');
-    $('side').classList.remove('side-wide');
+    $('side').classList.remove('side-wide', 'side-chat');
     insets();
     void gb.invoke('panels:show', null);
   }

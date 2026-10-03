@@ -364,6 +364,7 @@ function buildMenu() {
         act('Downloads Panel', 'panel.downloads'),
         { type: 'separator' },
         act('X-ray', 'view.xray'),
+        act('AI Chat', 'view.chat'),
         { type: 'separator' },
         { role: 'togglefullscreen' },
         { role: 'toggleDevTools' },

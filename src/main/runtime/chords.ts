@@ -189,6 +189,9 @@ function runChord(input: { key: string; control?: boolean; meta?: boolean; shift
     case 'view.xray':
       rt.toggleXray();
       break;
+    case 'view.chat':
+      sendUI('shortcut', 'chat');
+      break;
   }
   return true;
 }

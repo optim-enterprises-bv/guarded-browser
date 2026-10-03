@@ -49,6 +49,7 @@ export const ALL_ACTIONS: ChordAction[] = [
   'view.translate',
   'mail.open',
   'view.xray',
+  'view.chat',
 ];
 
 /** Human labels for the settings UI. */
@@ -92,6 +93,7 @@ export const ACTION_LABELS: Record<ChordAction, string> = {
   'view.translate': 'Translate page',
   'mail.open': 'Open Mail',
   'view.xray': 'Injection X-ray',
+  'view.chat': 'AI chat',
 };
 
 // ---------- chord string parsing ----------

@@ -24,6 +24,7 @@ import type { StackModel } from '../../core/tab-stacks';
 import type { TabHostLog } from '../../core/xray';
 import type { Theme } from '../../core/theme';
 import type { WorkspaceStore } from '../../core/workspaces';
+import type { StreamingLlmClient } from '../../core/llm';
 import type { ZoomStore } from '../../core/zoom';
 import type { ConfirmBroker } from '../confirm';
 import type { ExtensionList } from '../extensions';
@@ -101,6 +102,8 @@ export interface RuntimeDeps {
   runAction(action: string): boolean;
   /** toggle the Injection X-ray of the active tab (the chord / menu path; read-only) */
   toggleXray(): void;
+  /** the quarantined `chat` role's streaming client (no tools; fallback reported like every role) */
+  chatClient(): StreamingLlmClient;
   chordTable(): Chord[];
   /** the per-profile mail controller (ticket 37c), created on first use */
   mail(): MailController;

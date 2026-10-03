@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { ActionOutcome, BrowserDriver } from '../core/agent';
 import type { FormField, Snapshot } from '../core/types';
 import { ISOLATED_WORLD, PAGE_TEXT_JS, SNAPSHOT_JS, actionJs } from './page-scripts';
+import { MARKDOWN_JS, normalizeMdPage, pageMarkdown } from '../core/markdown';
 import { MAX_TILES, computeTiles, contentArea, tooSmall, defaultRatios, dragDivider, innerRect, type DividerGeometry, type Rect, type TileLayout, type TileState } from './tile-layout';
 import { TabGuardBook, type TabGuardState } from './tab-guard';
 
@@ -807,8 +808,17 @@ export class ElectronDriver implements BrowserDriver {
     }
   }
 
+  /**
+   * Page text for the quarantined reader: the semantic markdown snapshot (core/markdown.ts — no
+   * hidden text by the X-ray rules, links and tables kept), or innerText if the extractor fails.
+   */
   async pageText(): Promise<string> {
     await waitForLoad(this.wc);
+    try {
+      return pageMarkdown(normalizeMdPage(await this.run<unknown>(MARKDOWN_JS)), 60_000).markdown;
+    } catch {
+      /* fall back to the flat text */
+    }
     try {
       return await this.run<string>(PAGE_TEXT_JS);
     } catch {

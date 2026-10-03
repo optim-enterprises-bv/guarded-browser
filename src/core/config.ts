@@ -1,4 +1,4 @@
-// Settings file (settings.json in userData). Three model roles, each with an optional cloud fallback.
+// Settings file (settings.json in userData). Four model roles, each with an optional cloud fallback.
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -25,7 +25,8 @@ export interface RoleConfig {
   fallback: Endpoint & { enabled: boolean };
 }
 
-export type Role = 'planner' | 'reader' | 'judge';
+/** `chat` (AI capabilities item 2) is quarantined like the reader: page text in, text out, no tools. */
+export type Role = 'planner' | 'reader' | 'judge' | 'chat';
 
 export interface Settings {
   models: Record<Role, RoleConfig>;
@@ -98,7 +99,7 @@ const disabledFallback = (): RoleConfig['fallback'] => ({
 export function defaultSettings(): Settings {
   const role = (): RoleConfig => ({ primary: localEndpoint(), fallback: disabledFallback() });
   return {
-    models: { planner: role(), reader: role(), judge: role() },
+    models: { planner: role(), reader: role(), judge: role(), chat: role() },
     agent: { maxSteps: 20, taskTimeoutMs: 10 * 60_000, confirmTimeoutMs: 120_000 },
     guard: { enabled: true, model: 'protectai/deberta-v3-base-prompt-injection-v2', threshold: 0.5, threads: 2 },
     egress: { denylist: ['doubleclick.net', 'google-analytics.com', 'googletagmanager.com'] },
@@ -155,6 +156,7 @@ export function loadSettings(file: string, opts: { onLoadError?: (message: strin
       raw = r.value;
     } else raw = JSON.parse(readFileSync(file, 'utf8'));
     const s = merge(defaultSettings(), raw);
+    s.models.chat = chatRole((raw as { models?: { chat?: unknown } } | undefined)?.models?.chat, s.models.chat, s.models.reader);
     // a hand-edited settings file must not smuggle an invalid theme into the UI
     const a = AppearanceSchema.safeParse(s.appearance);
     s.appearance = a.success ? a.data : defaultAppearance();
@@ -191,6 +193,22 @@ export function loadSettings(file: string, opts: { onLoadError?: (message: strin
   } catch {
     return defaultSettings();
   }
+}
+
+const isEndpoint = (e: unknown): e is Endpoint =>
+  !!e && typeof e === 'object' && typeof (e as Endpoint).baseURL === 'string' && /^https?:\/\//i.test((e as Endpoint).baseURL) && typeof (e as Endpoint).model === 'string';
+
+/**
+ * Settings migration for the `chat` role. A file written before the role existed (no `models.chat`),
+ * or one whose chat entry is unusable, gets a copy of that file's READER role — the user's local
+ * model — with the cloud fallback OFF: sending page text to a provider for chat is a separate
+ * opt-in. A valid chat entry is kept as merged.
+ */
+export function chatRole(rawChat: unknown, merged: RoleConfig, reader: RoleConfig): RoleConfig {
+  const fb = (merged as Partial<RoleConfig> | undefined)?.fallback;
+  if (rawChat && typeof rawChat === 'object' && isEndpoint(merged?.primary) && isEndpoint(fb) && typeof fb.enabled === 'boolean') return merged;
+  const copy = JSON.parse(JSON.stringify(reader)) as RoleConfig;
+  return { primary: copy.primary, fallback: { ...copy.fallback, enabled: false } };
 }
 
 export function saveSettings(file: string, s: Settings): void {

@@ -54,7 +54,9 @@ export type ChordAction =
   // the ONE dispatcher rather than three code paths that can drift.
   | 'mail.open'
   // AI capabilities item 1: the Injection X-ray of the active tab (read-only)
-  | 'view.xray';
+  | 'view.xray'
+  // AI capabilities item 2: the AI chat panel (the quarantined chat role)
+  | 'view.chat';
 
 export interface Chord {
   /** lower-case key as reported by Electron's input event ('t', '=', 'f6', 'tab', '1'..'9') */
@@ -106,6 +108,7 @@ export const DEFAULT_CHORDS: Chord[] = [
   { key: 'f9', action: 'tab.stripToggle' },
   { key: 't', ctrl: true, alt: true, action: 'view.translate' },
   { key: 'x', ctrl: true, shift: true, action: 'view.xray' },
+  { key: 'k', ctrl: true, shift: true, action: 'view.chat' },
 ];
 
 /** Ctrl+1..9: 1..8 select that tab, 9 selects the last one. */

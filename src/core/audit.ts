@@ -8,7 +8,9 @@ export type AuditType =
   | 'task-start' | 'task-end' | 'navigation' | 'snapshot' | 'guard' | 'reader' | 'judge' | 'policy'
   | 'confirmation' | 'planner-action' | 'action-result' | 'egress' | 'fallback' | 'error'
   // wave 2: new surfaces that change what the user (or the agent) can see
-  | 'page-actions' | 'panel' | 'hibernate' | 'translate' | 'capture' | 'bundle' | 'extensions' | 'session' | 'workspace' | 'stack';
+  | 'page-actions' | 'panel' | 'hibernate' | 'translate' | 'capture' | 'bundle' | 'extensions' | 'session' | 'workspace' | 'stack'
+  // AI capabilities item 2: one event per chat reply (sizes, screening and endpoint; never the text)
+  | 'chat';
 
 export interface AuditEvent {
   ts: string;

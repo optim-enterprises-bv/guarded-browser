@@ -18,7 +18,7 @@ interface Bridge {
   on(channel: string, fn: (payload: any) => void): void;
 }
 
-export type PanelId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail';
+export type PanelId = 'history' | 'bookmarks' | 'downloads' | 'sessions' | 'workspaces' | 'webpanels' | 'mail' | 'chat';
 
 export interface PanelDef {
   id: PanelId;
@@ -37,6 +37,8 @@ export const PANELS: PanelDef[] = [
   { id: 'webpanels', label: 'Web panels', section: 'webpanels-view' },
   // MAIL (ticket 37c): a panel in the shared column, NOT a second window.
   { id: 'mail', label: 'Mail (Ctrl+Shift+M)', section: 'mail-view' },
+  // AI CHAT (item 2): the quarantined chat role about the current tab
+  { id: 'chat', label: 'AI chat (Ctrl+Shift+K)', section: 'chat-view' },
 ];
 
 /** Geometry, MEASURED from the target screenshots (physical px at COSMIC scale 187%).
@@ -64,6 +66,8 @@ export function initPanels(
     onShow: (id: PanelId | null) => void;
     /** the MAIL panel refreshes itself when it becomes the visible section (ticket 37c) */
     onMailShown?: () => void;
+    /** so does the AI chat (item 2) */
+    onChatShown?: () => void;
   },
 ): PanelsUi {
   const rail = document.getElementById('rail') as HTMLElement;
@@ -115,6 +119,7 @@ export function initPanels(
     activeId = activeId === id ? null : id;
     paint();
     if (activeId === 'mail') opts.onMailShown?.();
+    if (activeId === 'chat') opts.onChatShown?.();
   }
 
   async function load(id: PanelId) {
@@ -313,4 +318,5 @@ const RAIL_GLYPH: Record<PanelId, string> = {
   workspaces: '\u{1F5C2}',
   webpanels: '\u{1F310}',
   mail: '\u2709',
+  chat: '\u{1F4AC}',
 };

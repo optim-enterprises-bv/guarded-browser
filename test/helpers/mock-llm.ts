@@ -1,11 +1,12 @@
-// Mock OpenAI-compatible server for tests. Each role (planner / reader / judge, detected from the
-// system prompt) is driven by a script, so tests can make a model "compromised" on purpose and
-// check that the code-level defences still hold.
+// Mock OpenAI-compatible server for tests. Each role (planner / reader / judge / chat, detected from
+// the system prompt) is driven by a script, so tests can make a model "compromised" on purpose and
+// check that the code-level defences still hold. A request with `stream: true` gets a text reply as
+// server-sent events (`chat.completion.chunk` deltas, then `data: [DONE]`), like a real server.
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-export type MockRole = 'planner' | 'reader' | 'judge' | 'unknown';
+export type MockRole = 'planner' | 'reader' | 'judge' | 'chat' | 'unknown';
 
 export interface MockCall {
   role: MockRole;
@@ -15,6 +16,10 @@ export interface MockCall {
   n: number;
   /** concatenated text of every message (for scripted "compromised" behaviour) */
   transcript: string;
+  /** a streamed reply whose client went away before the last event (Stop pressed) */
+  aborted?: boolean;
+  /** a streamed reply that was sent to the end */
+  completed?: boolean;
 }
 
 export type MockReply = (
@@ -25,6 +30,10 @@ export type MockReply = (
 ) & {
   /** hold the HTTP reply this long, so a test can observe state WHILE the model is thinking */
   delayMs?: number;
+  /** streamed replies: the text in these pieces (default: word by word) ... */
+  chunks?: string[];
+  /** ... with this pause between two events */
+  chunkDelayMs?: number;
 };
 
 export type Responder = (call: MockCall) => MockReply;
@@ -50,6 +59,7 @@ function roleOf(messages: MockCall['messages']): MockRole {
   if (sys.includes('You are the PLANNER')) return 'planner';
   if (sys.includes('You are the READER')) return 'reader';
   if (sys.includes('You are the JUDGE')) return 'judge';
+  if (sys.includes('You are the CHAT assistant')) return 'chat';
   return 'unknown';
 }
 
@@ -57,6 +67,7 @@ const defaults: Record<MockRole, Responder> = {
   planner: () => ({ tool: 'finish', args: { answer: 'mock: nothing to do' } }),
   reader: () => ({ json: {} }),
   judge: () => ({ json: { verdict: 'allow', reason: 'mock judge: serves the task' } }),
+  chat: () => ({ content: 'mock chat reply' }),
   unknown: () => ({ content: 'mock' }),
 };
 
@@ -93,6 +104,29 @@ export async function startMockLlm(): Promise<MockLlm> {
       if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
       if ('status' in reply) {
         res.writeHead(reply.status).end('mock error');
+        return;
+      }
+      if (body.stream === true && 'content' in reply) {
+        // server-sent events, one delta per piece; a client that disconnects ends the stream
+        const pieces = reply.chunks ?? (reply.content.match(/\S+\s*/g) ?? ['']);
+        let gone = false;
+        res.on('close', () => {
+          gone = true;
+          if (!call.completed) call.aborted = true;
+        });
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+        const event = (delta: Record<string, unknown>, finish: string | null) =>
+          `data: ${JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+        res.write(event({ role: 'assistant', content: '' }, null));
+        for (const p of pieces) {
+          if (gone) return;
+          if (reply.chunkDelayMs) await new Promise((r) => setTimeout(r, reply.chunkDelayMs));
+          if (gone) return;
+          res.write(event({ content: p }, null));
+        }
+        res.write(event({}, 'stop'));
+        call.completed = true;
+        res.end('data: [DONE]\n\n');
         return;
       }
       let message: Record<string, unknown>;

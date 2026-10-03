@@ -233,6 +233,24 @@
     <p class="muted small">A web panel is a live website pinned into this column. It uses this profile's session, so the same proxy, host allowlist and reputation rules apply. It is never the agent's tab.</p>
     <div id="webpanels-list" class="lib-list" data-testid="webpanels-list"></div>
   </section>
+  <section id="chat-view" class="hidden chat" data-testid="chat-panel" aria-label="AI chat">
+    <div class="chat-head">
+      <span id="chat-page" class="muted small chat-page" data-testid="chat-page"></span>
+      <button id="chat-clear" data-testid="chat-clear" title="Forget this tab's conversation">Clear</button>
+    </div>
+    <p class="muted small chat-about">The chat model is quarantined: it reads this page's text as untrusted data, plus your messages. It has no tools and cannot act. Nothing is saved; closing the tab forgets the conversation.</p>
+    <p id="chat-cloud" class="banner warn small hidden" data-testid="chat-cloud-notice"></p>
+    <div id="chat-log" class="chat-log" data-testid="chat-log" aria-live="polite"></div>
+    <div id="chat-included" class="chat-included" data-testid="chat-included"></div>
+    <select id="chat-include" data-testid="chat-include" title="Add another tab's text to the chat's context"><option value="">Include tab…</option></select>
+    <textarea id="chat-input" rows="3" data-testid="chat-input" placeholder="Ask about this page… (Enter sends, Shift+Enter for a new line)"></textarea>
+    <div class="row">
+      <button id="chat-send" class="primary" data-testid="chat-send">Send</button>
+      <button id="chat-stop" class="danger" data-testid="chat-stop" disabled>Stop</button>
+      <span id="chat-msg" class="muted small" data-testid="chat-msg"></span>
+    </div>
+    <p class="muted small chat-about" data-testid="chat-doit-help"><strong>Do it</strong> copies <strong>your</strong> message, not the AI's reply, into the agent's task box for you to edit and run. To use the AI's suggestion as the task, copy it into the task box yourself.</p>
+  </section>
 </aside>
 <div id="tile-notice" class="tile-notice hidden" data-testid="tile-notice" role="status"></div>
 <div id="tab-menu" class="menu hidden" data-testid="tab-menu" role="menu"></div>

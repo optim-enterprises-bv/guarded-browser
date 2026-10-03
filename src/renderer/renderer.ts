@@ -11,6 +11,7 @@ import { initPalette } from './palette';
 import { initStart } from './start';
 import { initWave2 } from './wave2';
 import { initXray } from './xray';
+import { initChat } from './chat';
 
 interface Bridge {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
@@ -434,6 +435,7 @@ function summarize(e: any): { text: string; cls: string } {
     case 'navigation': return { text: `${e.by ?? ''} ${e.url}${e.blocked ? ' (blocked)' : ''}`, cls: e.blocked ? 'block' : '' };
     case 'egress': if (e.layer === 'reputation') return { text: `REPUTATION ${e.decision} ${e.host}: ${e.reason}`, cls: e.decision === 'block' ? 'block' : '' };
       return { text: `${e.layer} ${e.decision} ${e.method} ${e.host}: ${e.reason}${e.taintIds ? ` [${e.taintIds.join(',')}]` : ''}`, cls: e.decision === 'block' ? 'block' : '' };
+    case 'chat': return { text: `reply (${e.replyChars ?? 0} chars) about ${(e.urls ?? []).join(', ') || 'no page'}: ${e.pageChars ?? 0} page chars, ${e.removed ?? 0} removed by the guard${e.screened === false ? ' (not screened)' : ''}${e.usedFallback ? ', via cloud fallback' : ''}`, cls: e.removed ? 'confirm' : '' };
     case 'action-result': return { text: `${e.action} ${e.ok ? 'ok' : `failed ${e.detail ?? ''}`}`, cls: e.ok ? '' : 'deny' };
     default: return { text: JSON.stringify(e).slice(0, 200), cls: '' };
   }
@@ -466,9 +468,9 @@ async function openSettings() {
   const s = current!;
   const form = $('settings-form');
   form.replaceChildren();
-  for (const role of ['planner', 'reader', 'judge'] as const) {
+  for (const role of ['planner', 'reader', 'judge', 'chat'] as const) {
     const r = s.models[role];
-    form.append(el('fieldset', {}, el('legend', {}, role),
+    form.append(el('fieldset', { 'data-testid': `settings-role-${role}` }, el('legend', {}, role === 'chat' ? 'chat (AI chat panel; quarantined, no tools)' : role),
       field('baseURL', `models.${role}.primary.baseURL`, r.primary.baseURL),
       field('model', `models.${role}.primary.model`, r.primary.model),
       field('apiKeyEnv', `models.${role}.primary.apiKeyEnv`, r.primary.apiKeyEnv ?? ''),
@@ -477,6 +479,9 @@ async function openSettings() {
       field('fallback baseURL', `models.${role}.fallback.baseURL`, r.fallback.baseURL),
       field('fallback model', `models.${role}.fallback.model`, r.fallback.model),
       field('fallback key env', `models.${role}.fallback.apiKeyEnv`, r.fallback.apiKeyEnv ?? ''),
+      el('p', { class: 'muted small' }, role === 'chat'
+        ? 'Cloud fallback, if you enable it, sends the page text and your chat messages to that provider.'
+        : 'Cloud fallback, if you enable it, sends your task and page text to that provider.'),
     ));
   }
   form.append(el('fieldset', {}, el('legend', {}, 'agent'),
@@ -596,6 +601,15 @@ const library = initLibrary(gb);
 void library.load();
 const statusUi = initStatus(gb, () => lastTabs.find((t) => t.active)?.id ?? null);
 const xrayUi = initXray(gb, () => lastTabs.find((t) => t.active)?.id ?? null);
+// AI chat (item 2): "Do it" only FILLS the task box with the user's own message; Run stays the user's
+const chatUi = initChat(gb, {
+  activeTab: () => lastTabs.find((t) => t.active)?.id ?? null,
+  prefillTask: (text) => {
+    const box = $<HTMLTextAreaElement>('task');
+    box.value = text;
+    box.focus();
+  },
+});
 
 /** the open/close of the section the rail is driving */
 initMailPanel(gb);
@@ -609,6 +623,7 @@ const panelsUi: { active(): string | null; toggle(id: any): void; close(): void;
     void autoSyncOnOpen();
     void mailPanel.refresh();
   },
+  onChatShown: () => chatUi.shown(),
 });
 const paletteUi = initPalette(gb, (item) => wave2Ui.runAction(item));
 
@@ -646,6 +661,11 @@ gb.on('shortcut', (what: string) => {
   // a link clicked in an HTML message opened a new tab: get the mail panel out of its way
   if (what === 'close-mail') {
     if (panelsUi.active() === 'mail') panelsUi.close();
+    return;
+  }
+  // AI chat (item 2): the chord / View menu entry toggle the chat panel like its rail button
+  if (what === 'chat') {
+    panelsUi.toggle('chat');
     return;
   }
   const m = /^panel:(history|bookmarks|downloads|sessions|workspaces)$/.exec(String(what));
@@ -691,6 +711,7 @@ gb.on('tabs', (l: TabInfo[]) => {
   renderTabs(l);
   statusUi.setTabs(l);
   xrayUi.tabsChanged();
+  chatUi.tabsChanged(l);
   if (geometry) renderPanes(geometry);
 });
 gb.on('egress', renderEgress);

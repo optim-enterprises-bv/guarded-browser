@@ -11,7 +11,7 @@ import { AgentTask } from '../core/agent';
 import { AuditLog } from '../core/audit';
 import { loadSettings, saveSettings, type Role, type Settings } from '../core/config';
 import { EgressController, hostKey, startProxy, type ProxyHandle } from '../core/egress';
-import { LlmClient } from '../core/llm';
+import { LlmClient, StreamingLlmClient } from '../core/llm';
 import { originOf, originsInTask } from '../core/policy';
 import { LocalLists, type FeedConfig, type ReputationChecker, type ReputationDb } from '../core/reputation';
 import type { ConfirmRequest, Guard } from '../core/types';
@@ -51,6 +51,7 @@ import { register as registerAgentIpc } from './runtime/ipc-agent';
 import { register as registerMailIpc } from './runtime/ipc-mail';
 import { register as registerMiscIpc } from './runtime/ipc-misc';
 import { register as registerXrayIpc } from './runtime/ipc-xray';
+import { register as registerChatIpc } from './runtime/ipc-chat';
 import { TabHostLog } from '../core/xray';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -167,6 +168,8 @@ const faviconCache = new Map<string, { mime: string; data: string }>();
 const tabHosts = new TabHostLog();
 /** the Injection X-ray (src/main/runtime/ipc-xray.ts); created with the IPC handlers */
 let xray: ReturnType<typeof registerXrayIpc> | null = null;
+/** the AI chat (src/main/runtime/ipc-chat.ts): per-tab conversations, in memory only */
+let chat: ReturnType<typeof registerChatIpc> | null = null;
 const reputation: ReputationChecker = { check: (h) => feeds.check(h, localLists) };
 let current: { task: AgentTask; tab: Tab } | null = null;
 const fallbackActive: Partial<Record<Role, string>> = {};
@@ -365,6 +368,7 @@ const rt: RuntimeDeps = {
   runChord: (input) => runChord(input),
   runAction: (action) => runAction(action),
   toggleXray: () => xray?.toggleActive(),
+  chatClient: () => new StreamingLlmClient('chat', () => settings.models.chat, onRoleFallback),
   chordTable: () => chordTable(),
   mail: () => api.mail(),
   mailView: () => api.mailView(),
@@ -410,16 +414,17 @@ function reputationState() {
   };
 }
 
-const llm = (role: Role) =>
-  new LlmClient(role, () => settings.models[role], (r, active, reason) => {
-    const was = fallbackActive[role];
-    if (active) fallbackActive[r as Role] = reason;
-    else delete fallbackActive[r as Role];
-    if (!!was !== active) {
-      if (active) audit.write('fallback', { role: r, reason });
-      sendUI('fallback', fallbackActive);
-    }
-  });
+/** a role switched to (or back from) its cloud fallback: banner + audit, the same for every role */
+function onRoleFallback(r: string, active: boolean, reason: string) {
+  const was = fallbackActive[r as Role];
+  if (active) fallbackActive[r as Role] = reason;
+  else delete fallbackActive[r as Role];
+  if (!!was !== active) {
+    if (active) audit.write('fallback', { role: r, reason });
+    sendUI('fallback', fallbackActive);
+  }
+}
+const llm = (role: Role) => new LlmClient(role, () => settings.models[role], onRoleFallback);
 
 /**
  * The user is taking a gated tab back. The gate is NOT lifted here: lifting before loadURL / goBack
@@ -634,6 +639,7 @@ function setupTab(tab: Tab) {
   wc.once('destroyed', () => {
     tabHosts.forget(wcId);
     xray?.forget(tab.id);
+    chat?.forget(tab.id);
   });
   // a committed navigation (new document, or in-page) clears the tab's X-ray
   wc.on('did-navigate-in-page', (_e, _url, isMainFrame) => {
@@ -913,6 +919,7 @@ function registerIpc() {
   registerMailIpc(on, rt);
   registerMiscIpc(on, rt);
   xray = registerXrayIpc(on, rt);
+  chat = registerChatIpc(on, rt);
 }
 
 

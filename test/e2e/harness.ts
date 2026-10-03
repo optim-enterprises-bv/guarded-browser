@@ -48,7 +48,7 @@ export interface App {
 export async function launch(o: LaunchOpts): Promise<App> {
   const userData = o.userData ?? mkdtempSync(join(tmpdir(), 'gb-e2e-'));
   const s = defaultSettings();
-  for (const role of ['planner', 'reader', 'judge'] as const) {
+  for (const role of ['planner', 'reader', 'judge', 'chat'] as const) {
     s.models[role].primary = { baseURL: o.llmUrl, model: 'default', extraBody: { enable_thinking: false }, timeoutMs: 10_000 };
   }
   s.agent.maxSteps = o.maxSteps ?? 10;
