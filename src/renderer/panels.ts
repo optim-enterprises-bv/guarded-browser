@@ -1,6 +1,6 @@
 // Panels (ticket 17): the full-height left icon rail, built to the geometry measured from the
 // target screenshot (docs/target-ui.md), not guessed:
-//   icon rail    51 physical / 27 logical px wide, icons centred, ~37 px pitch
+//   icon rail    95 physical / 51 logical px wide, icons centred, ~37 px pitch
 //   panel column 220 physical / 118 logical px
 //
 // INTEGRATION DECISION (recorded rather than hidden): the rail drives the EXISTING panel column
@@ -49,7 +49,7 @@ export const PANELS: PanelDef[] = [
  * `docs/target-ui.md` and `docs/target-mail-ui.md` both put the rail's right edge at physical x = 95,
  * i.e. 50.8 logical px, with the icons centred near logical 30. The previously shipped 27 was about
  * half that; the user approved correcting it (2026-10-02). `PANEL_WIDTH` is the BROWSER panel column
- * (220, unchanged); the mail window's tree column is a different number (206) and lives in mail.css. */
+ * (220, unchanged); the mail window's tree column is a different number (206) and lives in styles.css (#m-left). */
 export const RAIL_WIDTH = 51;
 export const PANEL_WIDTH = 220;
 

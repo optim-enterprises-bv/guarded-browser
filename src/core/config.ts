@@ -1,4 +1,4 @@
-// Settings file (settings.json in userData). Four model roles, each with an optional cloud fallback.
+// Settings file (settings.json in userData). Five model roles (planner, reader, judge, chat, triage), each with an optional cloud fallback.
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';

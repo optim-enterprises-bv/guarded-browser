@@ -91,8 +91,8 @@ async function refreshState() {
 
 /**
  * First-show behaviour: sync the SELECTED account once, so a freshly configured profile does not
- * present an empty folder tree as though there were no mail. Deliberately NOT "sync all" — eighteen
- * accounts would open eighteen connections; `Check all` is the explicit action for that.
+ * present an empty folder tree as though there were no mail. Deliberately NOT "sync all" — many
+ * accounts would open one connection each; `Check all` is the explicit action for that.
  */
 let autoSynced = false;
 export async function autoSyncOnOpen(): Promise<void> {
@@ -628,7 +628,7 @@ function wire() {
   $('m-compose-btn').onclick = () => void openCompose({ mode: 'new' });
   wireCompose();
   // One click from the toolbar: open the account panel and run the scan straight away, so configuring
-  // eighteen accounts is not "find the right modal first".
+  // many accounts is not "find the right modal first".
   $('m-import').onclick = () => {
     $('m-account-form').classList.remove('hidden');
     $('m-acct-msg').textContent = '';

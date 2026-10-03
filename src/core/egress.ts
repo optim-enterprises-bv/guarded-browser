@@ -7,7 +7,7 @@
 //   - agent task running: host allowlist (task hosts + tab origin + hosts the user approved)
 //
 // Layer 2 (content): checkRequest() is called from session.webRequest.onBeforeRequest with the
-// full URL and upload body; it finds taint-registry values (with URL-encoding / base64 / case
+// full URL and upload body; it finds taint-registry values (with URL-encoding / base64 / hex / case
 // normalisation) that are not covered by a flow the user confirmed.
 //
 // Host keys are "hostname:port" (default port filled in), so 127.0.0.1:4001 and 127.0.0.1:4002

@@ -12,7 +12,7 @@ interface HEntry { url: string; title: string; lastVisit: number; visits: number
 
 const TOP = 84;
 const BAR = 28;
-// measured (docs/target-ui.md): panel column 220 logical, rail 27 logical
+// measured (docs/target-ui.md): panel column 220 logical, rail 51 logical (RAIL_WIDTH in panels.ts)
 const SIDE = 220;
 /** MAIL is a full view, not a list: it takes the whole content area beside the rail (ticket 37c).
  *  Vivaldi's Mail is a full-page pane — the reference screenshot is 2053 logical px wide — so a

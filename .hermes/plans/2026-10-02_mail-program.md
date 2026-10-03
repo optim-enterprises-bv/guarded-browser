@@ -7,7 +7,7 @@ The user has overridden that for **Mail** specifically. Calendar, tasks and note
 scope; feeds are revisited as optional (42).
 
 **Why the override is defensible here, when it was not in the original plan:** the original
-objection was "no gain" — the user already runs James. That reasoning was about *their* workflow,
+objection was "no gain" — the user already runs a self-hosted mail server. That reasoning was about *their* workflow,
 not the product. As a parity claim ("does this browser do what Vivaldi does") Mail is a real gap,
 and the product's whole premise is that the *agent* is hardened; mail is the single highest-value
 thing a hardened browser can hold, precisely because it is the canonical lethal-trifecta payload.
@@ -351,7 +351,7 @@ overlay read back with vision). Ticket 37 was built against those numbers.
 
 **Why it exists:** the mail window shipped with an empty account list, and the user asked why. The
 answer was "nothing has added one" — but the values were already on disk in
-`~/.config/himalaya/config.toml` (18 accounts), so making the user retype eighteen host/port/TLS/login
+`~/.config/himalaya/config.toml` (many accounts), so making the user retype every host/port/TLS/login
 triples was pointless work. This ticket reads that file.
 
 **Files:** `src/main/mail/import.ts` (parser + plan), `mail:import-scan` / `mail:import-apply` in
@@ -374,7 +374,7 @@ modal, `test/unit/mail-import.test.ts` (17 tests, including two that run against
   values with escapes and `#` inside them, bounded at 64 accounts, first-value-wins on a duplicate key.
   Nothing is `eval`ed and no key path is dynamic.
 - **Dry-run against the real config: 18 importable, 0 skipped** — 2 Gmail (imap.gmail.com:993, each with
-  the send caveat) and 16 on one self-hosted James server (implicit TLS, 993),
+  the send caveat) and the rest on one self-hosted server (implicit TLS, 993),
   every one with a stored password. Verified by screenshot too: the modal lists the config path, "18
   account(s) to import", checked rows with address@host:port, and the Gmail caveats in yellow.
 - Verified: typecheck clean; unit **511/511, 26 files**; mail e2e 6/6; full e2e and the RPM recorded in
@@ -437,11 +437,11 @@ push/event ban above is asserted by a test rather than left to review.
 
 ### 37d — Sync on open, and a truthful empty state — **BUILT 2026-10-02**
 
-**Why it exists:** after 37b imported 18 accounts, the user still saw no mail. The store was correct
-(18 accounts, empty folder table, zero messages) — `syncFolders()` only runs inside a sync, and nothing
+**Why it exists:** after 37b imported the accounts, the user still saw no mail. The store was correct
+(accounts present, empty folder table, zero messages) — `syncFolders()` only runs inside a sync, and nothing
 ever ran one. Three fixes:
 - the panel syncs the SELECTED account once, the first time it is shown, so an empty tree means "no
-  mail" rather than "never asked" — deliberately not a sync-all, which would open eighteen connections;
+  mail" rather than "never asked" — deliberately not a sync-all, which would open one connection per account;
   `Check all` (⇉) is the explicit action for that and reports n/total;
 - the empty state distinguishes "no account configured" from "configured, not synced yet";
 - the panel refuses to auto-sync while the secret store is locked, because authenticating with no
@@ -552,7 +552,7 @@ same reason as Vivaldi Sync (31): it needs a server and an account model.
 
 1. **Mail window vs panel column** — this program puts mail in its own window (rail button +
    `Ctrl+Shift+M`). The parity plan's panel column stays chrome-data-only. Confirm.
-2. **First account to target** — recommended: **your own self-hosted James IMAP/SMTP** (no
+2. **First account to target** — recommended: **your own self-hosted IMAP/SMTP server** (no
    third-party client registration, works with the fixture-server tests), then a generic
    IMAP+app-password account, then Gmail OAuth (which needs a Google Cloud OAuth client; that
    registration is yours to make).

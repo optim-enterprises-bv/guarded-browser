@@ -1,7 +1,7 @@
 // Import accounts from a himalaya config (ticket 37b).
 //
 // The user's himalaya setup already holds every mail account they own — host, port, TLS mode, the
-// login, the folder aliases and the credential. Asking them to retype eighteen of those into a form is
+// login, the folder aliases and the credential. Asking them to retype a dozen or more of those into a form is
 // the kind of pointless work that makes a new client not get used, so the mail window can read that
 // file and configure them all.
 //
@@ -172,7 +172,7 @@ export interface ImportPlan {
  *
  * The account record carries NO password (that is the whole point of the split), and every entry
  * reports its own caveats rather than a single global warning — a Gmail account whose send needs
- * STARTTLS is a different situation from a James account that works.
+ * STARTTLS is a different situation from an implicit-TLS account that works.
  */
 export function buildImportPlan(parsed: ParsedConfig, opts: { accountIdPrefix?: string } = {}): ImportPlan {
   const imported: ImportPlanEntry[] = [];
