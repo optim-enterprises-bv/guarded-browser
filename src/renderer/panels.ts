@@ -106,7 +106,9 @@ export function initPanels(
   bottom.append(gear);
 
   function applyInset() {
-    const left = railVisible ? RAIL_WIDTH + (activeId ? PANEL_WIDTH : 0) : 0;
+    // the RAIL only: the library adds the open column's own width (220, or the full width for mail).
+    // Adding PANEL_WIDTH here too counted the column twice and left a 220 px gap beside every panel.
+    const left = railVisible ? RAIL_WIDTH : 0;
     opts.onInset(left);
   }
 
