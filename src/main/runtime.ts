@@ -50,6 +50,8 @@ import { register as registerSettingsIpc } from './runtime/ipc-settings';
 import { register as registerAgentIpc } from './runtime/ipc-agent';
 import { register as registerMailIpc } from './runtime/ipc-mail';
 import { register as registerMiscIpc } from './runtime/ipc-misc';
+import { register as registerXrayIpc } from './runtime/ipc-xray';
+import { TabHostLog } from '../core/xray';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Handler = (e: any, ...args: any[]) => unknown;
@@ -161,6 +163,10 @@ let gestureTrail: Point[] = [];
 let bookmarkSort: SortMode = 'manual';
 /** favicon bytes by origin (in memory only; decoded in the sandboxed renderer) */
 const faviconCache = new Map<string, { mime: string; data: string }>();
+/** hosts each tab's pages requested, for the Injection X-ray (in memory, forgotten with the tab) */
+const tabHosts = new TabHostLog();
+/** the Injection X-ray (src/main/runtime/ipc-xray.ts); created with the IPC handlers */
+let xray: ReturnType<typeof registerXrayIpc> | null = null;
 const reputation: ReputationChecker = { check: (h) => feeds.check(h, localLists) };
 let current: { task: AgentTask; tab: Tab } | null = null;
 const fallbackActive: Partial<Record<Role, string>> = {};
@@ -335,6 +341,7 @@ const rt: RuntimeDeps = {
   get lastFindQuery() {
     return lastFindQuery;
   },
+  tabHosts,
   sendUI,
   state,
   reputationState,
@@ -357,6 +364,7 @@ const rt: RuntimeDeps = {
   openPanel: (url) => openPanel(url),
   runChord: (input) => runChord(input),
   runAction: (action) => runAction(action),
+  toggleXray: () => xray?.toggleActive(),
   chordTable: () => chordTable(),
   mail: () => api.mail(),
   mailView: () => api.mailView(),
@@ -621,6 +629,16 @@ const lastFindQuery = new Map<number, string>();
 function setupTab(tab: Tab) {
   const wc = tab.wc;
   installShortcuts(wc);
+  // the X-ray's per-tab state and host log go with the tab
+  const wcId = wc.id;
+  wc.once('destroyed', () => {
+    tabHosts.forget(wcId);
+    xray?.forget(tab.id);
+  });
+  // a committed navigation (new document, or in-page) clears the tab's X-ray
+  wc.on('did-navigate-in-page', (_e, _url, isMainFrame) => {
+    if (isMainFrame) xray?.onNavigate(tab);
+  });
   wc.on('page-favicon-updated', (_e, favicons) => {
     tab.favicons = favicons.slice(0, 4).map((f) => String(f).slice(0, 256 * 1024));
     // favicons for history / bookmarks: same capped fetch, never during an agent task
@@ -696,6 +714,7 @@ function setupTab(tab: Tab) {
   });
   wc.on('will-redirect', (e) => guardNav(e, 'redirect'));
   wc.on('did-navigate', (_e, url) => {
+    xray?.onNavigate(tab);
     if (current?.tab === tab) {
       const o = originOf(url);
       if (o) tabs.addGuardOrigin(tab.id, o);
@@ -893,6 +912,7 @@ function registerIpc() {
   registerAgentIpc(on, rt);
   registerMailIpc(on, rt);
   registerMiscIpc(on, rt);
+  xray = registerXrayIpc(on, rt);
 }
 
 

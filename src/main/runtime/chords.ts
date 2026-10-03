@@ -186,6 +186,9 @@ function runChord(input: { key: string; control?: boolean; meta?: boolean; shift
     case 'view.translate':
       sendUI('shortcut', 'translate');
       break;
+    case 'view.xray':
+      rt.toggleXray();
+      break;
   }
   return true;
 }

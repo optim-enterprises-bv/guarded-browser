@@ -349,6 +349,35 @@ requests to listed hosts are dropped silently. Every hit is audited with the fee
 
 ## Browser features
 
+### Injection X-ray
+**X-ray** in the toolbar, **Ctrl+Shift+X**, or **View → X-ray** toggles it for the current tab. It shows
+what the page hides from you and what the guard thinks of its text, with no agent task needed:
+
+* **Hidden text, with the reason**: `display:none`, `visibility:hidden`, opacity ≈ 0, font-size under
+  4 px, clipped ("visually hidden") or off-screen boxes, text whose colour is within 1.5:1 contrast of
+  its composited background (computed styles, WCAG ratio), `aria-hidden`, `alt` / `title` /
+  `aria-label` text, HTML comments, `<noscript>` and `<template>` text.
+* **Guard verdicts**: hidden fragments and visible text blocks are scored by the guard model in one
+  batch; injection-like text is marked with its score. If the guard is not loaded the panel says
+  **guard not loaded** and shows no scores.
+* **Network**: third-party hosts this tab's page has requested (from the webRequest layer), each with
+  its reputation verdict (and whether it was blocked), and the page's forms with their action origin;
+  cross-origin actions and password / card fields that would be sent to another site are flagged.
+* **Summary**: *N hidden fragments, M flagged as injection, K third-party hosts (L flagged by
+  reputation), F forms (G sending off-site)*, then the lists, each fragment with **Reveal in page**
+  (scrolls to it and outlines it). **Re-scan** rescans; a navigation clears the X-ray.
+
+How it is contained (`src/core/xray.ts`, `src/main/runtime/ipc-xray.ts`, `src/renderer/xray.ts`):
+the scan runs in the isolated world, never the page's world, and returns capped plain data (main
+re-caps it). The overlay is drawn by the isolated world inside a **closed** shadow root on one empty
+host element (`all: initial`, maximum z-index, pointer events on the badges only, styled by a
+constructed stylesheet); its labels are fixed words and numbers, never page text. No attribute is
+set on any page node, and toggling off removes the host. Page text appears only in the chrome
+panel, as text (never HTML). The X-ray is read-only: it makes no request, sends nothing anywhere,
+and does not change what the agent sees (the agent's snapshot and page text ignore the host, which
+sits outside `<body>`). Limitation: a page watching DOM mutations can see that one empty element was
+added to `<html>` while the X-ray is on, but not its contents.
+
 ### Profiles (Vivaldi / Chromium model)
 One app process; each **profile** is its own Chromium session plus its own app state, and opens in
 its **own window** (the window title and the toolbar's profile button show its name and colour).
@@ -798,6 +827,8 @@ vitest + Playwright/Electron under `xvfb-run`; all models mocked, the guard is t
 | e2e | `test/e2e/splitview.spec.ts` (tiling + agent confined to its pane + small windows) | 5 | pass |
 | e2e | `test/e2e/themes.spec.ts` (themes + locked security styling) | 5 | pass |
 | e2e | `test/e2e/regressions-r5.spec.ts` (review round 5: split view + themes) | 6 | pass |
+| unit | `test/unit/xray.test.ts` (X-ray: hidden-text reasons, contrast, caps, guard scoring, hosts, forms, summary) | 23 | pass |
+| e2e | `test/e2e/xray.spec.ts` (X-ray: each reason, chord + menu, page cannot read the overlay, reputation + off-site forms, guard) | 5 | pass |
 | e2e | `test/e2e/packaged.spec.ts` (packaged app ignores test hooks; skipped without `npm run dist`) | 1 | pass |
 | e2e | `test/e2e/profiles.spec.ts` (two-window isolation, delete, migration, IPC spoofing) | 7 | pass |
 | e2e | `test/e2e/profiles-hardening.spec.ts` (proxy robustness, cross-profile proxy, open/delete race, sweeps, app-wide guard settings) | 5 | pass |

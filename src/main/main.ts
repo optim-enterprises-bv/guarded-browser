@@ -363,6 +363,8 @@ function buildMenu() {
         act('Bookmarks Panel', 'panel.bookmarks'),
         act('Downloads Panel', 'panel.downloads'),
         { type: 'separator' },
+        act('X-ray', 'view.xray'),
+        { type: 'separator' },
         { role: 'togglefullscreen' },
         { role: 'toggleDevTools' },
       ],

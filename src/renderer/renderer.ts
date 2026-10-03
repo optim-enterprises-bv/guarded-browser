@@ -10,6 +10,7 @@ import { initMailPanel, mailPanel, autoSyncOnOpen } from './mail-panel';
 import { initPalette } from './palette';
 import { initStart } from './start';
 import { initWave2 } from './wave2';
+import { initXray } from './xray';
 
 interface Bridge {
   invoke(channel: string, ...args: unknown[]): Promise<any>;
@@ -594,6 +595,7 @@ void appearanceUi.load();
 const library = initLibrary(gb);
 void library.load();
 const statusUi = initStatus(gb, () => lastTabs.find((t) => t.active)?.id ?? null);
+const xrayUi = initXray(gb, () => lastTabs.find((t) => t.active)?.id ?? null);
 
 /** the open/close of the section the rail is driving */
 initMailPanel(gb);
@@ -688,6 +690,7 @@ gb.on('state', renderState);
 gb.on('tabs', (l: TabInfo[]) => {
   renderTabs(l);
   statusUi.setTabs(l);
+  xrayUi.tabsChanged();
   if (geometry) renderPanes(geometry);
 });
 gb.on('egress', renderEgress);

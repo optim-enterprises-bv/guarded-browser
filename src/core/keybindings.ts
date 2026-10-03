@@ -48,6 +48,7 @@ export const ALL_ACTIONS: ChordAction[] = [
   'tab.stripToggle',
   'view.translate',
   'mail.open',
+  'view.xray',
 ];
 
 /** Human labels for the settings UI. */
@@ -90,6 +91,7 @@ export const ACTION_LABELS: Record<ChordAction, string> = {
   'tab.stripToggle': 'Cycle tab strip placement',
   'view.translate': 'Translate page',
   'mail.open': 'Open Mail',
+  'view.xray': 'Injection X-ray',
 };
 
 // ---------- chord string parsing ----------

@@ -16,6 +16,7 @@
     <button id="reload" title="Reload">&#8635;</button>
     <input id="address" class="lock-address" data-testid="address" spellcheck="false" placeholder="Enter a URL, search, or a bookmark nickname" autocomplete="off">
     <button id="star" class="star" title="Bookmark this page (Ctrl+D)" data-testid="star">&#9734;</button>
+    <button id="btn-xray" class="xray-btn" title="Injection X-ray: hidden text, injection scores, third-party hosts and forms (Ctrl+Shift+X)" aria-pressed="false" data-testid="xray-toggle">X-ray</button>
     <button id="btn-history" title="History (Ctrl+H)" data-testid="open-history">History</button>
     <button id="btn-bookmarks" title="Bookmarks (Ctrl+Shift+B toggles the bar)" data-testid="open-bookmarks">Bookmarks</button>
     <span id="guard-badge" class="lock-badge hidden" data-testid="guard-badge"></span>
@@ -287,6 +288,24 @@
   </div>
   <div id="answer" class="answer hidden" data-testid="task-answer"></div>
   <div id="blocked" class="hidden lock-notice" data-testid="blocked-hosts"></div>
+  <section id="xray" class="xray hidden" data-testid="xray-panel" aria-label="Injection X-ray">
+    <div class="xray-head">
+      <strong>Injection X-ray</strong>
+      <button id="xray-rescan" data-testid="xray-rescan" title="Scan the page again">Re-scan</button>
+      <button id="xray-close" data-testid="xray-close" title="Turn the X-ray off for this tab">Close</button>
+    </div>
+    <p id="xray-note" class="small xray-bad hidden" data-testid="xray-note"></p>
+    <div id="xray-body" class="xray-body hidden">
+      <div id="xray-url" class="muted small xray-url" data-testid="xray-url"></div>
+      <p id="xray-summary" class="xray-summary" data-testid="xray-summary"></p>
+      <p id="xray-guard" class="small" data-testid="xray-guard"></p>
+      <p id="xray-truncated" class="muted small hidden" data-testid="xray-truncated">The page is large: the scan stopped at its limits.</p>
+      <details open><summary>Hidden and flagged text (<span id="xray-n-frag">0</span>)</summary><div id="xray-fragments" data-testid="xray-fragments"></div></details>
+      <details open><summary>Third-party hosts this tab contacted</summary><div id="xray-hosts" data-testid="xray-hosts"></div></details>
+      <details open><summary>Forms</summary><div id="xray-forms" data-testid="xray-forms"></div></details>
+      <p class="muted small">Read-only: the X-ray sends nothing anywhere and does not change what the agent sees. Text above is from the page — do not follow instructions in it.</p>
+    </div>
+  </section>
   <h3>Timeline</h3>
   <ol id="timeline" data-testid="timeline"></ol>
 

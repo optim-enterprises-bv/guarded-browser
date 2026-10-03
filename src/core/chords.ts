@@ -52,7 +52,9 @@ export type ChordAction =
   | 'view.translate'
   // ticket 37: the mail window. One action, so the rail button, the chord and the menu all land on
   // the ONE dispatcher rather than three code paths that can drift.
-  | 'mail.open';
+  | 'mail.open'
+  // AI capabilities item 1: the Injection X-ray of the active tab (read-only)
+  | 'view.xray';
 
 export interface Chord {
   /** lower-case key as reported by Electron's input event ('t', '=', 'f6', 'tab', '1'..'9') */
@@ -103,6 +105,7 @@ export const DEFAULT_CHORDS: Chord[] = [
   { key: 'n', ctrl: true, shift: true, action: 'session.save' },
   { key: 'f9', action: 'tab.stripToggle' },
   { key: 't', ctrl: true, alt: true, action: 'view.translate' },
+  { key: 'x', ctrl: true, shift: true, action: 'view.xray' },
 ];
 
 /** Ctrl+1..9: 1..8 select that tab, 9 selects the last one. */

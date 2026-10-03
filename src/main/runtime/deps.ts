@@ -21,6 +21,7 @@ import type { LocalLists, ReputationChecker, ReputationDb } from '../../core/rep
 import type { SavedSessionStore } from '../../core/saved-sessions';
 import type { SessionStore } from '../../core/session-state';
 import type { StackModel } from '../../core/tab-stacks';
+import type { TabHostLog } from '../../core/xray';
 import type { Theme } from '../../core/theme';
 import type { WorkspaceStore } from '../../core/workspaces';
 import type { ZoomStore } from '../../core/zoom';
@@ -73,6 +74,8 @@ export interface RuntimeDeps {
   faviconCache: Map<string, { mime: string; data: string }>;
   /** the query the user last typed in the find bar, per tab */
   lastFindQuery: Map<number, string>;
+  /** hosts each tab's pages requested (webRequest layer), for the Injection X-ray; in memory only */
+  tabHosts: TabHostLog;
 
   // ---- runtime functions ----
   sendUI(channel: string, payload: unknown): void;
@@ -96,6 +99,8 @@ export interface RuntimeDeps {
   openPanel(url: string): { ok: boolean; error?: string; id?: number };
   runChord(input: { key: string; control?: boolean; meta?: boolean; shift?: boolean; alt?: boolean; type?: string }): boolean;
   runAction(action: string): boolean;
+  /** toggle the Injection X-ray of the active tab (the chord / menu path; read-only) */
+  toggleXray(): void;
   chordTable(): Chord[];
   /** the per-profile mail controller (ticket 37c), created on first use */
   mail(): MailController;

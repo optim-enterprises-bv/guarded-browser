@@ -380,3 +380,25 @@ th, td.trusted, td.untrusted { white-space: nowrap; overflow-wrap: normal; }
 #mail-view .row.outbox { height: auto; min-height: 68px; }
 #mail-view .row .row-actions { display: flex; gap: 4px; }
 #mail-view .row .row-actions button { padding: 0 5px; font-size: 10px; }
+
+/* ---------- Injection X-ray (AI capabilities item 1) ---------- */
+.xray-btn.on { background: #b91c1c; border-color: #b91c1c; color: #fff; }
+.xray { flex: 2 1 0; min-height: 160px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: var(--radius); padding: 6px; overflow: hidden; }
+.xray-head { display: flex; align-items: center; gap: 6px; }
+.xray-head strong { flex: 1; }
+.xray-body { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 4px; min-height: 0; }
+.xray-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xray-summary { margin: 0; font-weight: 600; }
+.xray-body p { margin: 0; }
+.xray-body details > summary { cursor: pointer; font-weight: 600; margin: 4px 0; }
+.xray-row { border-top: 1px solid var(--line); padding: 4px 0; font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.xray-row.inj { background: rgba(220,38,38,.07); }
+.xray-row.bad code { color: var(--danger); }
+.xray-row-head { display: flex; align-items: center; gap: 4px; width: 100%; }
+.xray-chips { display: flex; flex-wrap: wrap; gap: 3px; flex: 1; }
+.xray-chip { font-size: 10px; padding: 0 6px; border-radius: 8px; background: #fdf0d5; color: #7a4d00; white-space: nowrap; }
+.xray-chip.inj { background: #b91c1c; color: #fff; }
+.xray-text { width: 100%; white-space: pre-wrap; word-break: break-word; color: var(--fg); background: var(--bg); border-radius: var(--radius-sm); padding: 3px 5px; max-height: 6.5em; overflow: auto; }
+.xray-reveal { font-size: 11px; padding: 1px 6px; }
+.xray-bad { color: var(--danger); font-weight: 600; }
+.xray-host code, .xray-row code { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }

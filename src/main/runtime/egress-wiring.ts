@@ -119,6 +119,8 @@ function setupEgress(ses: Session) {
     if (!/^(https?|wss?):/i.test(d.url)) return cb({});
     // Reputation first: top-level navigations get an interstitial, subresources are dropped silently.
     const rep = rt.egress.reputationCheck(d.url);
+    // the Injection X-ray's per-tab host list (observation only: it decides nothing)
+    rt.tabHosts.record(d.webContentsId, hostKey(d.url), { mainFrame: d.resourceType === 'mainFrame', blockedBy: rep ? rep.feed ?? 'reputation' : undefined });
     if (rep) {
       const top = d.resourceType === 'mainFrame';
       rt.egress.auditReputation(rep, d.method, d.url, 'webrequest', top ? 'interstitial' : 'blocked subresource');
