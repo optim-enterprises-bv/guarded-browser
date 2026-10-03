@@ -56,6 +56,19 @@ gtk-update-icon-cache -q %{_datadir}/icons/hicolor >/dev/null 2>&1 || :
 %{_datadir}/icons/hicolor/*/apps/guarded-browser.png
 
 %changelog
+* Sat Oct 03 2026 Optim Enterprises B.V. - 0.2.2-1
+- Mail: HTML messages shown in a locked-down view (no JavaScript, own session, sanitized, CSP)
+- Mail: remote content blocked until Load External Content, for that display only
+- Mail: compose, drafts, outbox and SMTP send (implicit TLS 465 or strict STARTTLS 587)
+- Mail: attachments (listed from BODYSTRUCTURE, download on click, Open behind a confirmation,
+  attach and forward on send, inline cid: images)
+- Injection X-ray: hidden text, guard verdicts, third-party hosts and off-site forms per tab
+- AI chat panel: a quarantined, tool-less chat role about the current tab
+- MCP server for local AI programs, and confirmations answerable from the phone (Telegram)
+- Inbox triage by a quarantined role that sees one message's screened fields at a time
+- Recipes (model-free replay of a finished task) and read-only scheduled watchers
+- Side panels: the page starts at the panel's edge, not 220 px past it
+
 * Fri Oct 02 2026 Optim Enterprises B.V. - 0.2.2-1
 - Mail client (IMAP over implicit TLS, encrypted secrets, himalaya import, accounts column)
 - Confirmation dialogs show exactly what is approved; task secrets cannot leave by navigation

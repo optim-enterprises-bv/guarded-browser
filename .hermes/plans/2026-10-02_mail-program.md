@@ -27,6 +27,16 @@ Run before trusting anything below. All commands run in `~/guarded-browser`.
 | version | `package.json` | 0.2.2 at the time of writing (0.2.0 when the plan was written) |
 | e2e (final, ticket 37) | `node scripts/run-e2e.mjs` | **131 passed, 0 failed, 5.3 min, EXIT=0** (125 before + 6 mail specs) |
 | unit (final, ticket 37) | `npx vitest run --reporter=json` | **494/494 pass, 25 files** |
+| unit (2026-10-04, HEAD `0d65f62`) | `GUARDED_SKIP_GUARD_TEST=1 npx vitest run --reporter=json` | **943 passed, 2 skipped (guard model), 0 failed, 43 files** |
+| e2e (2026-10-04, HEAD `0d65f62`) | `npx playwright test --list` | **181 tests in 27 files** listed; not re-run for this update — the last full run on this code was **180 passed, 1 skipped** (`packaged.spec.ts`, needs `npm run dist`) |
+| version (2026-10-04) | `package.json` | still 0.2.2 |
+
+**Gaps found 2026-10-04 while updating the README (code unchanged):** `push()` in
+`src/main/mail/sync.ts` (IDLE with backoff, ticket 36) is implemented and unit-tested but nothing in
+the app calls it, so mail syncs only when the panel opens and on *Check all*. The secret store's
+`'os'` (keyring) mode exists in `src/main/mail/secrets.ts` but the controller only offers passphrase
+or plaintext. XOAUTH2 exists in the IMAP / SMTP code, but there is no UI to add an OAuth account and
+no token refresh is wired.
 
 **Mail tickets built so far:** 34 (store), 35a/35b (secrets, accounts/OAuth), 36 (MIME + IMAP protocol
 + sync engine), 36b (the TLS socket factory). New files: `src/core/mail/{store,mime,imap}.ts`,
@@ -437,7 +447,17 @@ ever ran one. Three fixes:
 - the panel refuses to auto-sync while the secret store is locked, because authenticating with no
   credential fails for a reason that has nothing to do with the server.
 
-### 38 — Compose, drafts, outbox, SMTP send
+### 38 — Compose, drafts, outbox, SMTP send — **BUILT 2026-10-02** (`f1a8082`)
+
+**BUILT (2026-10-02, `f1a8082`).** Compose / reply / reply all / forward / quick reply in the mail
+panel (Ctrl+N inside the panel), drafts autosaved locally, an Outbox with retry (5 automatic
+attempts, 30 s to 30 min backoff; nothing re-sent after a restart until Retry), SMTP over implicit
+TLS (465) or strict STARTTLS (587) with no plaintext fallback, Sent APPEND (skipped on Gmail, which
+files sent mail itself). Send during a task stays queued in the Outbox. Plain text only, as planned.
+**Not built:** signatures (no signature code exists). Tests: `test/unit/mail-{compose,send,smtp}.test.ts`,
+`test/e2e/mail-compose.spec.ts`, fakes in `test/helpers/fake-smtp.ts` and `mail-tls.ts`. Follow-up
+`e629459` (2026-10-02) decodes RFC 2047 subjects and names from the IMAP ENVELOPE.
+
 **Delivers:** compose **inside the mail window's chrome** (never a page — that is what removes the
 whole class of "hostile draft page talks to the store" problems), plain text v1, quoting,
 signature, drafts autosaved to the store, outbox with retry/backoff, Sent reconciliation.
@@ -463,13 +483,32 @@ file import) — which is the mode that survives the product's "no accounts, no 
 Lowest priority; build only if the user wants it.
 **Blocked by:** 36.
 
-### 41 — Attachments
+### 41 — Attachments — **BUILT 2026-10-03** (`6f5d45d`)
+
+**BUILT (2026-10-03, `6f5d45d`).** BODYSTRUCTURE listing with sanitized names and danger warnings,
+download of one part only on a click (50 MB cap, unique name, 0600, the downloads list), Open behind
+a main-process confirmation (an extra tick for executables), Attach… through a main-process file
+dialog with the file copied into the profile's `mail-outbox/` (25 MB total), forward with the
+original's attachments fetched at send time, inline `cid:` images (PNG / JPEG / GIF / WebP only,
+512 KB each, 1 MB total) as `data:` URLs. All refused during a task. Tests:
+`test/unit/mail-attachments.test.ts`, `test/e2e/mail-attachments.spec.ts`.
+
 **Delivers:** attachment list from the BODYSTRUCTURE, **fetch on explicit click only**, size cap,
 streamed through the existing download path (`core/downloads.ts`) with the same warnings, "open
 externally" behind a confirmation.
 **Gate constraints:** rule 2 — never auto-fetched, never auto-opened; a fetch during a task is
 refused.
 **Blocked by:** 36.
+
+### Note — Inbox triage (from the AI capabilities program, item 4) — **BUILT 2026-10-03** (`b685783`)
+
+Not a ticket of this program, but it changes rule "mail never reaches a model" in one typed, narrow
+way: a quarantined, tool-less `triage` role sees ONE message per request — sender display name and
+domain, subject, date, the first 4 KB of the stored text body, attachment names and types — all
+guard-screened, and must answer with a strict six-key JSON record (anything else counts as
+"other"). The planner still has no mail tool; triage is refused during a task; bulk actions
+(archive / move / flag / label) need approval of the exact list. Store schema v6 adds the `triage`
+cache table. Code: `src/core/mail/triage.ts`, `src/main/mail/triage.ts`, `src/renderer/mail-triage.ts`.
 
 ### 42 — Feeds (optional, user's call)
 **Delivers:** RSS/Atom subscriptions stored as messages with `source='feed'` in the same store and

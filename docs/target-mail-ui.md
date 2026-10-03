@@ -1,5 +1,22 @@
 # Target mail UI — measured from the user's Vivaldi Mail screenshot
 
+> **Status (2026-10-04).** Mail shipped (tickets 34-41, commits `40948f4` to `3bc3a37`). The
+> measurements below are kept as measured. Where the shipped mail UI differs from them:
+> - Mail is a **panel in the browser window**, not a separate window: it fills the whole width
+>   beside the rail (at least 720 px; `MAIL_MIN` in `src/renderer/library.ts`), opened from the
+>   rail's envelope or `Ctrl+Shift+M` (ticket 37c).
+> - The tree (206 px) and list (242 px) columns use these measurements (`#m-left`, `#m-list` in
+>   `src/renderer/styles.css`). The tree column is not account-free: **accounts are listed at the
+>   top of the left column, above the folder tree** (`fcb7e38`).
+> - **HTML is rendered**, in a locked-down native view (`src/main/mail/html-view.ts`): JavaScript
+>   off, sandboxed, its own in-memory `mailview-<profileId>` session, a sanitized document
+>   (`src/core/mail/html.ts`) whose CSP allows only `data:` images, every request cancelled, and
+>   navigation prevented (an http(s) link opens a normal tab). *Load External Content* allows
+>   remote images for that display only and is refused during an agent task.
+> - The rail discrepancy recorded below is resolved: `RAIL_WIDTH` is now 51
+>   (`src/renderer/panels.ts`), as measured.
+> - Items 2 and 3 of "Decisions this spec implies for ticket 37" are superseded (marked there).
+
 **Source:** `~/Pictures/Screenshots/261002_11h11m10s_screenshot.png` (3840x2400 PNG, native).
 **Display:** eDP-1 3840x2400 @120 Hz, COSMIC scale **187%** (`cosmic-randr list`) → logical viewport
 **2053x1283**; screenshot px = physical px = logical x 1.87.
@@ -79,6 +96,8 @@ badge**, and the settings gear stays bottom-pinned in the rail.
 
 ## Discrepancy against the shipped code (report before changing)
 
+*Resolved 2026-10-02: the user approved the correction and `RAIL_WIDTH` is 51.*
+
 `src/renderer/panels.ts` declares `RAIL_WIDTH = 27` ("icon rail 51 physical / 27 logical px wide").
 Both the browser screenshot used for `docs/target-ui.md` and today's mail screenshot measure the rail's
 right edge at **physical x = 95 → 50.8 logical**, with the rail icons centred near logical 30. So the
@@ -92,8 +111,11 @@ guessed changes to before. It needs their call.
 
 1. Mail UI = tree column (206) + list column (242) + reading pane, matching the measured widths, with
    the panel column starting at the rail's right edge.
-2. The mail window is a **separate BrowserWindow** (the plan's rule 4: a `PanelId` would put message
+2. *Superseded by ticket 37c (2026-10-02): mail is a full-width panel in the browser window, not a
+   separate window.* The mail window is a **separate BrowserWindow** (the plan's rule 4: a `PanelId` would put message
    text inside the shared panel column by construction). The rail entry point and the
    `Ctrl+Shift+M` chord open it.
-3. Attachment/remote-content behaviour follows the store: HTML is never rendered, the banner says so,
+3. *Superseded (2026-10-02, `58bca90`): HTML is rendered in a locked-down view, and remote images
+   load only after Load External Content, for that display.* Attachment/remote-content behaviour
+   follows the store: HTML is never rendered, the banner says so,
    and `Load External Content` is the only action that would fetch — and it is refused during a task.

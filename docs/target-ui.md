@@ -1,5 +1,20 @@
 # Target UI measurements — Vivaldi parity
 
+> **Status (2026-10-04).** The measurements below are unchanged. The "Deltas against the current
+> app" table at the end describes the app as it was on 2026-09-30 and is superseded:
+> - the left icon rail exists and is **51** logical px wide (`RAIL_WIDTH = 51`,
+>   `src/renderer/panels.ts`; it first shipped as 27 and was corrected to the measurement on
+>   2026-10-02);
+> - the browser panel column is **220** (`PANEL_WIDTH` in `src/renderer/panels.ts`, `SIDE` in
+>   `src/renderer/library.ts`); AI chat, Recipes and Watchers use a wider 400 px column (`CHAT`),
+>   and Mail takes the whole width beside the rail (at least 720 px);
+> - the status bar exists; it is **32** px tall, not the measured 19, on purpose ("32 keeps the hit
+>   targets usable", `STATUS` in `src/renderer/library.ts`);
+> - `PANEL_WIDTH = 440` in `src/main/tabs.ts` is the **right-hand agent panel**, a different panel
+>   from the 220 px left column; the delta row "panel width 440 → 220" conflated the two.
+>   `TOP_BAR = 84` there is now a minimum: the renderer reports the real top inset through
+>   `chrome:insets` and `setInsets` keeps the larger value.
+
 Source: `~/Pictures/Screenshots/260930_08h11m53s_screenshot.png`
 (3840x2400). Measured 2026-09-30 by pixel scanning, not by eye.
 
@@ -23,7 +38,7 @@ Source: `~/Pictures/Screenshots/260930_08h11m53s_screenshot.png`
 
 | band | physical y | logical y | content |
 |---|---|---|---|
-| OS top panel / window title row | 0..62 | 0..33 | COSMIC TopPanel: droplet + `titan-engine: a 35B mixt…` pill, tray icons right |
+| OS top panel / window title row | 0..62 | 0..33 | COSMIC TopPanel: droplet + a window-title pill, tray icons right |
 | tab strip row | ~66..100 | ~35..53 | numbered tabs `1`..`5`; the active tab (2) carries a close ✕ |
 | toolbar row | 92..180 | 49..96 | left: workspace switcher + mail/feeds/translate icons; centre-right: address bar |
 | toolbar icon row | 100..150 (x>2550) | 53..80 | action/extension icons; far right `−` `▢` `✕` window buttons |
